@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+*.bak*
+*backup*
+# local osu! test data / third-party skins - never distributed
+*.osu
+*.osr
+*.mp3
+*.ogg
+*.osk
+*-skin/
