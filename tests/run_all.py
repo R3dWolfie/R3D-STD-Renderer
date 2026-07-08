@@ -15,6 +15,7 @@ MODULES = [
     "tests.test_skin_ini",
     "tests.test_slider_body",
     "tests.test_playfield_pipeline",
+    "tests.test_scene",
 ]
 
 

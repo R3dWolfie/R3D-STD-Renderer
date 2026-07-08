@@ -6,19 +6,32 @@ call this module identically):
     python -m osu_std_renderer REPLAY.osr BEATMAP_DIR -o out.mp4 \
         [--resolution 1920x1080] [--fps 60] [--encoder auto] [--skin DIR] …
 
-SCAFFOLD STATE: parsing (beatmap + replay + skin.ini) is live; the draw /
-record phases are stubs, so a plain render invocation exits with a clear
-error. `--parse-only` runs the full parse pipeline and prints the summary
-(the adapter's progress regex is not consumed by it). Progress lines match
-catch's `rendering… NN%` shape when rendering lands.
+PHASE-1 STATE (the "first moving render" build): the full record path is
+live — procedural textures (render/textures.py), object lifecycle + scene
+(render/scene.py), slider bodies (render/slider_body.py), cursor+trail
+from the replay, fixed-timestep record loop (record/pipeline.py) into the
+single-process ffmpeg pipe (record/encode.py) with offline-mixed music
+(record/audio.py — music only; hitsounds are a later phase). Judgments are
+NOT simulated yet: objects are assumed hit at startTime, so there is no
+HUD/score/misses. Spinners render nothing (logged). Progress lines match
+catch's `rendering… NN%` shape.
+
+Debug extras:
+    --parse-only            parse map+replay+skin, print a summary, exit 0
+    --max-seconds N         stop the render N seconds in (MVP clips)
+    --dump-frames "a,b,c"   write single-frame PNGs at map times a,b,c (ms)
+                            instead of encoding video
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import sys
+import time
 from pathlib import Path
 
 from .beatmap import load_full
+from .beatmap.difficulty import HIT_FADE_OUT
 from .beatmap.objects import Slider, Spinner
 from .replay import parse_replay
 from .settings import StdRenderSettings
@@ -28,6 +41,10 @@ from .skin.skin_ini import load as load_skin_ini
 def _resolution(s: str) -> tuple[int, int]:
     w, h = s.lower().split("x")
     return int(w), int(h)
+
+
+def _ms_list(s: str) -> list[float]:
+    return [float(tok) for tok in s.split(",") if tok.strip()]
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -77,17 +94,144 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--results-seconds", type=float, default=None)
     ap.add_argument("--parse-only", action="store_true",
                     help="parse map+replay+skin, print a summary, exit 0")
+    ap.add_argument("--max-seconds", type=float, default=None,
+                    help="stop the render this many seconds in (debug/MVP)")
+    ap.add_argument("--dump-frames", type=_ms_list, default=None,
+                    metavar="MS,MS,…",
+                    help="write single-frame PNGs at these map times "
+                         "instead of encoding video")
     return ap
 
 
 def find_osu_file(beatmap: Path, replay_md5: str) -> Path:
-    """A direct .osu path, or the (md5-cached) beatmap dir's single .osu."""
+    """A direct .osu path, or the md5-matching .osu inside the beatmap dir
+    (cached sets hold every diff — the replay's beatmap hash picks the
+    right one; first-sorted is only the no-hash fallback)."""
     if beatmap.is_file():
         return beatmap
     candidates = sorted(beatmap.glob("*.osu"))
     if not candidates:
         raise FileNotFoundError(f"no .osu in {beatmap}")
+    if replay_md5:
+        for cand in candidates:
+            if hashlib.md5(cand.read_bytes()).hexdigest() == replay_md5.lower():
+                return cand
     return candidates[0]
+
+
+def _render(args, settings: StdRenderSettings, beatmap, frames,
+            beatmap_dir: Path, skin_info) -> int:
+    """The Phase-1 record path: scene → record loop → ffmpeg."""
+    # GL-touching imports live here so --parse-only works GL-less
+    from .record.audio import AudioError, AudioMixer, decode_to_pcm
+    from .record.encode import FfmpegPipe, build_ffmpeg_cmd, probe_encoder
+    from .record.pipeline import RecordPipeline
+    from .render.gl import SpriteRenderer
+    from .render.playfield import PlayfieldCamera
+    from .render.scene import ScenePlayer, StdScene, log_skips
+    from .render.slider_body import SliderBodyRenderer
+    from .render.textures import TextureBank
+
+    w, h = settings.resolution
+    spr = SpriteRenderer(w, h)
+    bank = TextureBank(spr)
+    bodies = SliderBodyRenderer(spr.ctx, w, h)
+    cam = PlayfieldCamera(w, h)
+
+    combo_colors = [(r / 255.0, g / 255.0, b / 255.0)
+                    for r, g, b in skin_info.combo_colors]
+    scene = StdScene(
+        beatmap, frames, cam, spr, bodies, bank,
+        combo_colors=combo_colors,
+        snaking_in=settings.slider_snaking_in,
+        draw_approach_circles=settings.draw_approach_circles,
+        draw_combo_numbers=settings.draw_combo_numbers,
+        draw_cursor=settings.draw_cursor,
+        cursor_scale=settings.cursor_scale,
+    )
+
+    last_end = max(o.get_end_time() for o in beatmap.hit_objects)
+    end_ms = last_end + HIT_FADE_OUT + settings.fade_out_time * 1000.0
+    if args.max_seconds is not None:
+        end_ms = min(end_ms, args.max_seconds * 1000.0)
+    speed = beatmap.diff.speed
+
+    # --- keyframe dump mode -----------------------------------------------------
+    if args.dump_frames:
+        from PIL import Image
+        out_dir = args.output.parent if args.output else Path.cwd()
+        stem = args.output.stem if args.output else "frame"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        for t in sorted(args.dump_frames):
+            rgb = scene.frame_rgb(t)
+            p = out_dir / f"{stem}_t{int(round(t))}ms.png"
+            Image.fromarray(rgb).save(p)
+            print(f"wrote {p}", file=sys.stderr)
+        log_skips(scene)
+        spr.release()
+        return 0
+
+    if args.output is None:
+        print("error: -o/--output is required to render", file=sys.stderr)
+        return 2
+    output: Path = args.output
+    output.parent.mkdir(parents=True, exist_ok=True)
+
+    # --- offline audio (music only this phase; NO-BASS design) -------------------
+    audio_path = None
+    afile = beatmap.get_audio_file(beatmap_dir)
+    if afile is not None:
+        try:
+            pcm = decode_to_pcm(afile, rate=speed)
+            mixer = AudioMixer(end_ms / speed)
+            vol = ((settings.music_volume / 100.0)
+                   * (settings.general_volume / 100.0))
+            mixer.lay_music(pcm, 0.0, volume=vol)
+            audio_path = output.with_suffix(".audio.wav")
+            mixer.write_wav(audio_path)
+        except AudioError as e:
+            print(f"WARNING: audio mix failed, rendering SILENT video: {e}",
+                  file=sys.stderr)
+            audio_path = None
+    else:
+        print(f"WARNING: beatmap audio '{beatmap.audio}' not found — "
+              "rendering SILENT video", file=sys.stderr)
+
+    encoder = probe_encoder(settings.encoder)
+    cmd = build_ffmpeg_cmd(
+        encoder=encoder, resolution=(w, h), fps=settings.fps,
+        output_path=output, audio_path=audio_path,
+        audio_offset_ms=settings.audio_offset)
+
+    total_wall_ms = end_ms / speed
+    last_pct = [-1]
+
+    def progress(frac: float) -> None:
+        pct = int(frac * 100)
+        if pct != last_pct[0]:
+            last_pct[0] = pct
+            print(f"rendering… {pct}%", file=sys.stderr, flush=True)
+
+    player = ScenePlayer(scene, end_ms, speed=speed)
+    t0 = time.monotonic()
+    try:
+        with FfmpegPipe(cmd) as pipe:
+            n_frames = RecordPipeline(settings.fps, pipe.push,
+                                      progress=progress).run(
+                player, total_ms=total_wall_ms)
+    finally:
+        if audio_path is not None:
+            try:
+                audio_path.unlink()
+            except OSError:
+                pass
+    wall = time.monotonic() - t0
+    log_skips(scene)
+    print(f"done: {n_frames} frames in {wall:.1f}s "
+          f"({n_frames / wall:.1f} fps render, encoder {encoder}) → {output}",
+          file=sys.stderr)
+    spr.release()
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -140,11 +284,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.parse_only:
         return 0
 
-    print("error: the std draw/record phases are not implemented yet — this "
-          "is the scaffold build. Run with --parse-only, or see "
-          "render/slider_body.py (Phase-0 spike) for what lands next.",
-          file=sys.stderr)
-    return 2
+    if meta.mode != 0:
+        print(f"error: replay mode {meta.mode} is not osu!standard",
+              file=sys.stderr)
+        return 2
+    if not frames:
+        print("error: replay has no cursor frames", file=sys.stderr)
+        return 2
+
+    beatmap_dir = args.beatmap if args.beatmap.is_dir() else args.beatmap.parent
+    return _render(args, settings, beatmap, frames, beatmap_dir, skin_info)
 
 
 if __name__ == "__main__":
