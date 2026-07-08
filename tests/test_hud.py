@@ -343,27 +343,25 @@ def _hud_with(skin, **setting_overrides):
                   health=None)
 
 
-def test_hud_component_selection_per_element():
-    """The owner correction: HUD elements pick the LEGACY component only
-    where the skin ships that element's textures, ARGON otherwise — a
-    skin without inputoverlay gets the Argon key counter, without a
-    scorebar the Argon HP bar."""
+def test_hud_component_selection_custom_skin_goes_legacy():
+    """Owner correction 2026-07-08 (supersedes the per-element rule): ANY
+    custom skin selects the LEGACY component set for EVERY HUD element —
+    textures the skin lacks come from the classic lg_* bakes INSIDE the
+    component, never Argon pieces. Skinless renders keep Argon."""
     # skinless → all Argon
     hud = _hud_with(None)
     assert not hud.legacy_score and not hud.legacy_combo
     assert not hud.legacy_health and not hud.legacy_keys
-    # the owner's skin shape: fonts, no scorebar, no inputoverlay
-    hud = _hud_with(_FakeSkin({"score_digits", "combo_digits"}))
+    # a rich skin → all legacy
+    hud = _hud_with(_FakeSkin({"score_digits", "combo_digits",
+                               "scorebar-colour", "inputoverlay-key"}))
     assert hud.legacy_score and hud.legacy_combo
-    assert not hud.legacy_health          # → Argon HP bar
-    assert not hud.legacy_keys            # → Argon key counter (owner!!)
-    # scorebar/inputoverlay pieces flip only their own element
-    hud = _hud_with(_FakeSkin({"scorebar-colour"}))
-    assert hud.legacy_health and not hud.legacy_score
-    hud = _hud_with(_FakeSkin({"inputoverlay-key"}))
-    assert hud.legacy_keys and not hud.legacy_health
-    hud = _hud_with(_FakeSkin({"inputoverlay-background"}))
-    assert hud.legacy_keys
+    assert hud.legacy_health and hud.legacy_keys
+    # an EMPTY skin (zero textures — the legacy-only proof shape) still
+    # selects legacy everywhere: the lg_* bakes carry the whole HUD
+    hud = _hud_with(_FakeSkin(set()))
+    assert hud.legacy_score and hud.legacy_combo
+    assert hud.legacy_health and hud.legacy_keys
 
 
 def test_renderer_default_font_and_ranks_toggle():

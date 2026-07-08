@@ -61,6 +61,21 @@ head hit, the bottom-parked hit-error/UR block, --playfield-borders,
 and RED'S results screen as the outro (render/results.py — --results is
 now IMPLEMENTED, results_screen_time honored, mania-card layout).
 
+SETTINGS-SURFACE PHASE (2026-07 — the full R3D website preset surface):
+every std setting mania_ordr/presets.py exposes now maps to a flag and
+renders (settings.py's table is the authority): nightcore beat overlay,
+mod pills, live pp counter (rosu-pp gradual), hit counter, aim-error
+scatter, strain graph, warning arrows, bg blur/parallax/triangles/video
+(video_bg.py)/flash-to-beat, seizure card + lead-in pre-roll, real
+fade-to-black (video+audio), bloom (+to-beat), the R3D logo splash,
+cursor trail-scale/rainbow/ripples, slider snaking-out + merge, beatmap
+[Colours] vs skin combo colours, and -skip intro trimming.
+StdRenderSettings.from_preset(dict) consumes the bot preset JSON
+wholesale — the future std_renderer.py service adapter calls that.
+Accepted + NO-OP (documented): load_storyboard (deferred subsystem,
+danser fallback), show_scoreboard/scoreboard_avatars (render/
+scoreboard.py holds the osu!API JSON hand-off stub).
+
 Debug extras:
     --parse-only            parse map+replay+skin, print a summary, exit 0
     --start N               start the render N seconds into the map
@@ -110,7 +125,16 @@ def build_parser() -> argparse.ArgumentParser:
                     help="extracted skin dir (resolver-provided .osk)")
     ap.add_argument("--default-skin", type=Path, default=None)
     BA = argparse.BooleanOptionalAction
-    ap.add_argument("--skip-intro", action=BA, default=True)
+    ap.add_argument("--skip-intro", action=BA, default=True,
+                    help="trim a long silent intro: start ~1 s before the "
+                         "first object's approach (danser -skip semantics; "
+                         "only when it saves > 2 s and --start is not given)")
+    ap.add_argument("--lead-in", type=float, default=0.0, metavar="SEC",
+                    help="§4.10 LeadInTime: extra pre-roll hold before the "
+                         "map starts (wall seconds, on top of the intro)")
+    ap.add_argument("--fade-out", type=float, default=None, metavar="SEC",
+                    help="§4.10 FadeOutTime: video+audio fade to black "
+                         "after the last object (wall seconds; default 1.5)")
     ap.add_argument("--results", action=BA, default=True)
     ap.add_argument("--letterbox-breaks", action=BA, default=True)
     ap.add_argument("--approach-circles", action=BA, default=True)
@@ -118,18 +142,44 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--follow-points", action=BA, default=True)
     ap.add_argument("--snaking-in", action=BA, default=True)
     ap.add_argument("--snaking-out", action=BA, default=True)
+    ap.add_argument("--slider-merge", action=BA, default=False,
+                    help="§4.9 SliderMerge: draw all visible slider bodies "
+                         "as ONE union pass (shared borders, no stacking)")
     ap.add_argument("--cursor", action=BA, default=True)
     ap.add_argument("--skin-cursor", action=BA, default=True,
                     help="use the skin's cursor when the skin ships one "
                          "(real osu has no toggle — this is the default; "
                          "--no-skin-cursor forces the procedural cursor)")
     ap.add_argument("--cursor-scale", type=float, default=1.0)
+    ap.add_argument("--cursor-trail-scale", type=float, default=1.0,
+                    help="§4.8 TrailScale: trail sprite size only")
+    ap.add_argument("--cursor-rainbow", action=BA, default=False,
+                    help="§4.8 rainbow: hue-cycle the cursor+trail tint")
+    ap.add_argument("--cursor-ripples", action=BA, default=False,
+                    help="§4.8 ripples: expanding ring per press edge")
     ap.add_argument("--force-long-trail", action=BA, default=False,
                     help="§4.7 ForceLongTrail: long connected skin trail "
                          "even without cursormiddle")
     ap.add_argument("--key-overlay", action=BA, default=True)
-    ap.add_argument("--pp-counter", action=BA, default=True)
+    ap.add_argument("--pp-counter", action=BA, default=False,
+                    help="§4.6 PPCounter: live rosu-pp gradual pp (site "
+                         "default OFF; hides itself if rosu is missing)")
     ap.add_argument("--hit-counter", action=BA, default=False)
+    ap.add_argument("--aim-error-meter", action=BA, default=False,
+                    help="§4.6 AimErrorMeter: cursor-offset-at-click "
+                         "scatter panel (site default OFF)")
+    ap.add_argument("--strain-graph", action=BA, default=False,
+                    help="§4.6 StrainGraph: bottom strain fill graph "
+                         "(rosu strains, else the density proxy)")
+    ap.add_argument("--scoreboard", action=BA, default=True,
+                    help="§4.6 ScoreBoard: ACCEPTED + NO-OP — needs the "
+                         "osu!API leaderboard hand-off (render/"
+                         "scoreboard.py documents the JSON contract)")
+    ap.add_argument("--scoreboard-avatars", action=BA, default=False,
+                    help="ACCEPTED + NO-OP (rides the scoreboard hand-off)")
+    ap.add_argument("--warning-arrows", action=BA, default=True,
+                    help="§4.6 ShowWarningArrows: flashing arrows before "
+                         "gameplay resumes after a break")
     ap.add_argument("--hit-error-meter", action=BA, default=True)
     ap.add_argument("--unstable-rate", action=BA, default=True)
     ap.add_argument("--show-combo", action=BA, default=True)
@@ -164,8 +214,12 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--music-volume", type=int, default=100)
     ap.add_argument("--hitsound-volume", type=int, default=100)
     ap.add_argument("--hitsounds", action=BA, default=True,
-                    help="mix §3.4 hitsounds into the audio track "
-                         "(one-shots at judged hit times, slide/spin loops)")
+                    help="mix §3.4 hitsounds into the audio track — the "
+                         "use_replay_hitsounds preset key (one-shots at "
+                         "judged hit times, slide/spin loops)")
+    ap.add_argument("--nightcore-hitsounds", action=BA, default=False,
+                    help="§4.4 PlayNightcoreSamples: clap each beat + "
+                         "finish each bar downbeat (red timing points)")
     ap.add_argument("--use-skin-hitsounds", action=BA, default=False,
                     help="ignore beatmap-folder samples "
                          "(Audio.IgnoreBeatmapSamples)")
@@ -176,7 +230,39 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--bg-dim-breaks", type=int, default=30)
     ap.add_argument("--bg-dim", type=int, default=None,
                     help="override --bg-dim-game (gameplay dim, 0-100)")
-    ap.add_argument("--bg-blur", type=int, default=0)
+    ap.add_argument("--bg-blur", type=int, default=0,
+                    help="§4.10 Blur 0-10: gaussian on the bg at load")
+    ap.add_argument("--bg-parallax", action=BA, default=False,
+                    help="§4.10 Parallax: bg ~1.02×, sliding opposite "
+                         "the cursor")
+    ap.add_argument("--bg-triangles", action=BA, default=False,
+                    help="the osu triangles deco drifting up over the bg")
+    ap.add_argument("--storyboard", action=BA, default=False,
+                    help="§4.10 LoadStoryboards: ACCEPTED + NO-OP — "
+                         "storyboards are a deferred subsystem (the "
+                         "service keeps its danser fallback for SB maps)")
+    ap.add_argument("--video", action=BA, default=False,
+                    help="§4.10 LoadVideos: play the map's [Events] Video "
+                         "behind gameplay (fail-soft to the bg image)")
+    ap.add_argument("--flash-to-beat", action=BA, default=False,
+                    help="§4.10 FlashToTheBeat: subtle bg brightness "
+                         "pulse on each red-line beat")
+    ap.add_argument("--seizure-warning", action=BA, default=False,
+                    help="§4.10 SeizureWarning: 5 s dark warning card "
+                         "pre-roll at render start")
+    ap.add_argument("--bloom", action=BA, default=False,
+                    help="§4.10 Bloom: post-process bloom on the gameplay "
+                         "layer (bright-pass + blur + additive; GPU cost)")
+    ap.add_argument("--bloom-to-beat", action=BA, default=True,
+                    help="pulse the bloom strength on beats (with --bloom)")
+    ap.add_argument("--logo", action=BA, default=False,
+                    help="show_logo: the R3D 'R' tile splash during the "
+                         "intro, fading out as gameplay starts")
+    ap.add_argument("--combo-colors", choices=("skin", "beatmap"),
+                    default="skin",
+                    help="skin_combo_colors preset key: 'skin' = skin.ini "
+                         "Combo1.. (default); 'beatmap' = the .osu "
+                         "[Colours] when the map defines them")
     ap.add_argument("--results-seconds", type=float, default=None)
     ap.add_argument("--no-replay", action="store_true",
                     help="render without a replay: perfect play at object "
@@ -213,21 +299,25 @@ def find_osu_file(beatmap: Path, replay_md5: str) -> Path:
 
 
 def _render(args, settings: StdRenderSettings, beatmap, frames,
-            beatmap_dir: Path, skin_info, judgments=None, meta=None) -> int:
+            beatmap_dir: Path, skin_info, judgments=None, meta=None,
+            osu_path: Path | None = None) -> int:
     """The Phase-1 record path: scene → record loop → ffmpeg."""
     # GL-touching imports live here so --parse-only works GL-less
     from .record.audio import AudioError, AudioMixer, decode_to_pcm
     from .record.encode import FfmpegPipe, build_ffmpeg_cmd, probe_encoder
     from .record.pipeline import RecordPipeline
-    from .render.background import (build_dim_envelope, cover_size,
-                                    load_background)
+    from .render.background import (blur_background, build_dim_envelope,
+                                    cover_size, load_background)
+    from .render.bloom import BloomPass
+    from .render.effects import SEIZURE_DURATION_S
     from .render.gl import SpriteRenderer
-    from .render.hud import StdHud
+    from .render.hud import StdHud, build_aim_points
     from .render.playfield import PlayfieldCamera
     from .render.scene import ScenePlayer, StdScene
     from .render.skin_elements import SkinElements
     from .render.slider_body import SliderBodyRenderer
     from .render.textures import TextureBank
+    from .render.video_bg import VideoBackground
     from .skin.skin import Skin
 
     w, h = settings.resolution
@@ -251,20 +341,42 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
     if bg_path is not None:
         rgba = load_background(bg_path)
         if rgba is not None:
+            if settings.bg_blur > 0:      # §4.10 Blur — once, at load
+                rgba = blur_background(rgba, settings.bg_blur)
             spr.upload_texture("background", rgba)
             bg_key = "background"
             bg_size = cover_size(w, h, rgba.shape[1], rgba.shape[0])
-            dim_env = build_dim_envelope(
-                settings.bg_dim_intro / 100.0, settings.bg_dim_game / 100.0,
-                settings.bg_dim_breaks / 100.0,
-                [o.get_start_time() for o in beatmap.hit_objects],
-                beatmap.diff.preempt, beatmap.pauses)
         else:
             print(f"WARNING: background '{beatmap.bg}' failed to decode — "
                   "rendering without background", file=sys.stderr)
     elif beatmap.bg:
         print(f"WARNING: background '{beatmap.bg}' not found in the beatmap "
               "dir — rendering without background", file=sys.stderr)
+
+    # dim envelope applies to image AND video backgrounds
+    dim_env = build_dim_envelope(
+        settings.bg_dim_intro / 100.0, settings.bg_dim_game / 100.0,
+        settings.bg_dim_breaks / 100.0,
+        [o.get_start_time() for o in beatmap.hit_objects],
+        beatmap.diff.preempt, beatmap.pauses)
+
+    # --- §4.10 LoadVideos (render/video_bg.py — the mania v2 port) ----------------
+    video_bg = None
+    if settings.load_video:
+        if beatmap.video:
+            vpath = beatmap.get_related_file(beatmap_dir, beatmap.video)
+            if vpath is not None:
+                video_bg = VideoBackground(vpath, width=w, height=h,
+                                           fps=settings.fps,
+                                           start_ms=beatmap.video_offset)
+                print(f"video:  {beatmap.video} from "
+                      f"{beatmap.video_offset} ms", file=sys.stderr)
+            else:
+                print(f"WARNING: video '{beatmap.video}' not found in the "
+                      "beatmap dir — static background", file=sys.stderr)
+        else:
+            print("note: load_video on, but the map has no [Events] Video "
+                  "— static background", file=sys.stderr)
 
     # the HUD needs the judgment stream; --dump-frames without a replay
     # sim just renders HUD-less (the Phase-1 fallback). Component set per
@@ -278,16 +390,58 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
         print(f"health: drain {health.drain_rate * 1000.0:.3f} hp/s "
               f"(target min {health.target_min:.2f}), "
               f"end {health.final_hp * 100.0:.0f}%", file=sys.stderr)
+
+        # --- §4.6 pp counter / strain graph / aim error data (fail-soft) --
+        pp_timeline = strain = None
+        aim_points = None
+        if settings.show_pp_counter:
+            from .render.pp import build_pp_timeline
+            res = build_pp_timeline(osu_path, meta.mods if meta else 0,
+                                    judgments)
+            if res is not None:
+                pp_timeline, ppinfo = res
+                delta = abs(ppinfo.gradual_end - ppinfo.full_calc)
+                ok = "==" if delta < 0.05 else f"Δ{delta:.2f}"
+                print(f"pp:     gradual end {ppinfo.gradual_end:.2f}pp "
+                      f"(full calc {ppinfo.full_calc:.2f}pp {ok}, "
+                      f"{ppinfo.n_points} points)", file=sys.stderr)
+            else:
+                print("pp:     unavailable — counter hidden (rosu-pp "
+                      "missing or the map failed)", file=sys.stderr)
+        if settings.show_strain_graph:
+            from .render.pp import build_strain_series, strain_proxy
+            starts = [o.get_start_time() for o in beatmap.hit_objects]
+            ends = [o.get_end_time() for o in beatmap.hit_objects]
+            strain = build_strain_series(osu_path,
+                                         meta.mods if meta else 0,
+                                         beatmap.diff.speed,
+                                         min(starts) if starts else 0.0)
+            if strain is None:
+                strain = strain_proxy(starts, ends)
+            if strain is not None:
+                print(f"strain: {len(strain.values)} sections via "
+                      f"{strain.source}", file=sys.stderr)
+        if settings.show_aim_error_meter:
+            aim_points = build_aim_points(judgments, frames,
+                                          beatmap.diff.circle_radius)
+
         hud = StdHud(spr, bank, settings, judgments, frames, beatmap,
-                     skin_elems=skin_elems, health=health)
+                     skin_elems=skin_elems, health=health,
+                     mods=meta.mods if meta is not None else 0,
+                     pp_timeline=pp_timeline, aim_points=aim_points,
+                     strain=strain)
         if meta is not None and meta.score > 0:
             # pin the displayed score curve to the .osr's recorded total
             hud.pin_final_score(meta.score)
 
     # --- RED'S results screen (render/results.py; §4.6 ShowResultsScreen) --------
+    # fade_out_time is WALL seconds — × speed for map-ms (the same rate-mod
+    # convention as results_screen_time; the pre-fix code forgot the ×speed)
     last_end = max(o.get_end_time() for o in beatmap.hit_objects)
-    gameplay_end_ms = last_end + HIT_FADE_OUT + settings.fade_out_time * 1000.0
     speed = beatmap.diff.speed
+    fade_start_ms = last_end + HIT_FADE_OUT
+    fade_len_ms = settings.fade_out_time * 1000.0 * speed
+    gameplay_end_ms = fade_start_ms + fade_len_ms
     results = results_start_ms = None
     if settings.show_results and hud is not None and meta is not None:
         from .render.results import ResultsScreen
@@ -308,21 +462,62 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
         results.set_windows(hud.hw.great, hud.hw.ok)
         results_start_ms = gameplay_end_ms
 
+    # §3.5/§4.7 combo colour source: the .osu [Colours] when the preset
+    # says "beatmap" AND the map defines them; the skin.ini set otherwise
+    color_src = skin_info.combo_colors
+    if settings.use_beatmap_colors and beatmap.combo_colors:
+        color_src = beatmap.combo_colors
+        print(f"colors: beatmap [Colours] ({len(color_src)} combo colours)",
+              file=sys.stderr)
     combo_colors = [(r / 255.0, g / 255.0, b / 255.0)
-                    for r, g, b in skin_info.combo_colors]
+                    for r, g, b in color_src]
     track_override = None
     if skin_info.slider_track_override is not None:
         track_override = tuple(c / 255.0
                                for c in skin_info.slider_track_override)
+
+    # --- flow: end/start + the §4.10 pre-roll (lead-in + seizure card) ------------
+    end_ms = gameplay_end_ms
+    if results is not None:
+        # results_screen_time is WALL seconds — scale by the rate mod so
+        # the card holds the same real time under DT/HT
+        end_ms += settings.results_screen_time * 1000.0 * speed
+    if args.max_seconds is not None:
+        end_ms = min(end_ms, args.max_seconds * 1000.0)
+    start_ms = (args.start or 0.0) * 1000.0
+    if start_ms and start_ms >= end_ms:
+        print(f"error: --start {args.start:g}s is at/after the render end "
+              f"({end_ms / 1000.0:.1f}s)", file=sys.stderr)
+        return 2
+    # lead_in_time and the seizure card are WALL seconds of extra pre-roll
+    # BEFORE start_ms: the map clock simply begins earlier — objects
+    # can't spawn, the dim envelope holds the intro level, music is laid
+    # correspondingly later into the wall timeline
+    seizure_ms = (SEIZURE_DURATION_S * 1000.0 * speed
+                  if settings.seizure_warning else 0.0)
+    lead_ms = settings.lead_in_time * 1000.0 * speed
+    render_start_ms = start_ms - seizure_ms - lead_ms
+    if seizure_ms or lead_ms:
+        print(f"lead:   {(seizure_ms + lead_ms) / speed / 1000.0:.1f}s "
+              f"pre-roll (seizure {seizure_ms / speed / 1000.0:.1f}s + "
+              f"lead-in {lead_ms / speed / 1000.0:.1f}s)", file=sys.stderr)
+
+    bloom_pass = BloomPass(spr.ctx, w, h) if settings.bloom else None
+
     scene = StdScene(
         beatmap, frames, cam, spr, bodies, bank,
         combo_colors=combo_colors,
         snaking_in=settings.slider_snaking_in,
+        snaking_out=settings.slider_snaking_out,
+        slider_merge=settings.slider_merge,
         draw_approach_circles=settings.draw_approach_circles,
         draw_combo_numbers=settings.draw_combo_numbers,
         draw_follow_points=settings.draw_follow_points,
         draw_cursor=settings.draw_cursor,
         cursor_scale=settings.cursor_scale,
+        cursor_trail_scale=settings.cursor_trail_scale,
+        cursor_rainbow=settings.cursor_rainbow,
+        cursor_ripples=settings.cursor_ripples,
         force_long_trail=settings.cursor_long_trail,
         judgments=judgments,
         draw_hit_lighting=settings.show_hit_lighting,
@@ -336,24 +531,24 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
         bg_key=bg_key,
         bg_draw_size=bg_size,
         dim_envelope=dim_env,
+        video_bg=video_bg,
+        bg_parallax=settings.bg_parallax,
+        bg_triangles=settings.bg_triangles,
+        flash_to_beat=settings.flash_to_beat,
+        show_warning_arrows=settings.show_warning_arrows,
+        fade_start_ms=fade_start_ms,
+        fade_len_ms=fade_len_ms,
+        logo_start_ms=(render_start_ms + seizure_ms
+                       if settings.show_logo else None),
+        seizure_start_ms=(render_start_ms if settings.seizure_warning
+                          else None),
+        bloom_pass=bloom_pass,
+        bloom_to_beat=settings.bloom_to_beat,
         miss_fall=settings.miss_fall,
         playfield_borders=settings.playfield_borders,
         results=results,
         results_start_ms=results_start_ms,
     )
-
-    end_ms = gameplay_end_ms
-    if results is not None:
-        # results_screen_time is WALL seconds — scale by the rate mod so
-        # the card holds the same real time under DT/HT
-        end_ms += settings.results_screen_time * 1000.0 * speed
-    if args.max_seconds is not None:
-        end_ms = min(end_ms, args.max_seconds * 1000.0)
-    start_ms = (args.start or 0.0) * 1000.0
-    if start_ms and start_ms >= end_ms:
-        print(f"error: --start {args.start:g}s is at/after the render end "
-              f"({end_ms / 1000.0:.1f}s)", file=sys.stderr)
-        return 2
 
     # --- keyframe dump mode -----------------------------------------------------
     if args.dump_frames:
@@ -367,6 +562,8 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
             Image.fromarray(rgb).save(p)
             print(f"wrote {p}", file=sys.stderr)
         _print_hud_final_values(hud, judgments, meta)
+        if video_bg is not None:
+            video_bg.close()
         spr.release()
         return 0
 
@@ -378,7 +575,7 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
 
     # --- offline audio: music bed + §3.4 hitsounds (NO-BASS design) ---------------
     audio_path = None
-    mixer = AudioMixer((end_ms - start_ms) / speed)
+    mixer = AudioMixer((end_ms - render_start_ms) / speed)
     have_audio = False
     afile = beatmap.get_audio_file(beatmap_dir)
     if afile is not None:
@@ -386,10 +583,10 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
             pcm = decode_to_pcm(afile, rate=speed)
             vol = ((settings.music_volume / 100.0)
                    * (settings.general_volume / 100.0))
-            # --start window: map-time start_ms lands at wall t=0, so the
-            # (already rate-adjusted) music is laid start_ms/speed early —
-            # mix_at clips the negative head
-            mixer.lay_music(pcm, -start_ms / speed, volume=vol)
+            # the map-time render start lands at wall t=0: the (already
+            # rate-adjusted) music is laid render_start/speed early —
+            # mix_at clips a negative head; a pre-roll delays it instead
+            mixer.lay_music(pcm, -render_start_ms / speed, volume=vol)
             have_audio = True
         except AudioError as e:
             print(f"WARNING: music decode failed, mixing without the music "
@@ -398,24 +595,32 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
         print(f"WARNING: beatmap audio '{beatmap.audio}' not found — "
               "mixing without the music bed", file=sys.stderr)
 
-    # §3.4 hitsounds: one-shots at judged hit times + slide/spin loops,
-    # resolved BEATMAP(custom index) → skin chain → synthesized defaults
-    if (args.hitsounds and judgments is not None
-            and settings.hitsound_volume > 0 and settings.general_volume > 0):
-        from .record.hitsounds import (SampleBank, collect_hitsound_events,
-                                       mix_hitsounds)
+    # sample bank shared by judged hitsounds + the nightcore overlay
+    sample_bank = None
+    if settings.hitsound_volume > 0 and settings.general_volume > 0 and (
+            (settings.use_replay_hitsounds and judgments is not None)
+            or settings.nightcore_hitsounds):
+        from .record.hitsounds import SampleBank
         from .skin.skin import Skin as SampleSkin
         sample_skin = SampleSkin(skin_dir=settings.skin_dir,
                                  fallback_dir=settings.default_skin_dir)
-        bank = SampleBank(skin=sample_skin, beatmap_dir=beatmap_dir,
-                          use_beatmap_samples=not settings.use_skin_hitsounds)
+        sample_bank = SampleBank(
+            skin=sample_skin, beatmap_dir=beatmap_dir,
+            use_beatmap_samples=not settings.use_skin_hitsounds)
+    hs_gain = ((settings.hitsound_volume / 100.0)
+               * (settings.general_volume / 100.0))
+
+    # §3.4 hitsounds: one-shots at judged hit times + slide/spin loops,
+    # resolved BEATMAP(custom index) → skin chain → synthesized defaults
+    if (settings.use_replay_hitsounds and judgments is not None
+            and sample_bank is not None):
+        from .record.hitsounds import collect_hitsound_events, mix_hitsounds
         oneshots, loops = collect_hitsound_events(
             beatmap, judgments, layered=skin_info.layered_hit_sounds)
-        gain = ((settings.hitsound_volume / 100.0)
-                * (settings.general_volume / 100.0))
-        stats = mix_hitsounds(mixer, bank, oneshots, loops, speed=speed,
-                              start_ms=start_ms, gain=gain)
-        srcs = bank.source_counts()
+        stats = mix_hitsounds(mixer, sample_bank, oneshots, loops,
+                              speed=speed, start_ms=render_start_ms,
+                              gain=hs_gain)
+        srcs = sample_bank.source_counts()
         print(f"hitsounds: {stats.oneshots} one-shots, "
               f"{stats.loop_ms / 1000.0:.1f}s loops | samples: "
               f"beatmap {srcs['beatmap']}, skin {srcs['skin']}, "
@@ -423,6 +628,31 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
               f"{stats.peak_before:.2f}→{stats.peak_after:.2f}",
               file=sys.stderr)
         have_audio = have_audio or stats.oneshots > 0 or stats.loop_ms > 0
+
+    # §4.4 nightcore beat overlay: clap each beat + finish each downbeat
+    # across [render start, last object] — the mania _layer_nightcore
+    # mirror (works with or without the judged hitsound track)
+    if settings.nightcore_hitsounds and sample_bank is not None:
+        from .record.hitsounds import mix_nightcore, nightcore_beats
+        beats = nightcore_beats(beatmap.timings,
+                                max(render_start_ms, 0.0), last_end)
+        laid = mix_nightcore(mixer, sample_bank, beats, speed=speed,
+                             start_ms=render_start_ms, gain=hs_gain)
+        downs = sum(1 for _, d in beats if d)
+        print(f"nightcore: {laid} beats laid ({downs} downbeats)",
+              file=sys.stderr)
+        have_audio = have_audio or laid > 0
+
+    # §4.10 pre-roll audio: the seizure card / lead-in region is SILENT
+    # (danser LeadInTime semantics) — for a map-start render the region
+    # is silent anyway; this also covers --start clips with a pre-roll
+    if have_audio and (seizure_ms or lead_ms):
+        mixer.silence_before((start_ms - render_start_ms) / speed)
+
+    # §4.10 FadeOutTime, audio side: the track fades with the video
+    if have_audio and fade_len_ms > 0.0:
+        mixer.fade_out((fade_start_ms - render_start_ms) / speed,
+                       (gameplay_end_ms - render_start_ms) / speed)
 
     if have_audio:
         audio_path = output.with_suffix(".audio.wav")
@@ -437,7 +667,7 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
         output_path=output, audio_path=audio_path,
         audio_offset_ms=settings.audio_offset)
 
-    total_wall_ms = (end_ms - start_ms) / speed
+    total_wall_ms = (end_ms - render_start_ms) / speed
     last_pct = [-1]
 
     def progress(frac: float) -> None:
@@ -446,7 +676,8 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
             last_pct[0] = pct
             print(f"rendering… {pct}%", file=sys.stderr, flush=True)
 
-    player = ScenePlayer(scene, end_ms, speed=speed, start_ms=start_ms)
+    player = ScenePlayer(scene, end_ms, speed=speed,
+                         start_ms=render_start_ms)
     t0 = time.monotonic()
     try:
         with FfmpegPipe(cmd) as pipe:
@@ -454,6 +685,8 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
                                       progress=progress).run(
                 player, total_ms=total_wall_ms)
     finally:
+        if video_bg is not None:
+            video_bg.close()
         if audio_path is not None:
             try:
                 audio_path.unlink()
@@ -510,16 +743,26 @@ def main(argv: list[str] | None = None) -> int:
         resolution=args.resolution, fps=args.fps, encoder=args.encoder,
         encoder_device=args.encoder_device, skin_dir=args.skin,
         default_skin_dir=args.default_skin, skip_intro=args.skip_intro,
+        lead_in_time=max(args.lead_in, 0.0),
         show_results=args.results, letterbox_breaks=args.letterbox_breaks,
         draw_approach_circles=args.approach_circles,
         draw_combo_numbers=args.combo_numbers,
         draw_follow_points=args.follow_points,
         slider_snaking_in=args.snaking_in, slider_snaking_out=args.snaking_out,
+        slider_merge=args.slider_merge,
         draw_cursor=args.cursor, use_skin_cursor=args.skin_cursor,
         cursor_scale=args.cursor_scale,
+        cursor_trail_scale=args.cursor_trail_scale,
+        cursor_rainbow=args.cursor_rainbow,
+        cursor_ripples=args.cursor_ripples,
         cursor_long_trail=args.force_long_trail,
         show_key_overlay=args.key_overlay,
         show_pp_counter=args.pp_counter, show_hit_counter=args.hit_counter,
+        show_aim_error_meter=args.aim_error_meter,
+        show_strain_graph=args.strain_graph,
+        show_scoreboard=args.scoreboard,
+        scoreboard_avatars=args.scoreboard_avatars,
+        show_warning_arrows=args.warning_arrows,
         show_hit_error_meter=args.hit_error_meter,
         show_unstable_rate=args.unstable_rate, show_combo=args.show_combo,
         show_score=args.show_score, show_hp_bar=args.show_hp,
@@ -533,15 +776,31 @@ def main(argv: list[str] | None = None) -> int:
         playfield_borders=args.playfield_borders,
         watermark_text=args.watermark, music_volume=args.music_volume,
         hitsound_volume=args.hitsound_volume,
+        use_replay_hitsounds=args.hitsounds,
+        nightcore_hitsounds=args.nightcore_hitsounds,
         use_skin_hitsounds=args.use_skin_hitsounds,
         general_volume=args.general_volume, audio_offset=args.audio_offset,
         bg_dim_intro=args.bg_dim_intro,
         bg_dim_game=(args.bg_dim if args.bg_dim is not None
                      else args.bg_dim_game),
         bg_dim_breaks=args.bg_dim_breaks, bg_blur=args.bg_blur,
+        bg_parallax=args.bg_parallax, bg_triangles=args.bg_triangles,
+        load_storyboard=args.storyboard, load_video=args.video,
+        flash_to_beat=args.flash_to_beat,
+        seizure_warning=args.seizure_warning,
+        bloom=args.bloom, bloom_to_beat=args.bloom_to_beat,
+        show_logo=args.logo,
+        use_beatmap_colors=(args.combo_colors == "beatmap"),
+        skin_combo_colors=(args.combo_colors != "beatmap"),
     )
+    if args.fade_out is not None:
+        settings.fade_out_time = max(args.fade_out, 0.0)
     if args.results_seconds is not None:
         settings.results_screen_time = args.results_seconds
+    if settings.load_storyboard:
+        print("note: load_storyboard is accepted but NOT rendered "
+              "(deferred subsystem — the service keeps its danser "
+              "fallback for storyboard maps)", file=sys.stderr)
 
     if args.no_replay:
         frames, meta = [], None
@@ -591,9 +850,21 @@ def main(argv: list[str] | None = None) -> int:
         print("error: replay has no cursor frames", file=sys.stderr)
         return 2
 
+    # §4.15 -skip semantics: trim a long SILENT intro — start ~1 s before
+    # the first object's approach begins, but only when that actually
+    # saves more than 2 s (short intros render untouched) and no explicit
+    # --start was given. --dump-frames uses absolute map times either way.
+    if args.skip_intro and args.start is None and beatmap.hit_objects:
+        first_t = min(o.get_start_time() for o in beatmap.hit_objects)
+        t0 = (first_t - beatmap.diff.preempt - 1000.0) / 1000.0
+        if t0 > 2.0:
+            args.start = t0
+            print(f"skip:   intro trimmed to {t0:.1f}s (first object at "
+                  f"{first_t / 1000.0:.1f}s)", file=sys.stderr)
+
     beatmap_dir = args.beatmap if args.beatmap.is_dir() else args.beatmap.parent
     return _render(args, settings, beatmap, frames, beatmap_dir, skin_info,
-                   judgments=judgments, meta=meta)
+                   judgments=judgments, meta=meta, osu_path=osu_path)
 
 
 if __name__ == "__main__":

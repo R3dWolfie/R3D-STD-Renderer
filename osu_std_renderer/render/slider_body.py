@@ -56,8 +56,14 @@ renderer's sliderrenderer and lazer's SmoothPath both do):
   HR/Mirror: flip the PATH VERTICES (Y=384-Y) before mapping to screen —
   §2.5 sliderrenderer.NewBody(multiCurve, vFlip, hFlip, CircleRadius).
 
-  Deliberately NOT ported (documented for later phases): the reference's
-  scene-level gl_FragDepth trick used only for SliderMerge; per-beat
+  SliderMerge (§4.9, settings-surface phase): build_merged() feeds EVERY
+  visible body's segments+caps into ONE distance pass — the depth trick
+  already computes the union of swept circles, so danser's merged look
+  (shared borders, no stacking) falls out for free; the reference's
+  scene-level gl_FragDepth variant stays un-ported. One style per merged
+  pass (danser's merge also unifies the body colour).
+
+  Deliberately NOT ported (documented for later phases): per-beat
   cutoff scaling (flash-to-beat); border inner/outer gradient offset
   (defaults produce a flat border anyway — §4.9 CustomGradientOffset 0).
 
@@ -395,35 +401,68 @@ class SliderBodyRenderer:
         path_points: flattened path in SCREEN px (StdSliderPath.path mapped
         through PlayfieldCamera.to_screen; HR flip applied to the osu-space
         vertices beforehand). radius_px = CircleRadius · camera scale.
-        snake = (start, end) fractions of path length (§4.9 Snaking).
+        snake = (start, end) fractions of path length (§4.9 Snaking.In/Out —
+        the scene's snake_range feeds both edges).
+        """
+        return self.build_merged([(path_points, snake)], radius_px, style)
+
+    def build_merged(self,
+                     items: list[tuple[list[tuple[float, float]],
+                                       tuple[float, float]]],
+                     radius_px: float,
+                     style: BodyStyle | None = None) -> BodyTexture:
+        """§4.9 SliderMerge: render EVERY visible body in ONE distance
+        pass — the depth trick already computes the union of swept
+        circles, so feeding all paths' segments+caps into the same pass
+        yields danser's merged look for free: overlapping bodies share
+        one border, nothing double-darkens. One shade pass, one style
+        (danser's merge also unifies the body colour — the caller picks
+        it; per-body combo tints can't survive a single distance field).
+
+        items: [(path_points_screen_px, (snake_start, snake_end))].
         """
         style = style or BodyStyle()
-        pts = sub_path(list(path_points), snake[0], snake[1])
-        if not pts or radius_px <= 0.0:
+        arrs: list[np.ndarray] = []
+        for path_points, snake in items:
+            pts = sub_path(list(path_points), snake[0], snake[1])
+            if pts:
+                arrs.append(np.asarray(pts, dtype="f4").reshape(-1, 2))
+        if not arrs or radius_px <= 0.0:
             return BodyTexture(self._body_tex, (0, 0, 0, 0), radius_px, empty=True)
 
-        arr = np.asarray(pts, dtype="f4").reshape(-1, 2)
-        # AABB (for the shade/composite quads), padded 2px beyond the rim
+        # AABB over all paths (for the shade/composite quads), padded 2px
         pad = radius_px + 2.0
-        x0 = max(0.0, float(arr[:, 0].min()) - pad)
-        y0 = max(0.0, float(arr[:, 1].min()) - pad)
-        x1 = min(float(self.width), float(arr[:, 0].max()) + pad)
-        y1 = min(float(self.height), float(arr[:, 1].max()) + pad)
+        x0 = max(0.0, min(float(a[:, 0].min()) for a in arrs) - pad)
+        y0 = max(0.0, min(float(a[:, 1].min()) for a in arrs) - pad)
+        x1 = min(float(self.width),
+                 max(float(a[:, 0].max()) for a in arrs) + pad)
+        y1 = min(float(self.height),
+                 max(float(a[:, 1].max()) for a in arrs) + pad)
         if x1 <= x0 or y1 <= y0:
             return BodyTexture(self._body_tex, (0, 0, 0, 0), radius_px, empty=True)
 
-        # instances: segments (skip degenerate) + a cap at every vertex
-        deltas = arr[1:] - arr[:-1]
-        lens = np.hypot(deltas[:, 0], deltas[:, 1]).astype("f4")
-        keep = lens > 1e-4
-        n_seg = int(keep.sum())
+        # instances: per-path segments (never across path joins) + a cap
+        # at every vertex of every path
+        segs: list[np.ndarray] = []
+        for arr in arrs:
+            if len(arr) < 2:
+                continue
+            deltas = arr[1:] - arr[:-1]
+            lens = np.hypot(deltas[:, 0], deltas[:, 1]).astype("f4")
+            keep = lens > 1e-4
+            n = int(keep.sum())
+            if n:
+                seg = np.empty((n, 5), dtype="f4")
+                seg[:, 0:2] = arr[:-1][keep]
+                seg[:, 2] = lens[keep]
+                seg[:, 3:5] = deltas[keep] / lens[keep, None]
+                segs.append(seg)
+        n_seg = sum(len(s) for s in segs)
         if n_seg:
-            seg = np.empty((n_seg, 5), dtype="f4")
-            seg[:, 0:2] = arr[:-1][keep]
-            seg[:, 2] = lens[keep]
-            seg[:, 3:5] = deltas[keep] / lens[keep, None]
-            self._write_instances(self._seg_inst, seg.tobytes())
-        self._write_instances(self._cap_inst, arr.tobytes())
+            self._write_instances(self._seg_inst,
+                                  np.concatenate(segs).tobytes())
+        caps = np.concatenate(arrs)
+        self._write_instances(self._cap_inst, caps.tobytes())
 
         ctx = self.ctx
         blend_was_on = True  # gl.py's SpriteRenderer keeps BLEND enabled
@@ -438,7 +477,7 @@ class SliderBodyRenderer:
         self._cap_prog["u_radius"].value = radius_px
         if n_seg:
             self._seg_vao.render(moderngl.TRIANGLE_STRIP, instances=n_seg)
-        self._cap_vao.render(moderngl.TRIANGLES, instances=len(arr))
+        self._cap_vao.render(moderngl.TRIANGLES, instances=len(caps))
         ctx.disable(moderngl.DEPTH_TEST)
 
         # --- shade pass ---------------------------------------------------------

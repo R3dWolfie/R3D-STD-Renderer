@@ -86,6 +86,39 @@ class AudioMixer:
             start = 0
         self.buf[start:end] += sample[:end - start] * volume
 
+    def silence_before(self, t_ms: float, fade_ms: float = 150.0) -> None:
+        """§4.10 LeadInTime/SeizureWarning, audio side: the pre-roll is
+        SILENT — zero everything before wall t_ms, with a short fade-in
+        ending AT t_ms so a mid-track entry doesn't click. (For a
+        map-start render the region is silent anyway — no-op.)"""
+        if t_ms <= 0:
+            return
+        i1 = min(int(t_ms / 1000.0 * SAMPLE_RATE), len(self.buf))
+        i0 = max(i1 - int(fade_ms / 1000.0 * SAMPLE_RATE), 0)
+        self.buf[:i0] = 0.0
+        if i1 > i0:
+            ramp = np.linspace(0.0, 1.0, i1 - i0, endpoint=False,
+                               dtype=np.float32)
+            self.buf[i0:i1] *= ramp[:, None]
+
+    def fade_out(self, t0_ms: float, t1_ms: float) -> None:
+        """§4.10 FadeOutTime, audio side: linear gain 1→0 across
+        [t0_ms, t1_ms) WALL time, silence after — the track fades with the
+        video's fade-to-black (the results screen then sits on silence,
+        matching 'fade out … before results'). No-op on a degenerate
+        window."""
+        if t1_ms <= t0_ms:
+            return
+        i0 = max(int(t0_ms / 1000.0 * SAMPLE_RATE), 0)
+        i1 = min(int(t1_ms / 1000.0 * SAMPLE_RATE), len(self.buf))
+        if i0 >= len(self.buf):
+            return
+        if i1 > i0:
+            ramp = np.linspace(1.0, 0.0, i1 - i0, endpoint=False,
+                               dtype=np.float32)
+            self.buf[i0:i1] *= ramp[:, None]
+        self.buf[i1:] = 0.0
+
     def write_wav(self, path: Path) -> Path:
         """Write float32 wav (ffmpeg reads it natively; no clipping — the
         encode step normalizes via loudnorm)."""

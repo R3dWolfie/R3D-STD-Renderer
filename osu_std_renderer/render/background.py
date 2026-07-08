@@ -29,10 +29,26 @@ bg_dim_intro/game/breaks, 0-100%)
 
   Pure math (DimEnvelope) so tests need no GL.
 
-VIDEO HOOK — load_video_background() is a STUB this phase: §4.10
-LoadVideos / the R3D `load_video` preset key is accepted upstream but
-backgrounds are still images only (danser handles video maps until the
-video phase lands here).
+BLUR (§4.10 Playfield.Background.Blur; R3D `bg_blur` 0-10)
+  Applied ONCE at texture load (blur_background): a PIL gaussian whose
+  radius scales with the image size so preset value N looks the same at
+  any source resolution (N × 2.2 px per 1080 rows). 0 = untouched.
+
+PARALLAX (§4.10 Background.Parallax; R3D `bg_parallax`)
+  The bg draws PARALLAX_SCALE (~1.02×) oversized and slides OPPOSITE the
+  cursor (danser/stable behaviour): parallax_offset() maps the cursor's
+  normalized frame position [-1, 1] to a pixel shift that never exceeds
+  the oversize slack, so no edge is ever exposed.
+
+FLASH TO BEAT (§4.10 Background.FlashToTheBeat; R3D `flash_to_beat`)
+  flash_factor() lifts the bg brightness on each red-line beat (subtle:
+  +FLASH_AMOUNT at the beat, cubic decay across the beat), clamped so a
+  0-dim background never overdrives past full white.
+
+VIDEO (§4.10 LoadVideos; R3D `load_video`) — implemented in
+render/video_bg.py (the mania v2 port); the scene draws the decoded frame
+through this module's same cover/dim/parallax/flash path and falls back
+to the image (then the dark void) fail-soft.
 """
 from __future__ import annotations
 
@@ -41,9 +57,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageFilter
 
 GLIDE_MS = 500.0     # dim glide length (~danser's dim glider feel)
+BLUR_PX_PER_STEP = 2.2       # gaussian radius per preset step @1080 rows
+PARALLAX_SCALE = 1.02        # bg oversize (task spec ~1.01-1.02×)
+FLASH_AMOUNT = 0.14          # flash-to-beat brightness lift at the beat
 
 
 def smoothstep(p: float) -> float:
@@ -139,7 +158,42 @@ def load_background(path: Path) -> np.ndarray | None:
         return None
 
 
-def load_video_background(*_args, **_kwargs) -> None:
-    """§4.10 LoadVideos hook — STUB. Background video is a later phase;
-    the R3D `load_video` preset key is accepted and ignored until then."""
-    return None
+def blur_background(rgba: np.ndarray, blur: int) -> np.ndarray:
+    """§4.10 Blur: gaussian-blur the loaded bg ONCE (R3D `bg_blur` 0-10).
+    Radius scales with the image height so a preset value reads the same
+    at any source resolution. Fail-soft: any PIL failure returns the
+    original array."""
+    b = max(0, min(10, int(blur)))
+    if b == 0:
+        return rgba
+    try:
+        radius = b * BLUR_PX_PER_STEP * (rgba.shape[0] / 1080.0)
+        img = Image.fromarray(rgba, "RGBA").filter(
+            ImageFilter.GaussianBlur(radius=max(radius, 0.5)))
+        return np.asarray(img, dtype=np.uint8).copy()
+    except Exception:  # noqa: BLE001 — blur is garnish, never fatal
+        return rgba
+
+
+def parallax_offset(nx: float, ny: float, draw_w: float, draw_h: float,
+                    frame_w: float, frame_h: float,
+                    scale: float = PARALLAX_SCALE) -> tuple[float, float]:
+    """§4.10 Parallax: pixel shift of the (scale×-oversized) bg for a
+    cursor at normalized frame position (nx, ny) ∈ [-1, 1]² — the bg
+    slides OPPOSITE the cursor, clamped to the oversize slack so no edge
+    is ever exposed (slack = the smaller of the oversize margin and the
+    cover overflow)."""
+    nx = max(-1.0, min(1.0, nx))
+    ny = max(-1.0, min(1.0, ny))
+    slack_x = max((draw_w * scale - frame_w) / 2.0, 0.0)
+    slack_y = max((draw_h * scale - frame_h) / 2.0, 0.0)
+    slack = min(slack_x, slack_y)   # uniform feel on both axes
+    return (-nx * slack, -ny * slack)
+
+
+def flash_factor(beat_phase: float, amount: float = FLASH_AMOUNT) -> float:
+    """§4.10 FlashToTheBeat: brightness multiplier at `beat_phase` ∈ [0,1)
+    inside the current beat — +amount at the beat decaying cubically to 1
+    by the next one. Subtle by design."""
+    p = max(0.0, min(1.0, beat_phase))
+    return 1.0 + amount * (1.0 - p) ** 3

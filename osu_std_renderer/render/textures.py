@@ -202,8 +202,9 @@ def bake_digits(height: int = DIGIT_HEIGHT) -> dict[str, np.ndarray]:
 # --- HUD textures (render/hud.py) ------------------------------------------------
 
 # full uppercase set: HUD labels (ACCURACY/COMBO), key names, grades,
-# SPIN!/CLEAR!/RPM, UR, time readouts ("-0:00")
-HUD_CHARSET = "0123456789.%x,:-!ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+# SPIN!/CLEAR!/RPM, UR, time readouts ("-0:00") — plus lowercase 'p'
+# for the pp counter's "pp" suffix
+HUD_CHARSET = "0123456789.%x,:-!ABCDEFGHIJKLMNOPQRSTUVWXYZp"
 PIE_STEPS = 48          # quantized progress-pie fill masks
 PIE_SIZE = 96
 KEY_SQUARE_SIZE = 128
@@ -506,6 +507,54 @@ def bake_tri_down(size: int = 64) -> np.ndarray:
     return np.asarray(img, dtype=np.uint8).copy()
 
 
+def bake_triangle_up(size: int = 128) -> np.ndarray:
+    """Upward-pointing equilateral AA triangle, white — the bg_triangles
+    deco sprite (tinted grey per triangle, alpha'd subtle at draw)."""
+    s4 = size * 4
+    h = math.sqrt(3.0) / 2.0        # equilateral height/side
+    pad = 6
+    top = (s4 / 2.0, pad + s4 * (1 - h) / 2.0)
+    by = pad + s4 * (1 + h) / 2.0 - 2 * pad
+    img = Image.new("RGBA", (s4, s4), (0, 0, 0, 0))
+    ImageDraw.Draw(img).polygon(
+        [top, (pad, by), (s4 - pad, by)], fill=(255, 255, 255, 255))
+    img = img.resize((size, size), Image.LANCZOS)
+    return np.asarray(img, dtype=np.uint8).copy()
+
+
+# the R3D logo tile — versus_splash.py's look (red rounded tile, heavy
+# white R), baked procedurally so the engine stays asset-free
+LOGO_TILE_RED = (216, 44, 54)
+LOGO_TILE_RADIUS_FRAC = 0.18
+
+
+def bake_logo_tile(size: int = 256) -> np.ndarray:
+    """The R3D 'R' tile (show_logo intro splash): rounded red square with
+    a heavy white R centred like the site logo (versus_splash.py measures
+    the inner R at ~0.20..0.79 of the tile — matched here)."""
+    d = _rounded_rect_alpha(size, size, size * LOGO_TILE_RADIUS_FRAC)
+    tile = np.clip(-d / _AA_PX, 0.0, 1.0)
+    rgba = np.zeros((size, size, 4), dtype=np.uint8)
+    rgba[..., 0] = LOGO_TILE_RED[0]
+    rgba[..., 1] = LOGO_TILE_RED[1]
+    rgba[..., 2] = LOGO_TILE_RED[2]
+    rgba[..., 3] = np.round(tile * 255.0).astype(np.uint8)
+    img = Image.fromarray(rgba, "RGBA")
+    drw = ImageDraw.Draw(img)
+    # inner R spans ~0.59 of the tile height, centred (the splash's
+    # measured 0.203..0.793 band)
+    font = _load_font(int(size * 0.66))
+    try:
+        box = font.getbbox("R")
+    except AttributeError:
+        w, h = font.getsize("R")  # type: ignore[attr-defined]
+        box = (0, 0, w, h)
+    rw, rh = box[2] - box[0], box[3] - box[1]
+    drw.text(((size - rw) / 2.0 - box[0], (size - rh) / 2.0 - box[1]),
+             "R", font=font, fill=(255, 255, 255, 255))
+    return np.asarray(img, dtype=np.uint8).copy()
+
+
 class TextureBank:
     """Bakes the procedural set and uploads it into a SpriteRenderer.
 
@@ -541,6 +590,9 @@ class TextureBank:
         renderer.upload_texture("vignette", bake_vignette())
         renderer.upload_texture("pie_ring", bake_ring(PIE_SIZE, 0.10))
         renderer.upload_texture("tri_down", bake_tri_down())
+        # settings-surface additions: bg triangles deco + the R3D logo tile
+        renderer.upload_texture("triangle_up", bake_triangle_up())
+        renderer.upload_texture("logo_tile", bake_logo_tile())
         for i in range(PIE_STEPS):
             renderer.upload_texture(f"pie_{i:02d}", bake_pie(i / PIE_STEPS))
 

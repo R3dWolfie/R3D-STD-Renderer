@@ -37,6 +37,8 @@ class Beatmap:
     file: str = ""
     audio: str = ""
     bg: str = ""
+    video: str = ""                 # [Events] Video,"file" (§4.10 LoadVideos)
+    video_offset: int = 0           # Video start offset ms (may be negative)
     md5: str = ""
     set_id: int = -1
     id: int = -1

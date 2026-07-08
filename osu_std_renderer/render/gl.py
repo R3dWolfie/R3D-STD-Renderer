@@ -97,8 +97,11 @@ class SpriteRenderer:
         )
         self.prog["u_screen"].value = (float(width), float(height))
 
-        rb = self.ctx.renderbuffer((width, height))
-        self.fbo = self.ctx.framebuffer(color_attachments=[rb])
+        # texture-backed colour attachment (was a renderbuffer): the bloom
+        # post-pass samples the scene, and fbo.read() works the same
+        self.color_tex = self.ctx.texture((width, height), 4)
+        self.color_tex.filter = (moderngl.LINEAR, moderngl.LINEAR)
+        self.fbo = self.ctx.framebuffer(color_attachments=[self.color_tex])
         self._textures: dict[str, "moderngl.Texture"] = {}
         self._white = self._make_texture_rgba(np.full((1, 1, 4), 255, dtype="u1"))
 

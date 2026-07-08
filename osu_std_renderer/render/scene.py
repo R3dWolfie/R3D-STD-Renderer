@@ -103,6 +103,25 @@ non-miss judgment popup at its popup position, 400 ms lazer-ish
 fade+expand; procedural fallback is the radial `glow` texture;
 --no-hit-lighting (Gameplay.ShowHitLighting; R3D preset default ON).
 
+SETTINGS-SURFACE PHASE (2026-07 — render/effects.py holds the pure math,
+settings.py the preset mapping):
+  * background: video (video_bg.py, fail-soft to image), blur-at-load,
+    parallax (~1.02× sliding opposite the cursor), flash-to-beat
+    brightness pulse, drifting triangles deco (dim-matched);
+  * flow: real fade-to-black after the last object (audio fades with it
+    in the CLI), seizure-warning card + lead-in pre-roll, the R3D "R"
+    logo splash fading out exactly at the first approach;
+  * §4.9: snaking OUT (snake_range — final span only, lazer semantics;
+    the end cap rides the retracting tip, danser-style) and SliderMerge
+    (_draw_merged_bodies → slider_body.build_merged: every visible body
+    in ONE distance pass, unified colour = the oldest visible slider's,
+    max alpha — accepted approximations, danser does the same);
+  * cursor: trail scale, rainbow hue-cycle (procedural + skin tint),
+    press-edge ripples;
+  * break warning arrows (stable-style, blinking before the resume
+    anchor); bloom post-pass applied AFTER cursor and BEFORE HUD (crisp
+    HUD — owner call), strength pulsed to the beat when enabled.
+
 REMAINING SIMPLIFICATIONS (each is a later-phase item):
   * slider bodies are rebuilt every frame (0.2 ms/body — fine at this
     phase; an FBO cache per static body is the known perf step).
@@ -123,11 +142,19 @@ from __future__ import annotations
 import bisect
 import math
 
+import numpy as np
+
 from ..beatmap.difficulty import (HIT_FADE_OUT, RESULT_FADE_IN,
                                   RESULT_FADE_OUT)
 from ..beatmap.objects import Slider, Spinner
 from ..replay.replay import cursor_at
 from ..ruleset import JudgmentKind
+from .background import PARALLAX_SCALE, flash_factor, parallax_offset
+from .bloom import beat_strength
+from .effects import (LOGO_UI_SIZE, break_resume_anchors, fade_to_black_alpha,
+                      logo_alpha, logo_scale, rainbow_rgb, ripple_events,
+                      ripple_states, seizure_alpha, triangle_field,
+                      triangle_states, warning_arrow_alpha)
 from .gl import Sprite
 from .hud import layout_run
 from .markers import (arrow_alpha_scale, arrow_pulse, arrow_rotation,
@@ -350,6 +377,36 @@ def snake_end_fraction(t: float, start_time: float, preempt: float,
                     / (preempt * SNAKE_IN_PORTION))
 
 
+def snake_range(t: float, start_time: float, part_len: float,
+                repeat_count: int, preempt: float,
+                snaking_in: bool = True,
+                snaking_out: bool = True) -> tuple[float, float]:
+    """(start, end) fractions of the path visible at t — §4.9 Snaking
+    In AND Out (lazer SnakingSliderBody semantics):
+
+      in   the end edge grows 0→1 over the first preempt/3 (always done
+           well before the hit — snake-in finishes at start−2·preempt/3);
+      out  ONLY during the FINAL span the body retracts behind the ball:
+           a head→tail final span (even 0-based span index) advances the
+           START edge u→1; a tail→head final span pulls the END edge
+           1→1−u. Earlier spans keep the full body (repeats re-trace it).
+
+    At u=1 the range degenerates to the ball's end point — the post-end
+    body fade then fades a dot, not a full corpse (lazer: a fully snaked-
+    out body leaves nothing behind)."""
+    b = snake_end_fraction(t, start_time, preempt, snaking_in)
+    a = 0.0
+    if snaking_out and part_len > 0 and repeat_count >= 1:
+        final_start = start_time + (repeat_count - 1) * part_len
+        if t > final_start:
+            u = _clamp01((t - final_start) / part_len)
+            if (repeat_count - 1) % 2 == 0:     # final span runs head→tail
+                a = u
+            else:                                # runs tail→head
+                b = min(b, 1.0 - u)
+    return a, b
+
+
 def body_alpha(t: float, start_time: float, end_time: float, preempt: float,
                time_fade_in: float) -> float:
     """Slider body/end-circle fade: in with the head, solid through the
@@ -485,11 +542,16 @@ class StdScene:
     def __init__(self, beatmap, frames, camera, sprites, bodies, bank, *,
                  combo_colors=DEFAULT_COMBO_COLORS,
                  snaking_in: bool = True,
+                 snaking_out: bool = True,
+                 slider_merge: bool = False,
                  draw_approach_circles: bool = True,
                  draw_combo_numbers: bool = True,
                  draw_follow_points: bool = True,
                  draw_cursor: bool = True,
                  cursor_scale: float = 1.0,
+                 cursor_trail_scale: float = 1.0,
+                 cursor_rainbow: bool = False,
+                 cursor_ripples: bool = False,
                  force_long_trail: bool = False,
                  background: tuple[float, float, float] = (0.043, 0.043, 0.055),
                  judgments=None,
@@ -505,6 +567,17 @@ class StdScene:
                  bg_key: str | None = None,
                  bg_draw_size: tuple[float, float] | None = None,
                  dim_envelope=None,
+                 video_bg=None,
+                 bg_parallax: bool = False,
+                 bg_triangles: bool = False,
+                 flash_to_beat: bool = False,
+                 show_warning_arrows: bool = True,
+                 fade_start_ms: float | None = None,
+                 fade_len_ms: float = 0.0,
+                 logo_start_ms: float | None = None,
+                 seizure_start_ms: float | None = None,
+                 bloom_pass=None,
+                 bloom_to_beat: bool = True,
                  miss_fall: bool = True,
                  playfield_borders: str = "none",
                  results=None,
@@ -518,11 +591,15 @@ class StdScene:
         self.bank = bank
         self.combo_colors = [tuple(c) for c in combo_colors]
         self.snaking_in = snaking_in
+        self.snaking_out = snaking_out
+        self.slider_merge = slider_merge
         self.draw_approach_circles = draw_approach_circles
         self.draw_combo_numbers = draw_combo_numbers
         self.draw_follow_points = draw_follow_points
         self.draw_cursor = draw_cursor
         self.cursor_scale = cursor_scale
+        self.trail_scale = cursor_trail_scale
+        self.cursor_rainbow = cursor_rainbow
         self.background = background
 
         self.judgments = judgments        # ruleset SimResult | None
@@ -554,6 +631,31 @@ class StdScene:
         self.miss_fall = miss_fall        # classic falling hit0 (owner: ON)
         self.results = results            # results.ResultsScreen | None
         self.results_start_ms = results_start_ms
+
+        # --- settings-surface phase (§4.10/§4.6/§4.8 additions) ------------
+        self.video = video_bg             # video_bg.VideoBackground | None
+        self.bg_parallax = bg_parallax
+        self.flash_to_beat = flash_to_beat
+        self.fade_start_ms = fade_start_ms
+        self.fade_len_ms = fade_len_ms
+        self.logo_start_ms = logo_start_ms
+        self.seizure_start_ms = seizure_start_ms
+        self.bloom = bloom_pass           # bloom.BloomPass | None
+        self.bloom_to_beat = bloom_to_beat
+        self._tri_field = (triangle_field(seed=len(beatmap.hit_objects))
+                           if bg_triangles else None)
+        starts_all = [o.get_start_time() for o in beatmap.hit_objects]
+        self.first_spawn_ms = (min(starts_all) - beatmap.diff.preempt
+                               if starts_all else 0.0)
+        self._warn_anchors: list[float] = []
+        if show_warning_arrows and beatmap.pauses:
+            self._warn_anchors = break_resume_anchors(
+                beatmap.pauses, starts_all, beatmap.diff.preempt)
+        self._ripple_evs: list[tuple[float, float, float]] = []
+        self._ripple_times: list[float] = []
+        if cursor_ripples and frames:
+            self._ripple_evs = ripple_events(frames)
+            self._ripple_times = [e[0] for e in self._ripple_evs]
         # playfield borders: precomputed subtle white rects (screen px)
         self._border_rects: list[tuple[float, float, float, float]] = []
         if playfield_borders in ("edges", "full"):
@@ -692,13 +794,11 @@ class StdScene:
     def render_frame(self, t: float) -> None:
         self._advance(t)
         self.spr.begin(clear=self.background)
-        if self.bg_key is not None and self.bg_draw_size is not None:
-            # §4.10/§5.3: background first, dimmed by tinting the sprite
-            b = 1.0 - (self.dim.level(t) if self.dim is not None else 0.0)
-            bw, bh = self.bg_draw_size
-            self.spr.draw([Sprite(self.cam.screen_w / 2.0,
-                                  self.cam.screen_h / 2.0,
-                                  bw, bh, self.bg_key, (b, b, b, 1.0))])
+        brightness = self._draw_background(t)
+        if self._tri_field is not None:
+            tri = self._triangle_sprites(t, brightness)
+            if tri:
+                self.spr.draw(tri)    # deco under the playfield
         if self._border_rects:
             self.spr.draw([Sprite(cx, cy, w, h, None,
                                   (1.0, 1.0, 1.0, BORDER_ALPHA))
@@ -707,6 +807,8 @@ class StdScene:
             fps = self._followpoint_sprites(t)
             if fps:
                 self.spr.draw(fps)    # §5.3: follow points under all objects
+        if self.slider_merge:
+            self._draw_merged_bodies(t)   # §4.9 SliderMerge: one union pass
         approach: list[Sprite] = []
         # §5.3: newest objects draw FIRST → end up under older ones
         for obj in reversed(self._active):
@@ -726,19 +828,194 @@ class StdScene:
             popups = self._popup_sprites(t)
             if popups:
                 self.spr.draw(popups)
+        if self._warn_anchors:
+            arrows = self._warning_arrow_sprites(t)
+            if arrows:
+                self.spr.draw(arrows)      # over the playfield, under cursor
+        if self._ripple_evs:
+            ripples = self._ripple_sprites(t)
+            if ripples:
+                self.spr.draw(ripples)     # §4.8 ripples UNDER the cursor
         if self.draw_cursor and self.frames:
             self.spr.draw(self._cursor_sprites(t))
+        if self.bloom is not None:
+            # §4.10 bloom: gameplay layer only — the HUD stays crisp above
+            strength = beat_strength(beat_phase(t, self.beatmap.timings),
+                                     self.bloom_to_beat)
+            self.bloom.apply(self.spr.color_tex, self.spr.fbo, strength)
         if self.hud is not None:
             self.hud.draw(t)          # §5.3 draw order: … → cursors → HUD
+        if self.fade_start_ms is not None and self.fade_len_ms > 0.0:
+            fa = fade_to_black_alpha(t, self.fade_start_ms, self.fade_len_ms)
+            if fa > 0.0:              # §4.10 FadeOutTime: over EVERYTHING
+                self.spr.draw([self._full_frame_black(fa)])
         if self.results is not None and self.results_start_ms is not None \
                 and t >= self.results_start_ms:
             # Red's shared results card (render/results.py) — dims the
             # whole scene (HUD included, the mania draw order) under it
             self.results.draw(t - self.results_start_ms)
+        if self.logo_start_ms is not None:
+            self._draw_logo(t)        # intro splash over the idle scene
+        if self.seizure_start_ms is not None:
+            self._draw_seizure_card(t)     # topmost — it IS the pre-roll
 
     def frame_rgb(self, t: float):
         self.render_frame(t)
         return self.spr.read_rgb()
+
+    # --- background / effect layers (settings-surface phase) ---------------------
+
+    def _full_frame_black(self, alpha: float) -> Sprite:
+        return Sprite(self.cam.screen_w / 2.0, self.cam.screen_h / 2.0,
+                      float(self.cam.screen_w), float(self.cam.screen_h),
+                      None, (0.0, 0.0, 0.0, alpha))
+
+    def _draw_background(self, t: float) -> float:
+        """§4.10 background: the map video frame when live (fail-soft to
+        the image, then the dark void), dimmed by the envelope, flashed to
+        the beat, parallax-shifted opposite the cursor. Returns the
+        brightness so the triangles deco can match the dim."""
+        b = 1.0 - (self.dim.level(t) if self.dim is not None else 0.0)
+        if self.flash_to_beat:
+            b = min(b * flash_factor(beat_phase(t, self.beatmap.timings)),
+                    1.0)
+        key, size = self.bg_key, self.bg_draw_size
+        if self.video is not None and self.video.active_at(t):
+            buf = self.video.frame_for(t)
+            if buf is not None:
+                arr = np.frombuffer(buf, dtype=np.uint8).reshape(
+                    self.cam.screen_h, self.cam.screen_w, 4)
+                self.spr.upload_texture("bg_video", arr)
+                key = "bg_video"
+                size = (float(self.cam.screen_w), float(self.cam.screen_h))
+        if key is None or size is None:
+            return b
+        cx = self.cam.screen_w / 2.0
+        cy = self.cam.screen_h / 2.0
+        bw, bh = size
+        if self.bg_parallax and self.frames:
+            x, y, _ = cursor_at(self.frames, t)
+            sx, sy = self.cam.to_screen(x, y)
+            nx = (sx - cx) / cx
+            ny = (sy - cy) / cy
+            dx, dy = parallax_offset(nx, ny, bw, bh,
+                                     self.cam.screen_w, self.cam.screen_h)
+            bw *= PARALLAX_SCALE
+            bh *= PARALLAX_SCALE
+            cx += dx
+            cy += dy
+        self.spr.draw([Sprite(cx, cy, bw, bh, key, (b, b, b, 1.0))])
+        return b
+
+    def _triangle_sprites(self, t: float, brightness: float) -> list[Sprite]:
+        """The osu-triangles deco (§4.10 bg_triangles): greyscale-tinted,
+        matched to the bg dim so it never outshines a dimmed background."""
+        w = float(self.cam.screen_w)
+        h = float(self.cam.screen_h)
+        out: list[Sprite] = []
+        for x, y, size, shade, alpha in triangle_states(self._tri_field, t):
+            g = shade * brightness
+            d = size * h
+            out.append(Sprite(x * w, y * h, d, d, "triangle_up",
+                              (g, g, g, alpha)))
+        return out
+
+    def _warning_arrow_sprites(self, t: float) -> list[Sprite]:
+        """§4.6 ShowWarningArrows: stable's flashing resume arrows at the
+        playfield's left/right edges during the last second of a break,
+        pointing INWARD, blinking on the effects.WARN_BLINK_MS square."""
+        a = warning_arrow_alpha(t, self._warn_anchors)
+        if a <= 0.0:
+            return []
+        d = self.cam.len_to_screen(72.0)
+        y = self.cam.screen_h / 2.0
+        xl = self.cam.screen_w * 0.10
+        xr = self.cam.screen_w * 0.90
+        color = (0.92, 0.22, 0.28)
+        return [Sprite(xl, y, d, d, "arrow", (*color, a)),
+                Sprite(xr, y, d, d, "arrow", (*color, a),
+                       rotation=math.pi)]
+
+    def _ripple_sprites(self, t: float) -> list[Sprite]:
+        """§4.8 CursorRipples: an expanding ring at each press edge."""
+        out: list[Sprite] = []
+        d0 = 2.3 * self.radius_px
+        for x, y, scale, alpha in ripple_states(self._ripple_evs,
+                                                self._ripple_times, t):
+            sx, sy = self.cam.to_screen(x, y)
+            d = d0 * scale
+            out.append(Sprite(sx, sy, d, d, "approach",
+                              (1.0, 1.0, 1.0, alpha)))
+        return out
+
+    def _draw_logo(self, t: float) -> None:
+        """show_logo: the R3D 'R' tile splash during the intro, fading out
+        exactly as the first approach begins (effects.logo_alpha)."""
+        la = logo_alpha(t, self.logo_start_ms, self.first_spawn_ms)
+        if la is None:
+            return
+        k_ui = self.cam.screen_h / 1080.0
+        d = LOGO_UI_SIZE * k_ui * logo_scale(t, self.logo_start_ms)
+        cx = self.cam.screen_w / 2.0
+        cy = self.cam.screen_h * 0.44
+        self.spr.draw([
+            Sprite(cx, cy, d * 1.9, d * 1.9, "glow",
+                   (0.95, 0.28, 0.30, 0.45 * la), additive=True),
+            Sprite(cx, cy, d, d, "logo_tile", (1.0, 1.0, 1.0, la)),
+        ])
+
+    def _draw_seizure_card(self, t: float) -> None:
+        """§4.10 SeizureWarning: danser-style dark card at render start —
+        opaque black + warning text, fading into the scene at the end."""
+        sa = seizure_alpha(t, self.seizure_start_ms)
+        if sa is None:
+            return
+        self.spr.draw([self._full_frame_black(sa)])
+        out: list[Sprite] = []
+        ui_k = self.cam.screen_h / 1080.0
+        cx = self.cam.screen_w / 2.0
+        cy = self.cam.screen_h * 0.46
+        self._glyph_run(out, "WARNING", cx, cy - 34.0 * ui_k, 64.0 * ui_k,
+                        (0.95, 0.28, 0.30), sa)
+        self._glyph_run(out, "THIS BEATMAP CONTAINS FLASHING LIGHTS",
+                        cx, cy + 34.0 * ui_k, 26.0 * ui_k,
+                        (0.92, 0.92, 0.95), 0.95 * sa)
+        self.spr.draw(out)
+
+    def _draw_merged_bodies(self, t: float) -> None:
+        """§4.9 SliderMerge: every visible body in ONE distance pass under
+        all objects (danser's merged look — shared borders, no stacking).
+        The merged pass necessarily unifies colour and fade: it takes the
+        OLDEST visible slider's combo colour (danser does the same) and
+        the max body alpha (bodies mid-fade merge at the brighter value —
+        an accepted approximation, documented)."""
+        preempt, fade_in = self.diff.preempt, self.diff.time_fade_in
+        items = []
+        alpha = 0.0
+        color = None
+        for obj in self._active:                 # oldest first
+            if not isinstance(obj, Slider):
+                continue
+            pts = self._slider_paths.get(id(obj))
+            if not pts:
+                continue
+            b_alpha = body_alpha(t, obj.get_start_time(), obj.get_end_time(),
+                                 preempt, fade_in)
+            if b_alpha <= 0.0:
+                continue
+            items.append((pts, snake_range(
+                t, obj.get_start_time(), obj.part_len, obj.repeat_count,
+                preempt, self.snaking_in, self.snaking_out)))
+            alpha = max(alpha, b_alpha)
+            if color is None:
+                color = (self.track_override if self.track_override
+                         is not None else self._color(obj))
+        if not items:
+            return
+        body = self.bodies.build_merged(
+            items, self.radius_px,
+            BodyStyle(body_color=color, border_color=self.border_color))
+        self.bodies.draw_body(body, self.spr.fbo, alpha=alpha)
 
     # --- per-object draws -----------------------------------------------------------
 
@@ -873,29 +1150,39 @@ class StdScene:
         b_alpha = body_alpha(t, start, end, preempt, fade_in)
         pts = self._slider_paths.get(id(obj))
         ticks, arrows = self._slider_marks.get(id(obj), ([], []))
-        snake = snake_end_fraction(t, start, preempt, self.snaking_in)
+        snake_a, snake = snake_range(t, start, obj.part_len,
+                                     obj.repeat_count, preempt,
+                                     self.snaking_in, self.snaking_out)
         sprites: list[Sprite] = []
         tip = None
         if b_alpha > 0.0 and pts:
-            body_base = (self.track_override if self.track_override is not None
-                         else color)   # skin.ini SliderTrackOverride
-            body = self.bodies.build_body(
-                pts, self.radius_px,
-                BodyStyle(body_color=body_base,
-                          border_color=self.border_color),
-                snake=(0.0, snake))
-            self.bodies.draw_body(body, self.spr.fbo, alpha=b_alpha)
+            if not self.slider_merge:      # merged bodies drew already
+                body_base = (self.track_override
+                             if self.track_override is not None
+                             else color)   # skin.ini SliderTrackOverride
+                body = self.bodies.build_body(
+                    pts, self.radius_px,
+                    BodyStyle(body_color=body_base,
+                              border_color=self.border_color),
+                    snake=(snake_a, snake))
+                self.bodies.draw_body(body, self.spr.fbo, alpha=b_alpha)
             # ticks of the ACTIVE span: above the body, under the circles
             sprites.extend(self._tick_sprites(t, ticks, obj, spawn, fade_in,
-                                              snake))
-            # tail end circle rides the snake tip (lazer snaking semantics)
-            tip = sub_path(pts, 0.0, snake)[-1]
+                                              snake_a, snake))
+            # tail end circle rides the visible body's far end: the snake
+            # tip during snake-in; the RETRACTING tip when a tail→head
+            # final span snakes out (danser: the cap follows the shrink)
+            tip = sub_path(pts, snake_a, snake)[-1]
             sprites.extend(self._plain_circle_sprites(tip[0], tip[1],
                                                       color, b_alpha,
                                                       role="slider_end"))
-            # tail reverse arrow ON the end circle (rides the tip too)
+            # tail reverse arrow ON the end circle (rides the snake-in tip;
+            # t < start guards it off the snake-OUT retraction — arrows are
+            # long consumed by then, only their explosion could linger)
+            ride_tip = tip if t < start else None
             sprites.extend(self._arrow_sprites(t, arrows, True, spawn,
-                                               fade_in, pts, snake, tip))
+                                               fade_in, pts, snake,
+                                               ride_tip))
         # slider ball following PositionAt(t) (repeats included — scorePath
         # handles the back-and-forth). While the ruleset says tracking was
         # lost the ball dims — the visible sliderbreak cue (there is no
@@ -936,9 +1223,11 @@ class StdScene:
             self.spr.draw(sprites)
 
     def _tick_sprites(self, t: float, ticks, obj, spawn: float,
-                      fade_in: float, snake: float) -> list[Sprite]:
+                      fade_in: float, snake_a: float,
+                      snake: float) -> list[Sprite]:
         """sliderscorepoint sprites for the ACTIVE span only — untinted,
-        snake-gated during snake-in, pop-on-hit / vanish-on-miss."""
+        gated to the VISIBLE body range (snake-in growth AND snake-out
+        retraction), pop-on-hit / vanish-on-miss."""
         if not ticks or obj.part_len <= 0:
             return []
         start = obj.get_start_time()
@@ -952,7 +1241,8 @@ class StdScene:
         out: list[Sprite] = []
         k = self.circle_k
         for tm, sx, sy, span_start, hit in ticks:
-            if tm.span != active_span or snake < tm.progress:
+            if tm.span != active_span or not (snake_a <= tm.progress
+                                              <= snake):
                 continue
             asa = tick_alpha_scale(t, tm.time, tm.span, span_start, spawn,
                                    fade_in, hit)
@@ -1392,22 +1682,24 @@ class StdScene:
     def _cursor_sprites(self, t: float) -> list[Sprite]:
         if self.use_skin_cursor:
             return self._skin_cursor_sprites(t)
+        # §4.8 rainbow: hue-cycle the accent (glow/ring/trail tint)
+        accent = (rainbow_rgb(t) if self.cursor_rainbow
+                  else CURSOR_GLOW_COLOR)
         out: list[Sprite] = []
         d_glow = 2.0 * self.cam.len_to_screen(CURSOR_RADIUS_OSU) * self.cursor_scale
         for ti, k in trail_times(t):
             x, y, _ = cursor_at(self.frames, ti)
             sx, sy = self.cam.to_screen(x, y)
-            s = d_glow * (0.55 + 0.35 * k)
+            s = d_glow * (0.55 + 0.35 * k) * self.trail_scale
             out.append(Sprite(sx, sy, s, s, "glow",
-                              (*CURSOR_GLOW_COLOR, 0.28 * k), additive=True))
+                              (*accent, 0.28 * k), additive=True))
         x, y, _ = cursor_at(self.frames, t)
         sx, sy = self.cam.to_screen(x, y)
         core = d_glow * 0.62
         out.append(Sprite(sx, sy, core, core, "disc", (1.0, 1.0, 1.0, 1.0)))
-        out.append(Sprite(sx, sy, core, core, "ring",
-                          (*CURSOR_GLOW_COLOR, 0.9)))
+        out.append(Sprite(sx, sy, core, core, "ring", (*accent, 0.9)))
         out.append(Sprite(sx, sy, d_glow * 1.6, d_glow * 1.6, "glow",
-                          (*CURSOR_GLOW_COLOR, 0.5), additive=True))
+                          (*accent, 0.5), additive=True))
         return out
 
     def _skin_cursor_sprites(self, t: float) -> list[Sprite]:
@@ -1425,9 +1717,13 @@ class StdScene:
         sk = self.skin
         k = (self.cam.screen_h / CURSOR_UI_HEIGHT) * self.cursor_scale
         centre = sk.info.cursor_centre
+        # §4.8 rainbow: modulate the skin cursor+trail (white/light skin
+        # cursors take the hue cleanly; danser tints the same way)
+        tint = rainbow_rgb(t) if self.cursor_rainbow else (1.0, 1.0, 1.0)
         out: list[Sprite] = []
         if sk.has("cursortrail"):
             tw, th = sk.size["cursortrail"]
+            tw, th = tw * self.trail_scale, th * self.trail_scale
             ox, oy = (0.0, 0.0) if centre else (tw * k / 2.0, th * k / 2.0)
             if self.long_trail:
                 pts = long_trail_points(self._trail_pts, self._trail_times,
@@ -1436,24 +1732,24 @@ class StdScene:
                     sx, sy = self.cam.to_screen(x, y)
                     out.append(Sprite(sx + ox, sy + oy, tw * k, th * k,
                                       "sk_cursortrail",
-                                      (1.0, 1.0, 1.0, 0.85 * strength)))
+                                      (*tint, 0.85 * strength)))
             else:
                 for ti, strength in sparse_trail_times(t):
                     x, y, _ = cursor_at(self.frames, ti)
                     sx, sy = self.cam.to_screen(x, y)
                     out.append(Sprite(sx + ox, sy + oy, tw * k, th * k,
                                       "sk_cursortrail",
-                                      (1.0, 1.0, 1.0, 0.85 * strength)))
+                                      (*tint, 0.85 * strength)))
         x, y, _ = cursor_at(self.frames, t)
         sx, sy = self.cam.to_screen(x, y)
         cw, ch = sk.size["cursor"]
         ox, oy = (0.0, 0.0) if centre else (cw * k / 2.0, ch * k / 2.0)
         out.append(Sprite(sx + ox, sy + oy, cw * k, ch * k, "sk_cursor",
-                          (1.0, 1.0, 1.0, 1.0)))
+                          (*tint, 1.0)))
         if sk.has("cursormiddle"):
             mw, mh = sk.size["cursormiddle"]
             out.append(Sprite(sx, sy, mw * k, mh * k, "sk_cursormiddle",
-                              (1.0, 1.0, 1.0, 1.0)))
+                              (*tint, 1.0)))
         return out
 
 

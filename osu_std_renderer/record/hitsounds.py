@@ -221,6 +221,55 @@ def collect_hitsound_events(beatmap, sim, *, layered: bool = True,
     return oneshots, loops
 
 
+# --- nightcore beat overlay ---------------------------------------------------------
+
+NIGHTCORE_GAIN = 0.35        # mania's _NIGHTCORE_GAIN — under per-note hits
+
+
+def nightcore_beats(timings, t0: float, t1: float,
+                    ) -> list[tuple[float, bool]]:
+    """§4.4 PlayNightcoreSamples schedule — the mania _layer_nightcore
+    mirror: [(time_ms, is_downbeat)] for every beat of every red-line
+    segment inside [t0, t1). Downbeat = beat 1 of each measure; deviation
+    from mania (which hardcodes 4/4): the timing point's SIGNATURE drives
+    the measure length (lazer's actual NC behaviour — mania's own note
+    says 'assumed 4/4'). Beat length sanity-capped at 60 ms (>1000 BPM
+    lines exist in aspire maps). The caller mixes clap on every beat and
+    finish on downbeats at NIGHTCORE_GAIN through the SampleBank chain."""
+    reds = timings.original_points
+    out: list[tuple[float, bool]] = []
+    for i, tp in enumerate(reds):
+        beat = max(60.0, tp.beat_length_base)
+        seg_end = reds[i + 1].time if i + 1 < len(reds) else t1
+        seg_end = min(seg_end, t1)
+        sig = max(1, tp.signature)
+        k = 0
+        t = tp.time
+        while t < seg_end:
+            if t >= t0:
+                out.append((t, k % sig == 0))
+            k += 1
+            t = tp.time + k * beat
+    return out
+
+
+def mix_nightcore(mixer, bank: "SampleBank", beats, *, speed: float = 1.0,
+                  start_ms: float = 0.0, gain: float = 1.0) -> int:
+    """Lay the nightcore overlay into the mixer: clap each beat, finish
+    each downbeat, resolved through the normal-set skin chain (skin →
+    fallback → synth, so the overlay never goes silent). Returns beats
+    laid."""
+    clap, _ = bank.get(1, "hitclap", 0)
+    finish, _ = bank.get(1, "hitfinish", 0)
+    laid = 0
+    for t, downbeat in beats:
+        pcm = finish if downbeat else clap
+        mixer.mix_at((t - start_ms) / speed, pcm,
+                     volume=NIGHTCORE_GAIN * gain)
+        laid += 1
+    return laid
+
+
 # --- sample bank -----------------------------------------------------------------
 
 class SampleBank:

@@ -128,6 +128,11 @@ def parse_events(line: str, beatmap: Beatmap) -> None:
         return
     if tok[0] in ("Background", "0") and len(tok) >= 3:
         beatmap.bg = tok[2].strip('"')
+    elif tok[0] in ("Video", "1") and len(tok) >= 3:
+        # Video,<startOffsetMs>,"file"[,xOffset,yOffset] (§4.10 LoadVideos;
+        # negative offsets exist — the video starts before the audio)
+        beatmap.video = tok[2].strip('"')
+        beatmap.video_offset = _int(tok[1], 0)
     elif tok[0] in ("Break", "2") and len(tok) >= 3:
         p = Pause.parse(tok)
         if p is not None:

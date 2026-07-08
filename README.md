@@ -13,10 +13,22 @@ complete architectural teardown of the reference renderer. Modules cite the
 plan section they port; formulas are ported exactly (including the float32
 quirks). Strategy: [`docs/APPROACH.md`](docs/APPROACH.md) (Option A).
 
-## Status: SCAFFOLD
+## Status: RENDERING — full website settings surface
 
-Parsing is real and verified end-to-end (beatmap → curves → positions →
-replay); the draw/record phases are structured stubs. See the table below.
+End-to-end renders ship: parsing, judgment sim (reconciled to the .osr),
+slider bodies (distance-field union), skins (per-element fallback),
+hitsounds, the lazer-port HUD (Argon skinless / full LEGACY set under any
+custom skin, classic lg_* bakes filling gaps), spinners, results screen —
+and, as of the settings-surface phase, EVERY std setting the R3D site
+exposes (mania_ordr/presets.py): video/blur/parallax/triangles/
+flash-to-beat backgrounds, nightcore beat overlay, mod pills, live rosu-pp
+counter, hit counter, aim-error scatter, strain graph, warning arrows,
+seizure card + lead-in, real fade-out, bloom, the R3D logo splash, cursor
+trail-scale/rainbow/ripples, snaking-out + slider merge, beatmap [Colours].
+`StdRenderSettings.from_preset(dict)` consumes the bot preset JSON
+wholesale (the future `std_renderer.py` adapter entry). Accepted + NO-OP,
+documented: `load_storyboard` (danser fallback stays), `show_scoreboard`
+(render/scoreboard.py holds the osu!API JSON hand-off stub).
 
 ```
 osu_std_renderer/
@@ -61,14 +73,29 @@ osu_std_renderer/
 ├── render/
 │   ├── context.py / gl.py       headless-EGL sprite batch (from catch) — IMPLEMENTED
 │   ├── playfield.py             §5.4 exact camera — IMPLEMENTED
-│   └── slider_body.py           STUB — the Phase-0 distance-field spike (NEXT)
+│   ├── slider_body.py           distance-field depth-trick bodies + snaking
+│   │                            + build_merged (§4.9 SliderMerge union pass)
+│   ├── scene.py                 object lifecycle + full frame draw (§5.3)
+│   ├── hud.py                   lazer HUD port (Argon / legacy) + mod pills,
+│   │                            pp/hit counters, aim scatter, strain graph
+│   ├── background.py            §4.10 dim envelope + blur/parallax/flash
+│   ├── video_bg.py              §4.10 LoadVideos (mania v2 port)
+│   ├── effects.py               triangles/logo/seizure/fade/arrows/ripples
+│   ├── bloom.py                 §4.10 bloom post-pass (bright+blur+add)
+│   ├── pp.py                    rosu-pp gradual pp + strains (fail-soft)
+│   ├── scoreboard.py            §4.6 ScoreBoard NO-OP + JSON loader stub
+│   ├── markers.py / spinner.py  arrows/ticks/followpoints, spinners
+│   ├── skin_elements.py         real-skin textures, per-element fallback
+│   ├── textures.py              procedural Argon-ish + classic lg_* bakes
+│   └── results.py               Red's results-screen outro
 ├── record/
 │   ├── pipeline.py              §5.2 fixed-timestep loop — IMPLEMENTED
 │   ├── encode.py                §5.6 ffmpeg pipe (from mania v2) — IMPLEMENTED
-│   └── audio.py                 NO-BASS offline mixer — IMPLEMENTED
-├── settings.py                  §4 surface ↔ R3D preset keys (mapping table)
-├── cli.py                       adapter-contract CLI (catch_renderer.py shape);
-│                                --parse-only works today, rendering errors out
+│   ├── hitsounds.py             §3.4 sample grid + nightcore beat overlay
+│   └── audio.py                 NO-BASS offline mixer + pre-roll/fade ramps
+├── settings.py                  §4 surface ↔ R3D preset keys — from_preset()
+│                                consumes the bot preset JSON wholesale
+├── cli.py                       adapter-contract CLI (catch_renderer.py shape)
 └── tools/
     ├── parse_summary.py         real-map end-to-end verification
     └── plot_map.py              CPU debug plot (PIL): rings/paths/ticks/stacks
@@ -86,15 +113,16 @@ python3.12 -m venv .venv && .venv/bin/pip install numpy pillow osrparse moderngl
 
 ## Next steps (from APPROACH.md §4)
 
-1. **Phase-0 spike — slider body** (`render/slider_body.py`): distance-field
-   depth-trick tube in moderngl; a Bezier snake + an overlapping aspire case.
-   The only real unknown; technique documented in the stub.
+1. The `std_renderer.py` service adapter + mode-0 routing behind
+   `_std_renderer_available()` with danser fallback —
+   `StdRenderSettings.from_preset()` is the entry it calls.
 2. Golden harness: ~10 danser-rendered reference replays + frame diff.
-3. Phase 1 MVP: object lifecycle, cursor+trail — DONE; judging sim
-   (reconcile-to-counts) — DONE (judgment popups, real hit-time explosions,
-   miss fades, ball-detach sliderbreak cue). NEXT: HUD (combo/score/acc ride
-   in the JudgmentEvents already), then the `std_renderer.py` adapter +
-   mode-0 routing behind `_std_renderer_available()` with danser fallback.
+3. Deferred subsystems (accepted + no-op'd, documented in settings.py):
+   storyboards (danser keeps SB maps), the live scoreboard (needs the
+   bot's osu!API leaderboard hand-off — render/scoreboard.py).
+4. Perf phase: texture-array atlas + PBO readback (the mania v2 gpu/
+   playbook), FBO cache for static slider bodies, video texture
+   streaming without per-frame mipmap rebuilds.
 
 ## License
 

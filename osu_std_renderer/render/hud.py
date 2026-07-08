@@ -2,31 +2,32 @@
 own skin architecture (MIT, ppy/osu master; class + file cited per
 element):
 
-COMPONENT SELECTION IS PER ELEMENT (owner correction, 2026-07): the
-skin→legacy-default fallback chain applies to GAMEPLAY elements only.
-Each HUD element (score+acc, combo, hp bar, key overlay, progress) uses
-the SKIN's textures via its LEGACY component when the skin actually
-ships them, and falls back to the **ARGON** component — NOT the classic
-legacy bakes — when the skin lacks them:
+COMPONENT SELECTION (owner correction, 2026-07-08 — supersedes the
+per-element skin-else-Argon rule): a CUSTOM SKIN selects the LEGACY
+component set for EVERY HUD element; textures the skin doesn't ship come
+from the classic lg_* bakes INSIDE the component (lazer's legacy-skin
+fallback chain: a legacy skin never mixes in Argon pieces). Skinless
+renders keep the ARGON set. `renderer_default_font_and_ranks` still
+forces Argon NUMBERS + procedural ranks under a skin (fonts+ranks only):
 
-    score + accuracy   skin ScorePrefix digit set → LegacyScoreCounter/
-                       LegacyAccuracyCounter (+ the legacy progress
-                       pie); else ArgonScoreCounter/ArgonAccuracyCounter
-                       (+ the Argon progress strip)
-    combo              skin ComboPrefix digit set → LegacyDefaultCombo-
-                       Counter; else ArgonComboCounter
-    hp bar             skin scorebar-* → LegacyHealthDisplay (missing
-                       companion pieces still take the classic lg_*
-                       bakes INSIDE the component); else ArgonHealth-
-                       Display
-    key overlay        skin inputoverlay-* → LegacyKeyCounterDisplay;
-                       else ArgonKeyCounterDisplay (a skin with no
-                       inputoverlay gets the Argon key counter — never
-                       procedural legacy boxes)
+    score + accuracy   custom skin → LegacyScoreCounter/LegacyAccuracy-
+                       Counter (+ the legacy progress pie), the skin's
+                       ScorePrefix set or the classic lg_* font per
+                       char; skinless → ArgonScoreCounter/ArgonAccuracy-
+                       Counter (+ the Argon progress strip)
+    combo              custom skin → LegacyDefaultComboCounter (skin
+                       ComboPrefix or lg_* font); skinless → Argon-
+                       ComboCounter
+    hp bar             custom skin → LegacyHealthDisplay (scorebar-* or
+                       the lg_scorebar/lg_ki bakes); skinless →
+                       ArgonHealthDisplay
+    key overlay        custom skin → LegacyKeyCounterDisplay
+                       (inputoverlay-* or lg_io_* bakes); skinless →
+                       ArgonKeyCounterDisplay
 
 `renderer_default_font_and_ranks` (settings/CLI) forces the renderer's
 own default (Argon) NUMBERS and procedural RANK text even under a skin
-that ships fonts/rank images (fonts + ranks only — hp/keys unaffected).
+that ships fonts/rank images (fonts + ranks only — hp/keys stay legacy).
 
 THE TWO COMPONENT SETS (element classes unchanged):
 
@@ -119,12 +120,36 @@ functions of the precomputed timelines (bounded-window replays for the
 pop chains, exponential-kernel damping for the health smoothing), so
 --dump-frames at any time shows exactly what the video shows.
 
+SETTINGS-SURFACE ADDITIONS (2026-07, this phase — house elements, both
+component paths):
+  mod pills          show_mods — procedural rounded pills with the mod
+                     acronyms (NC swallows DT, PF swallows SD — the
+                     standard derivation), category-coloured, stacked
+                     right-aligned under the accuracy block
+  pp counter         show_pp_counter — render/pp.py's rosu gradual
+                     timeline, rolled like the counters, top-left under
+                     the hp bar; HIDES itself when rosu/the timeline is
+                     unavailable (fail-soft)
+  hit counter        show_hit_counter — live 300/100/50/miss column
+                     under the mod pills (judgment-band colours)
+  aim error meter    show_aim_error_meter — danser-style cursor-offset-
+                     at-click scatter panel left of the hit-error bar:
+                     crosshair + circle-edge ring + 10 s-fading dots +
+                     the mean-offset stat (offsets in circle-radius
+                     units — build_aim_points)
+  strain graph       show_strain_graph — bottom fill graph over the map
+                     (rosu strains or the density proxy, pp.py), swept
+                     by progress, drawn UNDER the other HUD elements
+  watermark          watermark_text — small corner text, bottom-right
+
 Settings honored: show_score (score+acc), show_combo, show_hp_bar,
 show_grade, show_key_overlay, show_progress, show_hit_error_meter,
-show_unstable_rate, hud_scale, hud_opacity, combo_break_flash.
-show_pp_counter / show_hit_counter / show_mods / show_aim_error_meter /
-progress_style are accepted and ignored (honest list: no PP model
-in-repo; Argon/legacy progress replaces the danser pie/bar styles).
+show_unstable_rate, show_mods, show_pp_counter, show_hit_counter,
+show_aim_error_meter, show_strain_graph, watermark_text, hud_scale,
+hud_opacity, combo_break_flash. Still accepted-and-ignored (honest
+list): progress_style (Argon/legacy progress replaces the danser
+pie/bar styles), show_scoreboard/scoreboard_avatars (render/
+scoreboard.py documents the osu!API hand-off stub).
 """
 from __future__ import annotations
 
@@ -260,6 +285,83 @@ LEGACY_FONT_H = 45.0           # textures.LEGACY_FONT_HEIGHT
 
 KEY_LABELS = ("K1", "K2", "M1", "M2")
 ARGON_KEY_ORDER = (0, 1, 2, 3)
+
+# --- mod pills (§4.6 Gameplay.Mods) ---------------------------------------------
+# (bit, acronym) in display order; NC swallows DT, PF swallows SD (the
+# standard derivation — NC/PF set both bits in the .osr)
+_MOD_DEFS = (
+    (0x2, "EZ"), (0x1, "NF"), (0x100, "HT"),
+    (0x10, "HR"), (0x20, "SD"), (0x4000, "PF"), (0x40, "DT"), (0x200, "NC"),
+    (0x8, "HD"), (0x400, "FL"),
+    (0x80, "RX"), (0x2000, "AP"), (0x1000, "SO"), (0x20000000, "V2"),
+    (0x4, "TD"),
+)
+_MOD_REDUCTION = {"EZ", "NF", "HT", "SO"}
+_MOD_AUTOMATION = {"RX", "AP", "V2", "TD"}
+MOD_COLOR_REDUCTION = (0.45, 0.78, 0.36)     # greens (lazer's reduction)
+MOD_COLOR_INCREASE = (0.90, 0.32, 0.42)      # reds (difficulty increase)
+MOD_COLOR_AUTOMATION = (0.36, 0.62, 0.92)    # blues (automation/special)
+MOD_PILL_H = 22.0              # lazer px
+MOD_PILL_PAD_X = 9.0
+MOD_PILL_GAP = 5.0
+MOD_TEXT_FRAC = 0.60           # text height / pill height
+
+HITC_ROW_H = 19.0              # hit-counter row height (lazer px)
+HITC_LABELS = ("300", "100", "50", "X")
+
+PP_TOP_Y = 92.0                # pp counter: top-left under the hp bar
+PP_LEFT_X = 50.0
+PP_DIGIT_H = 24.0
+
+AIM_PANEL_R = 66.0             # aim-error panel radius, 1080-UI px
+AIM_RING_FRAC = 0.62           # circle-edge ring radius / panel radius
+AIM_DOT_PX = 7.0
+AIM_GAP_FROM_ERR = 150.0       # panel centre left of the err-bar edge
+
+STRAIN_H = 46.0                # strain graph max column height (lazer px)
+STRAIN_BOTTOM_GAP = 26.0       # above the Argon progress strip
+STRAIN_MAX_COLS = 160
+
+WATERMARK_H = 12.0             # lazer px
+
+
+def mods_to_acronyms(mods: int) -> list[str]:
+    """Active mod acronyms in display order. NC includes the DT bit and
+    PF the SD bit — the implied halves are dropped (standard behaviour)."""
+    out = [acr for bit, acr in _MOD_DEFS if mods & bit]
+    if "NC" in out and "DT" in out:
+        out.remove("DT")
+    if "PF" in out and "SD" in out:
+        out.remove("SD")
+    return out
+
+
+def mod_pill_color(acr: str) -> tuple[float, float, float]:
+    if acr in _MOD_REDUCTION:
+        return MOD_COLOR_REDUCTION
+    if acr in _MOD_AUTOMATION:
+        return MOD_COLOR_AUTOMATION
+    return MOD_COLOR_INCREASE
+
+
+def build_aim_points(sim, frames, circle_radius: float,
+                     ) -> list[tuple[float, float, float]]:
+    """[(hit_time, dx, dy)] time-sorted — the cursor's offset from the
+    object centre AT THE CLICK, in circle-radius units (1.0 = the rim),
+    for every hit circle/slider head (§4.6 AimErrorMeter's data). Misses
+    have no click to measure — skipped, like danser."""
+    from ..replay.replay import cursor_at as _cursor_at
+    if sim is None or not frames or circle_radius <= 0:
+        return []
+    pts: list[tuple[float, float, float]] = []
+    for v in sim.verdicts.values():
+        if v.obj_kind not in ("circle", "slider") or v.hit_time is None:
+            continue
+        x, y, _ = _cursor_at(frames, v.hit_time)
+        pts.append((v.hit_time, (x - v.pos[0]) / circle_radius,
+                    (y - v.pos[1]) / circle_radius))
+    pts.sort(key=lambda p: p[0])
+    return pts
 
 
 # --- easing (osu!framework Easing.*) -------------------------------------------------
@@ -556,10 +658,15 @@ class HudData:
         self.ev_scores = [e.score_after for e in ev]
         self.ev_accs = [e.acc_after for e in ev]
         self.ev_grades: list[str] = []
+        self.ev_counts: list[tuple[int, int, int, int]] = []
         c = {JudgmentKind.HIT300: 0, JudgmentKind.HIT100: 0,
              JudgmentKind.HIT50: 0, JudgmentKind.MISS: 0}
         for e in ev:
             c[e.kind] += 1
+            self.ev_counts.append((c[JudgmentKind.HIT300],
+                                   c[JudgmentKind.HIT100],
+                                   c[JudgmentKind.HIT50],
+                                   c[JudgmentKind.MISS]))
             self.ev_grades.append(grade_for(
                 c[JudgmentKind.HIT300], c[JudgmentKind.HIT100],
                 c[JudgmentKind.HIT50], c[JudgmentKind.MISS]))
@@ -627,6 +734,11 @@ class HudData:
     def grade_at(self, t: float) -> str:
         i = bisect.bisect_right(self.ev_times, t) - 1
         return self.ev_grades[i] if i >= 0 else "SS"
+
+    def counts_at(self, t: float) -> tuple[int, int, int, int]:
+        """(300s, 100s, 50s, misses) judged so far — the hit counter."""
+        i = bisect.bisect_right(self.ev_times, t) - 1
+        return self.ev_counts[i] if i >= 0 else (0, 0, 0, 0)
 
     def combo_at(self, t: float) -> tuple[int, float]:
         """(combo, ms since it last changed)."""
@@ -871,30 +983,38 @@ class StdHud:
     the module docstring: Argon when skinless, Legacy under a custom skin."""
 
     def __init__(self, sprites, bank, settings, judgments, frames, beatmap,
-                 skin_elems=None, health=None):
+                 skin_elems=None, health=None, mods: int = 0,
+                 pp_timeline=None, aim_points=None, strain=None):
         self.spr = sprites
         self.bank = bank
         self.s = settings
         self.sk = skin_elems
         self.health = health
-        # -- per-element component selection (module docstring): the
-        # LEGACY component only where the skin actually ships the
-        # element's textures; ARGON otherwise. The
-        # renderer_default_font_and_ranks toggle forces the renderer's
-        # default numbers/ranks (Argon + procedural rank text) even
-        # under a skin's fonts/rank images.
+        # -- component selection (module docstring, owner correction
+        # 2026-07-08): a CUSTOM SKIN → the LEGACY component set for EVERY
+        # element (textures the skin lacks come from the classic lg_*
+        # bakes INSIDE the component — never Argon pieces); skinless →
+        # Argon. renderer_default_font_and_ranks still forces the
+        # renderer's default numbers/ranks (Argon + procedural rank
+        # text) under a skin — fonts+ranks only, hp/keys stay legacy.
         sk = skin_elems
         self.force_default = bool(getattr(
             settings, "renderer_default_font_and_ranks", False))
         fonts_ok = not self.force_default
-        self.legacy_score = (fonts_ok and sk is not None
-                             and sk.has("score_digits"))
-        self.legacy_combo = (fonts_ok and sk is not None
-                             and sk.has("combo_digits"))
-        self.legacy_health = sk is not None and (
-            sk.has("scorebar-colour") or sk.has("scorebar-bg"))
-        self.legacy_keys = sk is not None and (
-            sk.has("inputoverlay-background") or sk.has("inputoverlay-key"))
+        self.legacy_score = fonts_ok and sk is not None
+        self.legacy_combo = fonts_ok and sk is not None
+        self.legacy_health = sk is not None
+        self.legacy_keys = sk is not None
+        # -- settings-surface data (mod pills / pp / aim / strain) --------
+        self.mods = int(mods)
+        self._mod_acrs = (mods_to_acronyms(self.mods)
+                          if getattr(settings, "show_mods", True) else [])
+        self.pp_pts = pp_timeline            # [(t, pp)] | None (hidden)
+        self._pp_times = ([p[0] for p in pp_timeline]
+                          if pp_timeline else [])
+        self.aim_pts = aim_points or []      # [(t, dx, dy)] radius units
+        self._aim_times = [p[0] for p in self.aim_pts]
+        self.strain = strain                 # pp.StrainSeries | None
         self.k = sprites.height / UI_HEIGHT       # screen px per UI px
         self.lk = self.k * KL                     # screen px per LAZER px
         self.ui_w = sprites.width / self.k
@@ -1070,7 +1190,9 @@ class StdHud:
         if self.op <= 0.0:
             return
         out: list[Sprite] = []
-        # per-element skin-else-Argon (module docstring)
+        # strain graph first — UNDER every other HUD element
+        self._strain_graph(out, t)
+        # custom skin → legacy set, skinless → Argon (module docstring)
         if self.legacy_score:
             self._legacy_score_block(out, t)   # includes the legacy pie
         else:
@@ -1088,6 +1210,12 @@ class StdHud:
         else:
             self._argon_key_overlay(out, t)
         self._hit_error(out, t)
+        # settings-surface house elements (both component paths)
+        self._mod_pills(out, t)
+        self._hit_counter(out, t)
+        self._pp_counter(out, t)
+        self._aim_error(out, t)
+        self._watermark(out)
         self._break_flash(out, t)
         if self.legacy_health:
             # stable draws the scorebar in FRONT of everything (LegacySkin's
@@ -1769,6 +1897,178 @@ class StdHud:
                            cy - lh / 2.0, lh, io_text, self.op)
 
     # ==================== shared elements ==========================================
+
+    def _top_right_stack_y(self) -> float:
+        """Top of the right-edge secondary stack (mod pills, hit counter)
+        — under the accuracy block (Argon) or the score+acc+pie block
+        (legacy), in lazer px."""
+        return (104.0 if self.legacy_score else 68.0) * self.es
+
+    def _mod_pills(self, out, t: float) -> None:
+        """§4.6 Gameplay.Mods: procedural rounded pills with the active
+        mod acronyms, right-aligned under the accuracy block, category-
+        coloured (reduction green / increase red / automation blue) —
+        lazer-style mod display without the icon sheet."""
+        if not getattr(self.s, "show_mods", True) or not self._mod_acrs:
+            return
+        es, lk = self.es, self.lk
+        h = MOD_PILL_H * es
+        text_h = h * MOD_TEXT_FRAC
+        top = self._top_right_stack_y()
+        x_right = self.ui_w_l - 20.0 * es
+        for acr in reversed(self._mod_acrs):     # lay right-to-left
+            tw = self._lrun_width(acr, text_h)
+            pw = tw + 2.0 * MOD_PILL_PAD_X * es
+            cx = x_right - pw / 2.0
+            color = mod_pill_color(acr)
+            out.append(Sprite(cx * lk, (top + h / 2.0) * lk,
+                              pw * lk, h * lk, "pill",
+                              (*color, 0.88 * self.op)))
+            self._lrun(out, acr, cx - tw / 2.0,
+                       top + (h - text_h) / 2.0, text_h,
+                       (1.0, 1.0, 1.0), 0.95 * self.op)
+            x_right -= pw + MOD_PILL_GAP * es
+
+    def _hit_counter(self, out, t: float) -> None:
+        """§4.6 HitCounter: the live 300/100/50/miss column under the mod
+        pills, counts mono right-aligned, judgment-band colours."""
+        if not getattr(self.s, "show_hit_counter", False):
+            return
+        es = self.es
+        counts = self.data.counts_at(t)
+        colors = (BAND_300, BAND_100, BAND_50, (0.95, 0.25, 0.30))
+        row_h = HITC_ROW_H * es
+        text_h = row_h * 0.78
+        top = self._top_right_stack_y()
+        if self._mod_acrs and getattr(self.s, "show_mods", True):
+            top += (MOD_PILL_H + 8.0) * es
+        right = self.ui_w_l - 20.0 * es
+        for i, (label, n, color) in enumerate(
+                zip(HITC_LABELS, counts, colors)):
+            y = top + i * row_h
+            num = str(n)
+            nw = self._lrun_width(num, text_h, mono=True)
+            self._lrun(out, num, right - nw, y, text_h,
+                       (1.0, 1.0, 1.0), 0.92 * self.op, mono=True)
+            lw = self._lrun_width(label, text_h * 0.85)
+            self._lrun(out, label, right - nw - 8.0 * es - lw,
+                       y + text_h * 0.075, text_h * 0.85, color,
+                       0.92 * self.op)
+
+    def _pp_counter(self, out, t: float) -> None:
+        """§4.6 PPCounter: the rosu gradual pp (render/pp.py), rolled like
+        the Argon counters, top-left under the hp bar. Hidden when the
+        timeline is unavailable (rosu missing / map failed) — fail-soft."""
+        if not getattr(self.s, "show_pp_counter", False) \
+                or not self.pp_pts:
+            return
+        from .pp import pp_at
+        es = self.es
+        v = pp_at(self.pp_pts, self._pp_times, t)
+        num = str(int(round(v)))
+        h = PP_DIGIT_H * es
+        x = PP_LEFT_X * es
+        y = PP_TOP_Y * es
+        w = self._lrun(out, num, x, y, h, (1.0, 1.0, 1.0),
+                       0.95 * self.op, mono=True)
+        self._lrun(out, "pp", x + w + 3.0 * es, y + h * 0.32, h * 0.62,
+                   BLUE0, 0.9 * self.op)
+
+    def _aim_error(self, out, t: float) -> None:
+        """§4.6 AimErrorMeter (danser-style; lazer ships none): scatter
+        panel of the cursor offset AT each click, in circle-radius units
+        — crosshair + ring at the circle edge + dots fading over the
+        hit-error window + the mean |offset| stat underneath."""
+        if not getattr(self.s, "show_aim_error_meter", False) \
+                or not self.aim_pts:
+            return
+        es, k = self.es, self.k
+        cx = self.ui_w / 2.0 - (ERR_HALF_W + AIM_GAP_FROM_ERR) * es
+        cy = UI_HEIGHT - (AIM_PANEL_R + 34.0) * es
+        R = AIM_PANEL_R * es
+        r_unit = R * AIM_RING_FRAC              # 1.0 radius = circle edge
+        out.append(Sprite(cx * k, cy * k, 2 * R * k, 2 * R * k, "disc",
+                          (0.06, 0.07, 0.10, 0.55 * self.op)))
+        out.append(Sprite(cx * k, cy * k, 2 * r_unit * k, 2 * r_unit * k,
+                          "approach", (1.0, 1.0, 1.0, 0.35 * self.op)))
+        for w_px, h_px in ((2 * R * 0.92, 1.6 * es), (1.6 * es, 2 * R * 0.92)):
+            out.append(Sprite(cx * k, cy * k, w_px * k, h_px * k, None,
+                              (1.0, 1.0, 1.0, 0.22 * self.op)))
+        lo = bisect.bisect_left(self._aim_times, t - ERR_TICK_FADE_MS)
+        hi = bisect.bisect_right(self._aim_times, t)
+        n = 0
+        mag_sum = 0.0
+        for i in range(lo, hi):
+            ti, dx, dy = self.aim_pts[i]
+            fade = 1.0 - (t - ti) / ERR_TICK_FADE_MS
+            if fade <= 0.0:
+                continue
+            mag = math.hypot(dx, dy)
+            n += 1
+            mag_sum += mag
+            color = (BAND_300 if mag <= 0.5
+                     else BAND_100 if mag <= 1.0 else BAND_50)
+            px = cx + max(-1.0, min(1.0, dx * AIM_RING_FRAC)) * R
+            py = cy + max(-1.0, min(1.0, dy * AIM_RING_FRAC)) * R
+            d = AIM_DOT_PX * es
+            out.append(Sprite(px * k, py * k, d * k, d * k, "dot",
+                              (*color, 0.9 * fade * self.op)))
+        if n > 0:
+            text = f"{mag_sum / n:.2f}R"
+            th = 20.0 * es
+            tw = self._run_width(text, th, mono=True)
+            self._run(out, text, cx - tw / 2.0, cy + R + 6.0 * es, th,
+                      (0.86, 0.90, 1.0), 0.85 * self.op, mono=True)
+
+    def _strain_graph(self, out, t: float) -> None:
+        """§4.6 StrainGraph: bottom fill graph over the map — rosu strain
+        sections (or the labelled density proxy), max-pooled to
+        STRAIN_MAX_COLS columns, progress-swept (played part in Blue0,
+        the rest dim grey). Drawn first → under all other HUD."""
+        st = self.strain
+        if not getattr(self.s, "show_strain_graph", False) or st is None \
+                or not st.values:
+            return
+        es, lk = self.es, self.lk
+        vals = st.values
+        if len(vals) > STRAIN_MAX_COLS:
+            pool = -(-len(vals) // STRAIN_MAX_COLS)
+            vals = [max(vals[i:i + pool])
+                    for i in range(0, len(vals), pool)]
+        else:
+            pool = 1
+        vmax = max(vals) or 1.0
+        width = self.ui_w_l * ARGON_PROGRESS_WIDTH
+        x0 = (self.ui_w_l - width) / 2.0
+        bottom = LAZER_UI_HEIGHT - STRAIN_BOTTOM_GAP * es
+        hmax = STRAIN_H * es
+        col_w = width / len(vals)
+        sect = st.section_ms * st.speed * pool     # map-ms per column
+        cur = (t - st.first_t) / sect if sect > 0 else 0.0
+        for i, v in enumerate(vals):
+            if v <= 0:
+                continue
+            gh = max(hmax * (v / vmax), 1.5 * es)
+            played = i < cur
+            color = (BLUE0 if played else (0.55, 0.55, 0.60))
+            alpha = (0.50 if played else 0.25) * self.op
+            out.append(Sprite((x0 + (i + 0.5) * col_w) * lk,
+                              (bottom - gh / 2.0) * lk,
+                              col_w * 0.88 * lk, gh * lk, None,
+                              (*color, alpha)))
+
+    def _watermark(self, out) -> None:
+        """R3D watermark_text: small corner text, bottom-right (clear of
+        the Argon progress strip's 5 % side margin and the legacy combo)."""
+        text = (getattr(self.s, "watermark_text", "") or "").upper()
+        if not text:
+            return                # (uppercased: the glyph bank is caps-only)
+        es = self.es
+        h = WATERMARK_H * es
+        w = self._lrun_width(text, h)
+        self._lrun(out, text, self.ui_w_l - w - 8.0 * es,
+                   LAZER_UI_HEIGHT - h - 4.0 * es, h,
+                   (1.0, 1.0, 1.0), 0.5 * self.op)
 
     def _grade_badge(self, out, t: float, right_x_l: float,
                      cy_l: float) -> None:
