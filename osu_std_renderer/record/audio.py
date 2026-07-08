@@ -78,6 +78,9 @@ class AudioMixer:
         if start >= len(self.buf):
             return
         end = min(len(self.buf), start + len(sample))
+        if end <= 0:
+            return  # entirely before the window (a negative end would
+            #         wrap the buf slice — the --start clip guard)
         if start < 0:
             sample = sample[-start:]
             start = 0

@@ -10,8 +10,8 @@ CURRENT STATE (Phase-1 record path + the judgment phase): procedural
 textures (render/textures.py), object lifecycle + scene (render/scene.py),
 slider bodies (render/slider_body.py), cursor+trail from the replay,
 fixed-timestep record loop (record/pipeline.py) into the single-process
-ffmpeg pipe (record/encode.py) with offline-mixed music (record/audio.py —
-music only; hitsounds are a later phase). Judgments ARE simulated
+ffmpeg pipe (record/encode.py) with offline-mixed music (record/audio.py).
+Judgments ARE simulated
 (ruleset/ruleset.py — ported ppy/osu logic, stable notelock + classic
 sliders, reconciled to the .osr's authoritative counts; the pre-reconcile
 sim-vs-real delta is printed as the honesty metric). Explosions fire at
@@ -41,8 +41,15 @@ _draw_spinner — §3.3 style auto-detect old/new/procedural, replay-driven
 rotation, metre/glow progress, approach circle, SPIN!/CLEAR!/RPM,
 SpinnerFadePlayfield) and non-miss judgments flash a combo-tinted
 `lighting` glow under the popup (--no-hit-lighting; preset default ON).
-`--no-replay` renders a replay-less perfect play (Phase-1 fallback +
-§2.5 auto-spin spinners) — pass the beatmap as the only positional.
+HITSOUND PHASE (record/hitsounds.py): §3.4 hitsounds mix into the same
+offline audio track — the 3×7 sample grid through BEATMAP(custom index)
+→ skin chain → synthesized defaults, one-shots at judged hit times
+(layered/bit semantics, timing-point volumes floored at 0.08),
+slidertick one-shots, sliderslide/sliderwhistle loops tiled over the
+ruleset's tracking windows and spinnerspin over spins (--no-hitsounds /
+--use-skin-hitsounds / --hitsound-volume control it). Hitsounds are
+judgment-driven, so they require a replay; `--no-replay` stays a bare
+debug flag (visuals only — no cursor/HUD/judgments/hitsounds).
 
 Debug extras:
     --parse-only            parse map+replay+skin, print a summary, exit 0
@@ -129,6 +136,12 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--watermark", default="")
     ap.add_argument("--music-volume", type=int, default=100)
     ap.add_argument("--hitsound-volume", type=int, default=100)
+    ap.add_argument("--hitsounds", action=BA, default=True,
+                    help="mix §3.4 hitsounds into the audio track "
+                         "(one-shots at judged hit times, slide/spin loops)")
+    ap.add_argument("--use-skin-hitsounds", action=BA, default=False,
+                    help="ignore beatmap-folder samples "
+                         "(Audio.IgnoreBeatmapSamples)")
     ap.add_argument("--general-volume", type=int, default=100)
     ap.add_argument("--audio-offset", type=int, default=0, help="ms; -earlier")
     ap.add_argument("--bg-dim-intro", type=int, default=0)
@@ -140,8 +153,9 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--results-seconds", type=float, default=None)
     ap.add_argument("--no-replay", action="store_true",
                     help="render without a replay: perfect play at object "
-                         "times, auto-spun spinners (§2.5 RPMS), no "
-                         "cursor/HUD; pass the beatmap as the positional")
+                         "times, auto-spun spinners (§2.5 RPMS); pass the "
+                         "beatmap as the only positional (debug: no "
+                         "cursor/HUD/judgments — and thus no hitsounds)")
     ap.add_argument("--parse-only", action="store_true",
                     help="parse map+replay+skin, print a summary, exit 0")
     ap.add_argument("--start", type=float, default=None,
@@ -293,28 +307,60 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
     output: Path = args.output
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    # --- offline audio (music only this phase; NO-BASS design) -------------------
+    # --- offline audio: music bed + §3.4 hitsounds (NO-BASS design) ---------------
     audio_path = None
+    mixer = AudioMixer((end_ms - start_ms) / speed)
+    have_audio = False
     afile = beatmap.get_audio_file(beatmap_dir)
     if afile is not None:
         try:
             pcm = decode_to_pcm(afile, rate=speed)
-            mixer = AudioMixer((end_ms - start_ms) / speed)
             vol = ((settings.music_volume / 100.0)
                    * (settings.general_volume / 100.0))
             # --start window: map-time start_ms lands at wall t=0, so the
             # (already rate-adjusted) music is laid start_ms/speed early —
             # mix_at clips the negative head
             mixer.lay_music(pcm, -start_ms / speed, volume=vol)
-            audio_path = output.with_suffix(".audio.wav")
-            mixer.write_wav(audio_path)
+            have_audio = True
         except AudioError as e:
-            print(f"WARNING: audio mix failed, rendering SILENT video: {e}",
-                  file=sys.stderr)
-            audio_path = None
+            print(f"WARNING: music decode failed, mixing without the music "
+                  f"bed: {e}", file=sys.stderr)
     else:
         print(f"WARNING: beatmap audio '{beatmap.audio}' not found — "
-              "rendering SILENT video", file=sys.stderr)
+              "mixing without the music bed", file=sys.stderr)
+
+    # §3.4 hitsounds: one-shots at judged hit times + slide/spin loops,
+    # resolved BEATMAP(custom index) → skin chain → synthesized defaults
+    if (args.hitsounds and judgments is not None
+            and settings.hitsound_volume > 0 and settings.general_volume > 0):
+        from .record.hitsounds import (SampleBank, collect_hitsound_events,
+                                       mix_hitsounds)
+        from .skin.skin import Skin as SampleSkin
+        sample_skin = SampleSkin(skin_dir=settings.skin_dir,
+                                 fallback_dir=settings.default_skin_dir)
+        bank = SampleBank(skin=sample_skin, beatmap_dir=beatmap_dir,
+                          use_beatmap_samples=not settings.use_skin_hitsounds)
+        oneshots, loops = collect_hitsound_events(
+            beatmap, judgments, layered=skin_info.layered_hit_sounds)
+        gain = ((settings.hitsound_volume / 100.0)
+                * (settings.general_volume / 100.0))
+        stats = mix_hitsounds(mixer, bank, oneshots, loops, speed=speed,
+                              start_ms=start_ms, gain=gain)
+        srcs = bank.source_counts()
+        print(f"hitsounds: {stats.oneshots} one-shots, "
+              f"{stats.loop_ms / 1000.0:.1f}s loops | samples: "
+              f"beatmap {srcs['beatmap']}, skin {srcs['skin']}, "
+              f"synth {srcs['synth']} | track peak "
+              f"{stats.peak_before:.2f}→{stats.peak_after:.2f}",
+              file=sys.stderr)
+        have_audio = have_audio or stats.oneshots > 0 or stats.loop_ms > 0
+
+    if have_audio:
+        audio_path = output.with_suffix(".audio.wav")
+        mixer.write_wav(audio_path)
+    else:
+        print("WARNING: no audio mixed — rendering SILENT video",
+              file=sys.stderr)
 
     encoder = probe_encoder(settings.encoder)
     cmd = build_ffmpeg_cmd(
@@ -407,6 +453,7 @@ def main(argv: list[str] | None = None) -> int:
         show_hit_lighting=args.hit_lighting,
         watermark_text=args.watermark, music_volume=args.music_volume,
         hitsound_volume=args.hitsound_volume,
+        use_skin_hitsounds=args.use_skin_hitsounds,
         general_volume=args.general_volume, audio_offset=args.audio_offset,
         bg_dim_intro=args.bg_dim_intro,
         bg_dim_game=(args.bg_dim if args.bg_dim is not None

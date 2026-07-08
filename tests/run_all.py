@@ -22,6 +22,7 @@ MODULES = [
     "tests.test_skin_elements",
     "tests.test_markers",
     "tests.test_spinner",
+    "tests.test_hitsounds",
 ]
 
 

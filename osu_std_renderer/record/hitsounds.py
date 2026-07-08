@@ -1,0 +1,413 @@
+"""Hitsound resolution + offline mixing — RENDER_PLAN.md §3.4
+(app/audio/osuaudio.go) on the NO-BASS path (record/audio.py).
+
+Semantics ported:
+  * The 3×7 sample grid — sets `normal/soft/drum` × sounds `hitnormal/
+    hitwhistle/hitfinish/hitclap/slidertick/sliderslide/sliderwhistle` —
+    resolved through the skin chain (SKIN→FALLBACK→LOCAL, .wav/.ogg/.mp3
+    via skin.Skin.find_sample); `spinnerspin`/`spinnerbonus` ride the
+    same chain un-prefixed.
+  * BEATMAP-folder samples override by custom index
+    (`<set>-<sound><index>.*` in the map dir; index 1 = bare name,
+    index 0 = never the beatmap — stable's "default samples" index)
+    unless IgnoreBeatmapSamples (settings.use_skin_hitsounds). A ZERO-
+    BYTE sample file silences the sound (the classic skin/map blanking
+    convention) instead of falling through.
+  * PlaySample: `hitnormal` plays if LayeredHitSounds OR bit 1 OR
+    hitsound==0, from the BASE set; whistle/finish/clap play per bits
+    2/4/8 from the ADDITION set. Volume = object-extras volume when set,
+    else the timing point's, floored at 0.08 (§3.4). Positional balance
+    (HitsoundPositionMultiplier) is NOT implemented (mono-centered mix).
+  * One-shots fire at judged HIT times only (real click times for
+    circles/heads, pass times for ticks/repeats/tails) — NO sound on
+    misses.
+  * `sliderslide` (+`sliderwhistle` when the slider body carries the
+    whistle bit) LOOPS while the ball is tracked: the sample is TILED
+    across each ruleset tracking window, split at timing-point
+    boundaries so set/index/volume changes mid-slide are honored. Tile
+    joins are hard cuts (the synth defaults carry edge fades to hide
+    them); gapless loop stitching is a later polish.
+  * `spinnerspin` is tiled across the spinner's duration (flat rate —
+    SpinnerFrequencyModulate's pitch ramp is NOT implemented);
+    `spinnerbonus` is NOT played (the simplified sim exposes no bonus
+    ticks). The spinner's own hitsound fires at its end when cleared.
+  * When no source provides a sample, a DETERMINISTIC synthesized
+    placeholder is generated (short sine/noise bursts @48 kHz stereo) —
+    a skinless render never goes silent.
+
+All event times are gameplay (map) ms; mixing converts to wall time via
+(t - start_ms) / speed, matching the rate-modded music bed. Everything is
+plain numpy adds into the AudioMixer — offline and deterministic.
+"""
+from __future__ import annotations
+
+import math
+import zlib
+from dataclasses import dataclass
+from pathlib import Path
+
+import numpy as np
+
+from ..beatmap.objects import Slider, Spinner
+from .audio import SAMPLE_RATE, AudioError, decode_to_pcm
+
+# §3.4 sets 1/2/3 and hitsound bits
+SET_NAMES = {1: "normal", 2: "soft", 3: "drum"}
+BIT_NORMAL, BIT_WHISTLE, BIT_FINISH, BIT_CLAP = 1, 2, 4, 8
+ADDITION_SOUNDS = ((BIT_WHISTLE, "hitwhistle"),
+                   (BIT_FINISH, "hitfinish"),
+                   (BIT_CLAP, "hitclap"))
+VOLUME_FLOOR = 0.08          # §3.4 sample-volume floor
+SAMPLE_EXTS = (".wav", ".ogg", ".mp3")   # §3.1 GetSample extension order
+
+
+def sounds_for_bits(bits: int, layered: bool = True) -> list[tuple[str, bool]]:
+    """§3.4 PlaySample bit routing → [(sound, uses_addition_set)]:
+    hitnormal if LayeredHitSounds OR bit 1 OR hitsound==0 (BASE set);
+    whistle/finish/clap per bits 2/4/8 (ADDITION set)."""
+    out: list[tuple[str, bool]] = []
+    if layered or (bits & BIT_NORMAL) or bits == 0:
+        out.append(("hitnormal", False))
+    for bit, name in ADDITION_SOUNDS:
+        if bits & bit:
+            out.append((name, True))
+    return out
+
+
+def resolve_volume(point, extras_volume: float = 0.0) -> float:
+    """Object-extras volume when set, else the timing point's;
+    §3.4 floor 0.08, capped at 1."""
+    v = extras_volume if extras_volume > 0 else point.sample_volume
+    return max(VOLUME_FLOOR, min(1.0, v))
+
+
+def _norm_set(set_id: int, fallback: int) -> int:
+    if set_id in SET_NAMES:
+        return set_id
+    return fallback if fallback in SET_NAMES else 1
+
+
+# --- events ---------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class OneShot:
+    """One sample played once at a judged hit time (gameplay ms)."""
+    time_ms: float
+    sound: str
+    set_id: int          # 0 = un-prefixed sample (spinnerspin/spinnerbonus)
+    index: int           # timing-point / extras custom sample index
+    volume: float
+
+
+@dataclass(frozen=True)
+class Loop:
+    """One sample tiled across [t0, t1) gameplay ms (slider slide/whistle,
+    spinner spin) at constant set/index/volume — collect() splits windows
+    at timing-point boundaries so these stay constant."""
+    t0: float
+    t1: float
+    sound: str
+    set_id: int
+    index: int
+    volume: float
+
+
+def _split_by_points(timings, t0: float, t1: float):
+    """Yield (w0, w1, point_at_w0) subwindows of [t0, t1) split at every
+    timing-point boundary inside it."""
+    bounds = [t0]
+    bounds += [p.time for p in timings.points if t0 < p.time < t1]
+    bounds.append(t1)
+    for a, b in zip(bounds, bounds[1:]):
+        if b > a:
+            yield a, b, timings.get_point_at(a)
+
+
+def collect_hitsound_events(beatmap, sim, *, layered: bool = True,
+                            ) -> tuple[list[OneShot], list[Loop]]:
+    """Walk the judged objects (SimResult verdicts) → one-shots + loops.
+    Objects without a verdict (no sim) are skipped entirely."""
+    timings = beatmap.timings
+    oneshots: list[OneShot] = []
+    loops: list[Loop] = []
+
+    def emit_hit(t: float, bits: int, extras, edge_set) -> None:
+        point = timings.get_point_at(t)
+        base = add = 0
+        if edge_set is not None:
+            base, add = edge_set
+        if base == 0:
+            base = extras.sample_set
+        if base == 0:
+            base = point.sample_set
+        base = _norm_set(base, timings.base_set)
+        if add == 0:
+            add = extras.addition_set
+        add = _norm_set(add, base) if add != 0 else base
+        index = extras.custom_index or point.sample_index
+        volume = resolve_volume(point, extras.volume)
+        for sound, use_add in sounds_for_bits(bits, layered):
+            oneshots.append(OneShot(t, sound, add if use_add else base,
+                                    index, volume))
+
+    for obj in beatmap.hit_objects:
+        v = sim.verdict_for(obj) if sim is not None else None
+        if v is None:
+            continue
+        extras = obj.basic_hit_sound
+
+        if isinstance(obj, Spinner):
+            # spinnerspin loop across the spin; the spinner's own hitsound
+            # fires at the end when cleared (hit_time set by the sim)
+            point = timings.get_point_at(obj.start_time)
+            loops.append(Loop(
+                obj.start_time, obj.end_time, "spinnerspin", 0,
+                extras.custom_index or point.sample_index,
+                resolve_volume(point, extras.volume)))
+            if v.hit_time is not None:
+                emit_hit(v.hit_time, obj.hit_sound_bits, extras, None)
+            continue
+
+        if isinstance(obj, Slider):
+            n_edges = obj.repeat_count + 1
+
+            def edge(i: int) -> tuple[int, tuple[int, int] | None]:
+                bits = (obj.edge_sounds[i] if i < len(obj.edge_sounds)
+                        else obj.hit_sound_bits)
+                eset = obj.edge_sets[i] if i < len(obj.edge_sets) else None
+                return bits, eset
+
+            if v.hit_time is not None:              # judged head hit time
+                bits, eset = edge(0)
+                emit_hit(v.hit_time, bits, extras, eset)
+            rep_i = 0
+            for p in v.parts[1:]:
+                if p.kind == "repeat":
+                    rep_i += 1
+                if not p.hit:
+                    continue                         # NO sound on miss
+                if p.kind == "repeat":
+                    bits, eset = edge(rep_i)
+                    emit_hit(p.time, bits, extras, eset)
+                elif p.kind == "tail":
+                    bits, eset = edge(n_edges - 1)
+                    emit_hit(p.time, bits, extras, eset)
+                elif p.kind == "tick":
+                    point = timings.get_point_at(p.time)
+                    base = _norm_set(extras.sample_set or point.sample_set,
+                                     timings.base_set)
+                    oneshots.append(OneShot(
+                        p.time, "slidertick", base,
+                        extras.custom_index or point.sample_index,
+                        resolve_volume(point, extras.volume)))
+            # §3.4 slide loops while tracking (stable tracks headless too)
+            body = ["sliderslide"]
+            if obj.hit_sound_bits & BIT_WHISTLE:
+                body.append("sliderwhistle")
+            for t0, t1 in v.tracking:
+                for w0, w1, point in _split_by_points(timings, t0, t1):
+                    base = _norm_set(extras.sample_set or point.sample_set,
+                                     timings.base_set)
+                    idx = extras.custom_index or point.sample_index
+                    vol = resolve_volume(point, extras.volume)
+                    for sound in body:
+                        loops.append(Loop(w0, w1, sound, base, idx, vol))
+            continue
+
+        # circle
+        if v.hit_time is not None:
+            emit_hit(v.hit_time, obj.hit_sound_bits, extras, None)
+
+    return oneshots, loops
+
+
+# --- sample bank -----------------------------------------------------------------
+
+class SampleBank:
+    """Resolve (set, sound, index) → 48 kHz stereo float32 PCM through
+    BEATMAP(custom index) → SKIN chain → SYNTH default, with caching and
+    per-source bookkeeping for the render report."""
+
+    def __init__(self, skin=None, beatmap_dir: Path | None = None,
+                 use_beatmap_samples: bool = True):
+        self.skin = skin
+        self.use_beatmap_samples = use_beatmap_samples
+        self._beatmap_files: dict[str, Path] = {}
+        if beatmap_dir is not None:
+            d = Path(beatmap_dir)
+            if d.is_dir():
+                for p in sorted(d.rglob("*")):
+                    if p.is_file() and p.suffix.lower() in SAMPLE_EXTS:
+                        self._beatmap_files.setdefault(p.name.lower(), p)
+        self._pcm_cache: dict[Path, np.ndarray | None] = {}
+        self._cache: dict[tuple[int, str, int], tuple[np.ndarray, str]] = {}
+        self.sources: dict[str, str] = {}   # "<name>[idx]" → source label
+
+    def get(self, set_id: int, sound: str, index: int = 0,
+            ) -> tuple[np.ndarray, str]:
+        key = (set_id, sound, index)
+        hit = self._cache.get(key)
+        if hit is not None:
+            return hit
+        name = f"{SET_NAMES[set_id]}-{sound}" if set_id in SET_NAMES else sound
+        pcm, src = self._resolve(name, index)
+        self._cache[key] = (pcm, src)
+        self.sources[f"{name}:{index}"] = src
+        return pcm, src
+
+    def _resolve(self, name: str, index: int) -> tuple[np.ndarray, str]:
+        # 1. beatmap folder by custom index (index 0 = skin's defaults)
+        if self.use_beatmap_samples and index > 0:
+            base = name if index == 1 else f"{name}{index}"
+            for ext in SAMPLE_EXTS:
+                p = self._beatmap_files.get(f"{base}{ext}".lower())
+                if p is None:
+                    continue
+                pcm = self._decode(p)
+                if pcm is not None:
+                    return pcm, "beatmap"
+        # 2. skin chain (SKIN→FALLBACK→LOCAL, §3.1 GetSample)
+        if self.skin is not None:
+            p = self.skin.find_sample(name)
+            if p is not None:
+                pcm = self._decode(p)
+                if pcm is not None:
+                    return pcm, "skin"
+        # 3. deterministic synthesized default
+        return synth_sample(name), "synth"
+
+    def _decode(self, path: Path) -> np.ndarray | None:
+        """Decode a sample file; zero-byte files mean SILENCE (the classic
+        blanking convention); undecodable files fall through (None)."""
+        if path in self._pcm_cache:
+            return self._pcm_cache[path]
+        pcm: np.ndarray | None
+        try:
+            if path.stat().st_size == 0:
+                pcm = np.zeros((1, 2), dtype=np.float32)
+            else:
+                pcm = decode_to_pcm(path)
+                if len(pcm) == 0:
+                    pcm = np.zeros((1, 2), dtype=np.float32)
+        except (AudioError, OSError):
+            pcm = None
+        self._pcm_cache[path] = pcm
+        return pcm
+
+    def source_counts(self) -> dict[str, int]:
+        out = {"beatmap": 0, "skin": 0, "synth": 0}
+        for src in self.sources.values():
+            out[src] = out.get(src, 0) + 1
+        return out
+
+
+# --- synthesized defaults ----------------------------------------------------------
+
+def _t(dur: float) -> np.ndarray:
+    return np.arange(int(dur * SAMPLE_RATE), dtype=np.float32) / SAMPLE_RATE
+
+
+def _noise(dur: float, seed_name: str) -> np.ndarray:
+    rng = np.random.default_rng(zlib.crc32(seed_name.encode()))
+    n = rng.standard_normal(int(dur * SAMPLE_RATE)).astype(np.float32)
+    # cheap low-pass (moving average) so it reads as a soft hiss, not static
+    k = np.ones(8, dtype=np.float32) / 8.0
+    return np.convolve(n, k, mode="same")
+
+
+def _edge_fade(x: np.ndarray, ms: float = 3.0) -> np.ndarray:
+    n = min(len(x), int(ms / 1000.0 * SAMPLE_RATE))
+    if n > 0:
+        ramp = np.linspace(0.0, 1.0, n, dtype=np.float32)
+        x[:n] *= ramp
+        x[-n:] *= ramp[::-1]
+    return x
+
+
+def _stereo(x: np.ndarray) -> np.ndarray:
+    return np.repeat(x.astype(np.float32)[:, None], 2, axis=1)
+
+
+def synth_sample(name: str) -> np.ndarray:
+    """Deterministic placeholder samples (short click/noise bursts) for
+    the full §3.4 surface — used when neither the beatmap nor any skin in
+    the chain provides the file. Loopable sounds carry edge fades so
+    tiling doesn't click."""
+    base = name.split("-", 1)[-1]          # strip the set prefix
+    if base == "hitnormal":
+        t = _t(0.05)
+        x = (0.75 * np.sin(2 * math.pi * 500.0 * t) * np.exp(-70.0 * t)
+             + 0.3 * _noise(0.05, name) * np.exp(-220.0 * t))
+    elif base == "hitwhistle":
+        t = _t(0.12)
+        x = 0.55 * np.sin(2 * math.pi * 1250.0 * t) * np.exp(-25.0 * t)
+    elif base == "hitfinish":
+        t = _t(0.4)
+        x = (0.4 * _noise(0.4, name)
+             + 0.3 * np.sin(2 * math.pi * 880.0 * t)
+             + 0.2 * np.sin(2 * math.pi * 1320.0 * t)) * np.exp(-8.0 * t)
+    elif base == "hitclap":
+        t = _t(0.06)
+        x = 0.8 * _noise(0.06, name) * np.exp(-80.0 * t)
+    elif base == "slidertick":
+        t = _t(0.02)
+        x = 0.5 * np.sin(2 * math.pi * 3000.0 * t) * np.exp(-300.0 * t)
+    elif base == "sliderslide":
+        x = 0.20 * _noise(0.25, name)
+        x = _edge_fade(x)
+    elif base == "sliderwhistle":
+        t = _t(0.25)
+        x = 0.16 * np.sin(2 * math.pi * 1100.0 * t)
+        x = _edge_fade(x)
+    elif base == "spinnerspin":
+        t = _t(0.3)
+        x = 0.16 * _noise(0.3, name) * (0.7 + 0.3 * np.sin(2 * math.pi * 12.0 * t))
+        x = _edge_fade(x)
+    elif base == "spinnerbonus":
+        t = _t(0.15)
+        x = 0.5 * np.sin(2 * math.pi * 1760.0 * t) * np.exp(-20.0 * t)
+    else:   # unknown name — quiet click, never silence
+        t = _t(0.03)
+        x = 0.4 * np.sin(2 * math.pi * 1000.0 * t) * np.exp(-150.0 * t)
+    return _stereo(x)
+
+
+# --- mixing --------------------------------------------------------------------------
+
+@dataclass
+class HitsoundMixStats:
+    oneshots: int = 0
+    loop_ms: float = 0.0
+    peak_before: float = 0.0   # track |peak| before hitsounds (the music bed)
+    peak_after: float = 0.0    # track |peak| after mixing hitsounds
+
+
+def mix_hitsounds(mixer, bank: SampleBank, oneshots: list[OneShot],
+                  loops: list[Loop], *, speed: float = 1.0,
+                  start_ms: float = 0.0, gain: float = 1.0,
+                  ) -> HitsoundMixStats:
+    """Mix collected events into the AudioMixer track. Gameplay-ms →
+    wall-ms via (t - start_ms) / speed (samples keep their natural pitch
+    under rate mods — stable behaviour). mix_at clips events outside the
+    render window."""
+    before = np.abs(mixer.buf).max() if len(mixer.buf) else 0.0
+    for e in oneshots:
+        pcm, _src = bank.get(e.set_id, e.sound, e.index)
+        mixer.mix_at((e.time_ms - start_ms) / speed, pcm,
+                     volume=e.volume * gain)
+    loop_ms = 0.0
+    for lp in loops:
+        pcm, _src = bank.get(lp.set_id, lp.sound, lp.index)
+        dur_ms = (lp.t1 - lp.t0) / speed
+        n = int(dur_ms / 1000.0 * SAMPLE_RATE)
+        if n <= 0 or len(pcm) == 0:
+            continue
+        reps = int(math.ceil(n / len(pcm)))
+        tiled = np.tile(pcm, (reps, 1))[:n]
+        mixer.mix_at((lp.t0 - start_ms) / speed, tiled,
+                     volume=lp.volume * gain)
+        loop_ms += dur_ms
+    after = np.abs(mixer.buf).max() if len(mixer.buf) else 0.0
+    return HitsoundMixStats(oneshots=len(oneshots), loop_ms=loop_ms,
+                            peak_before=float(before),
+                            peak_after=float(after))
