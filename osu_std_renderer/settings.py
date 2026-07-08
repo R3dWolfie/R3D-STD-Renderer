@@ -149,7 +149,10 @@ class StdRenderSettings:
     show_mods: bool = True
     show_boundaries: bool = False
     show_warning_arrows: bool = True
-    show_hit_lighting: bool = False
+    # §4.6 Gameplay.ShowHitLighting is false in the danser defaults, but the
+    # R3D bot presets ship it ON — the preset field wins (same key name, so
+    # from_preset() maps it straight through)
+    show_hit_lighting: bool = True
     show_progress: bool = True            # §4.6 Score.ProgressBar
     progress_style: str = "pie"           # "pie" (plan default) | "bar"
     hud_scale: float = 1.0                # §4.6 shared Scale (global)

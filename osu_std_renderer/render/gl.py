@@ -29,6 +29,8 @@ uniform vec2 u_screen;   // (w, h) in px
 uniform vec2 u_center;   // sprite center in px (origin top-left)
 uniform vec2 u_size;     // sprite w,h in px
 uniform float u_rot;     // radians
+uniform vec2 u_uv_off;   // texture sub-rect (spinner-metre reveal)
+uniform vec2 u_uv_scale;
 out vec2 v_uv;
 void main() {
     vec2 p = in_pos * u_size;
@@ -38,7 +40,7 @@ void main() {
     vec2 ndc = vec2(px.x / u_screen.x * 2.0 - 1.0,
                     1.0 - px.y / u_screen.y * 2.0);
     gl_Position = vec4(ndc, 0.0, 1.0);
-    v_uv = in_uv;
+    v_uv = in_uv * u_uv_scale + u_uv_off;
 }
 """
 
@@ -66,6 +68,10 @@ class Sprite:
     color: tuple[float, float, float, float] = (1, 1, 1, 1)
     rotation: float = 0.0
     additive: bool = False   # additive blend (glow / hit explosion)
+    # texture sub-rect (uv offset/scale) — the spinner-metre bottom-up
+    # reveal draws only the bottom fraction of its texture
+    uv_off: tuple[float, float] = (0.0, 0.0)
+    uv_scale: tuple[float, float] = (1.0, 1.0)
 
 
 class SpriteRenderer:
@@ -146,6 +152,8 @@ class SpriteRenderer:
         self.prog["u_center"].value = (sp.x, sp.y)
         self.prog["u_size"].value = (sp.w, sp.h)
         self.prog["u_rot"].value = sp.rotation
+        self.prog["u_uv_off"].value = sp.uv_off
+        self.prog["u_uv_scale"].value = sp.uv_scale
         self.vao.render(moderngl.TRIANGLE_STRIP)
 
     def read_rgb(self) -> np.ndarray:

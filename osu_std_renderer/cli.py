@@ -19,8 +19,7 @@ real hit times, misses fade out, judgment popups show, sliderbreaks dim
 the ball. The §4.6 gameplay HUD is live (render/hud.py — score/acc/grade/
 progress/combo/hit-error+UR/key-overlay/break-flash in the §5.3 virtual
 1080p UI space; a `hud:` final-values line prints after each render).
-Spinners render nothing (logged; simplified judgment). Progress lines
-match catch's `rendering… NN%` shape.
+Progress lines match catch's `rendering… NN%` shape.
 
 BACKGROUND + SKIN PHASE: the map's `[Events]` background renders under
 everything with the §4.10 dim envelope (render/background.py; intro/game/
@@ -36,6 +35,14 @@ honors DrawFollowPoints), sliderstartcircle/sliderendcircle head/tail
 specialisations, sliderb/followpoint AnimationFramerate cycling, and the
 §3.3 two-mode skin cursor trail (cursormiddle → long connected trail,
 else sparse 16.67 ms drops; --force-long-trail = §4.7 ForceLongTrail).
+
+SPINNER + HIT LIGHTING PHASE: spinners render (render/spinner.py + scene
+_draw_spinner — §3.3 style auto-detect old/new/procedural, replay-driven
+rotation, metre/glow progress, approach circle, SPIN!/CLEAR!/RPM,
+SpinnerFadePlayfield) and non-miss judgments flash a combo-tinted
+`lighting` glow under the popup (--no-hit-lighting; preset default ON).
+`--no-replay` renders a replay-less perfect play (Phase-1 fallback +
+§2.5 auto-spin spinners) — pass the beatmap as the only positional.
 
 Debug extras:
     --parse-only            parse map+replay+skin, print a summary, exit 0
@@ -72,8 +79,9 @@ def _ms_list(s: str) -> list[float]:
 
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="osu_std_renderer")
-    ap.add_argument("osr", type=Path, help="replay .osr file")
-    ap.add_argument("beatmap", type=Path,
+    ap.add_argument("osr", type=Path, nargs="?", default=None,
+                    help="replay .osr file (omit with --no-replay)")
+    ap.add_argument("beatmap", type=Path, nargs="?", default=None,
                     help="dir with .osu + audio + bg, or a direct .osu path")
     ap.add_argument("-o", "--output", type=Path, default=None)
     ap.add_argument("--resolution", type=_resolution, default=(1920, 1080))
@@ -115,6 +123,9 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--hud-opacity", type=float, default=1.0)
     ap.add_argument("--break-flash", action=BA, default=True,
                     help="red edge-vignette pulse on combo breaks")
+    ap.add_argument("--hit-lighting", action=BA, default=True,
+                    help="§3.3 combo-tinted lighting flash under non-miss "
+                         "judgments (R3D preset default ON)")
     ap.add_argument("--watermark", default="")
     ap.add_argument("--music-volume", type=int, default=100)
     ap.add_argument("--hitsound-volume", type=int, default=100)
@@ -127,6 +138,10 @@ def build_parser() -> argparse.ArgumentParser:
                     help="override --bg-dim-game (gameplay dim, 0-100)")
     ap.add_argument("--bg-blur", type=int, default=0)
     ap.add_argument("--results-seconds", type=float, default=None)
+    ap.add_argument("--no-replay", action="store_true",
+                    help="render without a replay: perfect play at object "
+                         "times, auto-spun spinners (§2.5 RPMS), no "
+                         "cursor/HUD; pass the beatmap as the positional")
     ap.add_argument("--parse-only", action="store_true",
                     help="parse map+replay+skin, print a summary, exit 0")
     ap.add_argument("--start", type=float, default=None,
@@ -168,7 +183,7 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
     from .render.gl import SpriteRenderer
     from .render.hud import StdHud
     from .render.playfield import PlayfieldCamera
-    from .render.scene import ScenePlayer, StdScene, log_skips
+    from .render.scene import ScenePlayer, StdScene
     from .render.skin_elements import SkinElements
     from .render.slider_body import SliderBodyRenderer
     from .render.textures import TextureBank
@@ -233,6 +248,9 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
         cursor_scale=settings.cursor_scale,
         force_long_trail=settings.cursor_long_trail,
         judgments=judgments,
+        draw_hit_lighting=settings.show_hit_lighting,
+        spinner_fade_playfield=skin_info.spinner_fade_playfield,
+        spinner_no_blink=skin_info.spinner_no_blink,
         hud=hud,
         skin_elems=skin_elems,
         use_skin_cursor=settings.use_skin_cursor,
@@ -265,7 +283,6 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
             p = out_dir / f"{stem}_t{int(round(t))}ms.png"
             Image.fromarray(rgb).save(p)
             print(f"wrote {p}", file=sys.stderr)
-        log_skips(scene)
         _print_hud_final_values(hud, judgments)
         spr.release()
         return 0
@@ -328,7 +345,6 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
             except OSError:
                 pass
     wall = time.monotonic() - t0
-    log_skips(scene)
     _print_hud_final_values(hud, judgments)
     print(f"done: {n_frames} frames in {wall:.1f}s "
           f"({n_frames / wall:.1f} fps render, encoder {encoder}) → {output}",
@@ -359,6 +375,14 @@ def _print_hud_final_values(hud, judgments) -> None:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
+    # --no-replay: the beatmap may be the only positional
+    if args.no_replay and args.beatmap is None:
+        args.osr, args.beatmap = None, args.osr
+    if args.beatmap is None or (args.osr is None and not args.no_replay):
+        print("error: expected REPLAY.osr BEATMAP (or --no-replay BEATMAP)",
+              file=sys.stderr)
+        return 2
+
     settings = StdRenderSettings(
         resolution=args.resolution, fps=args.fps, encoder=args.encoder,
         encoder_device=args.encoder_device, skin_dir=args.skin,
@@ -380,6 +404,7 @@ def main(argv: list[str] | None = None) -> int:
         show_progress=args.show_progress, progress_style=args.progress_style,
         hud_scale=args.hud_scale, hud_opacity=args.hud_opacity,
         combo_break_flash=args.break_flash,
+        show_hit_lighting=args.hit_lighting,
         watermark_text=args.watermark, music_volume=args.music_volume,
         hitsound_volume=args.hitsound_volume,
         general_volume=args.general_volume, audio_offset=args.audio_offset,
@@ -391,9 +416,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.results_seconds is not None:
         settings.results_screen_time = args.results_seconds
 
-    frames, meta = parse_replay(args.osr)
-    osu_path = find_osu_file(args.beatmap, meta.beatmap_md5)
-    beatmap = load_full(osu_path, mods=meta.mods)
+    if args.no_replay:
+        frames, meta = [], None
+        osu_path = find_osu_file(args.beatmap, "")
+        beatmap = load_full(osu_path, mods=0)
+    else:
+        frames, meta = parse_replay(args.osr)
+        osu_path = find_osu_file(args.beatmap, meta.beatmap_md5)
+        beatmap = load_full(osu_path, mods=meta.mods)
     skin_info = load_skin_ini(settings.skin_dir)
 
     print(f"map:    {beatmap.artist} - {beatmap.name} [{beatmap.difficulty_name}] "
@@ -405,16 +435,19 @@ def main(argv: list[str] | None = None) -> int:
           f"CS{beatmap.diff.cs:g}→r={beatmap.diff.circle_radius:.2f}px  "
           f"AR{beatmap.diff.ar:g}→preempt={beatmap.diff.preempt}ms",
           file=sys.stderr)
-    print(f"replay: {meta.player_name} {meta.count_300}/{meta.count_100}/"
-          f"{meta.count_50}/{meta.count_miss} {meta.accuracy}% {meta.grade} "
-          f"mods={meta.mods:#x} frames={len(frames)}", file=sys.stderr)
+    if meta is not None:
+        print(f"replay: {meta.player_name} {meta.count_300}/{meta.count_100}/"
+              f"{meta.count_50}/{meta.count_miss} {meta.accuracy}% {meta.grade} "
+              f"mods={meta.mods:#x} frames={len(frames)}", file=sys.stderr)
+    else:
+        print("replay: (none — --no-replay perfect play)", file=sys.stderr)
     print(f"skin:   \"{skin_info.name or 'default'}\" v{skin_info.version:g}",
           file=sys.stderr)
 
     # judgment simulation (pure CPU — runs in --parse-only too, so the
     # sim-vs-real honesty metric is checkable without GL)
     judgments = None
-    if frames and meta.mode == 0:
+    if frames and meta is not None and meta.mode == 0:
         from .ruleset import StdRuleset
         judgments = StdRuleset(beatmap, frames, meta).run()
         for line in judgments.report_lines():
@@ -423,11 +456,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.parse_only:
         return 0
 
-    if meta.mode != 0:
+    if meta is not None and meta.mode != 0:
         print(f"error: replay mode {meta.mode} is not osu!standard",
               file=sys.stderr)
         return 2
-    if not frames:
+    if not frames and not args.no_replay:
         print("error: replay has no cursor frames", file=sys.stderr)
         return 2
 

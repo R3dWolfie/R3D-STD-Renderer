@@ -71,15 +71,42 @@ No cursormiddle → the classic sparse trail: one sprite dropped every
 16.67 ms, each fading over TRAIL_SPRITE_LIFE_MS. The procedural (non-skin)
 cursor keeps its shader-style glow trail.
 
+SPINNER PHASE (render/spinner.py holds the pure math — see its docstring
+for the lazer-legacy reference semantics):
+  * §3.3 style auto-detect: skin has spinner-background → OLD style
+    (background + metre bottom-up bar reveal + rotating spinner-circle);
+    else new-style sprites → NEW (additive blue glow ramping with
+    progress, bottom at rotation/3, top+middle2 at full rotation, middle
+    fading white→red over the duration); no spinner sprites → the
+    procedural Argon-ish spinner (outer ring + hub + orbiting marker +
+    progress glow).
+  * rotation tracks the replay cursor continuously (signed per-frame
+    deltas while a key is held — the ruleset's accumulation, kept
+    signed); --no-replay auto-spins at the §2.5 RPMS constant (477 RPM).
+  * spinner-approachcircle shrinks 1.9→0.1 over the spin (§2.5);
+    spinner-spin fades out ~0.5 s after the start; spinner-clear pops in
+    when accumulated rotation meets the OD requirement; live RPM readout
+    (spinner-rpm box + ScorePrefix skin digits, else HUD glyphs).
+  * skin.ini SpinnerFadePlayfield dims everything under the spinner
+    while it's alive; SpinnerNoBlink stills the metre's blinking bar.
+  * the spinner judgment popup comes from the ruleset like every object.
+
+HIT LIGHTING (§3.3 `lighting`): combo-tinted additive flash under each
+non-miss judgment popup at its popup position, 400 ms lazer-ish
+fade+expand; procedural fallback is the radial `glow` texture;
+--no-hit-lighting (Gameplay.ShowHitLighting; R3D preset default ON).
+
 REMAINING SIMPLIFICATIONS (each is a later-phase item):
-  * spinners: no visuals (judgment popup only); counted and logged.
-  * no hit lighting yet.
   * slider bodies are rebuilt every frame (0.2 ms/body — fine at this
     phase; an FBO cache per static body is the known perf step).
-  * skin gaps: see skin_elements.py's honest list (spinner/HUD/scorebar
+  * skin gaps: see skin_elements.py's honest list (HUD fonts/scorebar
     stay procedural or absent; animations take frame 0 except
     sliderb/followpoint which cycle per AnimationFramerate; no cursor
     rotate/expand).
+  * spinner approximations (spinner.py docstring): lazer's small
+    Y-offset constants skipped (centred on the playfield centre); the
+    metre blink is a deterministic 30 ms wave, not per-frame RNG;
+    spinner hitsounds/bonus-spin ticks are the hitsound phase's.
 
 The lifecycle math lives in module-level pure functions so tests need no
 GL context.
@@ -87,7 +114,6 @@ GL context.
 from __future__ import annotations
 
 import math
-import sys
 
 from ..beatmap.difficulty import (HIT_FADE_OUT, RESULT_FADE_IN,
                                   RESULT_FADE_OUT)
@@ -95,6 +121,7 @@ from ..beatmap.objects import Slider, Spinner
 from ..replay.replay import cursor_at
 from ..ruleset import JudgmentKind
 from .gl import Sprite
+from .hud import layout_run
 from .markers import (arrow_alpha_scale, arrow_pulse, arrow_rotation,
                       beat_phase, followpoint_dots, followpoint_eligible,
                       followpoint_state, reverse_arrow_schedule,
@@ -102,6 +129,12 @@ from .markers import (arrow_alpha_scale, arrow_pulse, arrow_rotation,
 from .skin_elements import (FOLLOW_CIRCLE_SCALE, CURSOR_UI_HEIGHT,
                             circle_pixel_scale, layout_skin_digits)
 from .slider_body import DEFAULT_COMBO_COLORS, BodyStyle, sub_path
+from .spinner import (CLEAR_OFFSET_OSU, GLOW_BLUE, SPIN_OFFSET_OSU,
+                      SPINNER_CENTRE, SPRITE_SCALE, SpinnerTrack,
+                      clear_alpha_scale, detect_spinner_style,
+                      lighting_alpha_scale, metre_bar_count,
+                      required_rotations, spin_prompt_alpha,
+                      spinner_approach_scale, wants_lighting)
 
 EXPLODE_SCALE = 1.4            # §2.5 hit-explosion end scale (skin v2+)
 NUMBER_FADE_OUT = 60.0         # §3.2 v2+ combo-number quick fade (ms)
@@ -138,6 +171,23 @@ POPUP_SKIN_ELEMENT = {         # judgment kind → skin sprite element
     JudgmentKind.HIT100: "hit100",
     JudgmentKind.HIT300: "hit300",
 }
+
+# --- spinner draw constants (render/spinner.py has the lifecycle math) ---------
+SPINNER_DIM_ALPHA = 0.85       # SpinnerFadePlayfield backdrop strength
+PROC_SPINNER_RING_OSU = 330.0  # procedural: outer ring diameter, osu!px
+PROC_SPINNER_GLOW_OSU = 380.0  # procedural: progress glow diameter
+PROC_SPINNER_HUB_OSU = 90.0    # procedural: centre hub diameter
+PROC_MARKER_OSU = 26.0         # procedural: orbiting marker dot
+PROC_MARKER_RADIUS_OSU = 132.0
+PROMPT_TEXT_UI = 44.0          # procedural SPIN!/CLEAR! height (768-space)
+RPM_TEXT_UI = 30.0             # procedural RPM readout height (768-space)
+RPM_BOTTOM_MARGIN_UI = 84.0    # RPM bottom offset (768-space) — raised off
+                               # the true bottom edge so it clears the HUD's
+                               # hit-error/UR block (stable overlaps them)
+RPM_DIGIT_FRAC = 0.62          # skin digits: height / rpm-box height
+RPM_RIGHT_PAD_FRAC = 0.06      # skin digits: right inset / box width
+LIGHTING_LOGICAL_PX = 260.0    # procedural lighting glow size (circle-tied)
+MIDDLE_RED = (1.0, 0.0, 0.0)   # spinner-middle fade target (white→red)
 
 
 def _clamp01(v: float) -> float:
@@ -352,6 +402,9 @@ class StdScene:
                  background: tuple[float, float, float] = (0.043, 0.043, 0.055),
                  judgments=None,
                  draw_judgment_popups: bool = True,
+                 draw_hit_lighting: bool = True,
+                 spinner_fade_playfield: bool = True,
+                 spinner_no_blink: bool = False,
                  hud=None,
                  skin_elems=None,
                  use_skin_cursor: bool = False,
@@ -378,6 +431,9 @@ class StdScene:
 
         self.judgments = judgments        # ruleset SimResult | None
         self.draw_judgment_popups = draw_judgment_popups
+        self.draw_hit_lighting = draw_hit_lighting
+        self.spinner_fade_playfield = spinner_fade_playfield
+        self.spinner_no_blink = spinner_no_blink
         self.hud = hud                    # hud.StdHud | None (§5.3: topmost)
 
         self.skin = skin_elems            # skin_elements.SkinElements | None
@@ -403,13 +459,22 @@ class StdScene:
         self._last_t = -math.inf
         self._slider_paths: dict[int, list[tuple[float, float]]] = {}
         self._slider_marks: dict[int, tuple[list, list]] = {}
-        self.skipped_spinners = 0
-        self._spinner_ids: set[int] = set()
+        # spinners: rotation tracks (replay-driven, or the §2.5 auto-spin
+        # when there are no cursor frames), built at spawn
+        self._spinner_tracks: dict[int, SpinnerTrack] = {}
+        self.spinner_style = detect_spinner_style(
+            skin_elems.loaded if skin_elems is not None else set())
+        self.spin_k = camera.len_to_screen(SPRITE_SCALE)  # px per logical px
         # judgment popups: time-sorted events, pointer + active window
         self._popups = (sorted(judgments.events, key=lambda e: e.time_ms)
                         if judgments is not None else [])
         self._popup_idx = 0
         self._popup_active: list = []
+        # hit lighting: (time, x, y) per non-miss judgment + combo tint
+        self._lightings: list = [e for e in self._popups
+                                 if wants_lighting(e.kind)]
+        self._lighting_idx = 0
+        self._lighting_active: list = []
         # follow points: precomputed dot schedule, pointer + active window
         self._fp_dots: list = []
         if self.draw_follow_points:
@@ -443,6 +508,8 @@ class StdScene:
                     self.cam.to_screen(*obj.modify_position(p, self.diff))
                     for p in obj.multi_curve.path]
                 self._slider_marks[id(obj)] = self._build_marks(obj)
+            elif isinstance(obj, Spinner):
+                self._spinner_tracks[id(obj)] = self._build_spinner_track(obj)
         keep = []
         for obj in self._active:
             if t <= obj.get_end_time() + HIT_FADE_OUT:
@@ -450,7 +517,15 @@ class StdScene:
             else:
                 self._slider_paths.pop(id(obj), None)
                 self._slider_marks.pop(id(obj), None)
+                self._spinner_tracks.pop(id(obj), None)
         self._active = keep
+
+    def _build_spinner_track(self, obj) -> SpinnerTrack:
+        start, end = obj.get_start_time(), obj.get_end_time()
+        spins = required_rotations(self.diff.spinner_ratio, end - start)
+        if self.frames:
+            return SpinnerTrack.from_frames(self.frames, start, end, spins)
+        return SpinnerTrack.auto(start, end, spins)   # --no-replay perfect play
 
     def _build_marks(self, obj) -> tuple[list, list]:
         """(ticks, arrows) draw records for one spawning slider — screen
@@ -511,16 +586,17 @@ class StdScene:
         # §5.3: newest objects draw FIRST → end up under older ones
         for obj in reversed(self._active):
             if isinstance(obj, Spinner):
-                if id(obj) not in self._spinner_ids:
-                    self._spinner_ids.add(id(obj))
-                    self.skipped_spinners += 1
-                continue
-            if isinstance(obj, Slider):
+                self._draw_spinner(obj, t)
+            elif isinstance(obj, Slider):
                 self._draw_slider(obj, t, approach)
             else:
                 self._draw_circle(obj, t, approach)
         if approach:
             self.spr.draw(approach)
+        if self.draw_hit_lighting and self._lightings:
+            lightings = self._lighting_sprites(t)
+            if lightings:
+                self.spr.draw(lightings)   # §3.3: UNDER the judgment popups
         if self.draw_judgment_popups and self._popups:
             popups = self._popup_sprites(t)
             if popups:
@@ -815,6 +891,274 @@ class StdScene:
             return tuple(c / 255.0 for c in info.slider_ball)
         return (1.0, 1.0, 1.0)
 
+    # --- spinner ------------------------------------------------------------------------
+
+    def _skinned(self, name: str) -> bool:
+        """Skin provides `name` and doesn't blank it."""
+        sk = self.skin
+        return sk is not None and sk.has(name) and name not in sk.empty
+
+    def _sk_sprite(self, name: str, x: float, y: float, alpha: float,
+                   scale: float = 1.0, rotation: float = 0.0,
+                   color=(1.0, 1.0, 1.0), additive: bool = False) -> Sprite:
+        """One spinner-space skin sprite: logical px × SPRITE_SCALE →
+        osu!px → screen (LegacySpinner sizing)."""
+        w, h = self.skin.size[name]
+        k = self.spin_k
+        return Sprite(x, y, w * k * scale, h * k * scale, f"sk_{name}",
+                      (*color, alpha), rotation=rotation, additive=additive)
+
+    def _glyph_run(self, out: list[Sprite], text: str, center_x: float,
+                   center_y: float, h_px: float, color, alpha: float) -> None:
+        """Centred HUD-glyph text (the procedural spinner prompts/RPM)."""
+        entries, total = layout_run(text, self.bank.glyph_aspect, h_px)
+        x0 = center_x - total / 2.0
+        for ch, cxo, w in entries:
+            out.append(Sprite(x0 + cxo, center_y, w, h_px, f"glyph_{ch}",
+                              (*color, alpha)))
+
+    def _draw_spinner(self, obj, t: float) -> None:
+        start, end = obj.get_start_time(), obj.get_end_time()
+        preempt, fade_in = self.diff.preempt, self.diff.time_fade_in
+        alpha = body_alpha(t, start, end, preempt, fade_in)
+        if alpha <= 0.0:
+            return
+        track = self._spinner_tracks[id(obj)]
+        rot = track.rotation(t)
+        prog = track.progress(t)
+        cx, cy = self.cam.to_screen(*SPINNER_CENTRE)
+        osu = self.cam.len_to_screen  # osu!px → screen px
+
+        # §3.2 SpinnerFadePlayfield: dim everything under the spinner
+        if self.spinner_fade_playfield:
+            self.spr.draw([Sprite(self.cam.screen_w / 2.0,
+                                  self.cam.screen_h / 2.0,
+                                  float(self.cam.screen_w),
+                                  float(self.cam.screen_h), None,
+                                  (0.0, 0.0, 0.0,
+                                   SPINNER_DIM_ALPHA * alpha))])
+
+        style = self.spinner_style
+        sprites: list[Sprite] = []
+        if style == "old":
+            self._old_style_sprites(sprites, t, cx, cy, rot, prog, alpha)
+        elif style == "new":
+            # additive glow halo first, in its own pass, so the discs
+            # composite OVER it (gl.draw defers additive within a call)
+            if self._skinned("spinner-glow") and prog > 0.0:
+                self.spr.draw([self._sk_sprite(
+                    "spinner-glow", cx, cy, min(prog, 1.0) * alpha,
+                    color=GLOW_BLUE, additive=True)])
+            self._new_style_sprites(sprites, t, start, end, cx, cy, rot,
+                                    alpha)
+        else:
+            if prog > 0.0:
+                d = osu(PROC_SPINNER_GLOW_OSU)
+                self.spr.draw([Sprite(cx, cy, d, d, "glow",
+                                      (*GLOW_BLUE,
+                                       0.85 * min(prog, 1.0) * alpha),
+                                      additive=True)])
+            self._procedural_spinner_sprites(sprites, cx, cy, rot, alpha)
+
+        self._spinner_overlay_sprites(sprites, t, track, start, end,
+                                      cx, cy, alpha)
+        if sprites:
+            self.spr.draw(sprites)
+
+    def _old_style_sprites(self, out: list[Sprite], t: float, cx: float,
+                           cy: float, rot: float, prog: float,
+                           alpha: float) -> None:
+        """OLD style: background → metre (bottom-up bar reveal) →
+        rotating spinner-circle."""
+        k = self.spin_k
+        bg_bottom = cy + 692.0 * k / 2.0        # nominal @1x background foot
+        if self._skinned("spinner-background"):
+            out.append(self._sk_sprite("spinner-background", cx, cy, alpha))
+            bg_bottom = cy + self.skin.size["spinner-background"][1] * k / 2.0
+        if self._skinned("spinner-metre"):
+            bars = metre_bar_count(prog, self.spinner_no_blink, t)
+            f = bars / 10.0
+            if f > 0.0:
+                mw, mh = self.skin.size["spinner-metre"]
+                mw_px, mh_px = mw * k, mh * k
+                out.append(Sprite(cx, bg_bottom - mh_px * f / 2.0,
+                                  mw_px, mh_px * f, "sk_spinner-metre",
+                                  (1.0, 1.0, 1.0, alpha),
+                                  uv_off=(0.0, 1.0 - f),
+                                  uv_scale=(1.0, f)))
+        if self._skinned("spinner-circle"):
+            out.append(self._sk_sprite("spinner-circle", cx, cy, alpha,
+                                       rotation=rot))
+
+    def _new_style_sprites(self, out: list[Sprite], t: float, start: float,
+                           end: float, cx: float, cy: float, rot: float,
+                           alpha: float) -> None:
+        """NEW style (LegacyNewStyleSpinner): bottom at rot/3, top +
+        middle2 at full rot, middle fading white→red over the duration.
+        (The glow was already drawn additively under this stack.)"""
+        if self._skinned("spinner-bottom"):
+            out.append(self._sk_sprite("spinner-bottom", cx, cy, alpha,
+                                       rotation=rot / 3.0))
+        if self._skinned("spinner-top"):
+            out.append(self._sk_sprite("spinner-top", cx, cy, alpha,
+                                       rotation=rot))
+        if self._skinned("spinner-middle"):
+            w = _clamp01((t - start) / max(end - start, 1e-9))
+            color = (1.0,
+                     1.0 + (MIDDLE_RED[1] - 1.0) * w,
+                     1.0 + (MIDDLE_RED[2] - 1.0) * w)
+            out.append(self._sk_sprite("spinner-middle", cx, cy, alpha,
+                                       color=color))
+        if self._skinned("spinner-middle2"):
+            out.append(self._sk_sprite("spinner-middle2", cx, cy, alpha,
+                                       rotation=rot))
+
+    def _procedural_spinner_sprites(self, out: list[Sprite], cx: float,
+                                    cy: float, rot: float,
+                                    alpha: float) -> None:
+        """The Argon-ish fallback: outer ring + dark hub + an orbiting
+        marker pair riding the accumulated rotation (progress lives in the
+        glow behind and the RPM readout below)."""
+        osu = self.cam.len_to_screen
+        ring_d = osu(PROC_SPINNER_RING_OSU)
+        out.append(Sprite(cx, cy, ring_d, ring_d, "approach",
+                          (1.0, 1.0, 1.0, 0.9 * alpha)))
+        hub_d = osu(PROC_SPINNER_HUB_OSU)
+        out.append(Sprite(cx, cy, hub_d, hub_d, "disc",
+                          (0.16, 0.17, 0.22, alpha)))
+        out.append(Sprite(cx, cy, hub_d, hub_d, "ring",
+                          (1.0, 1.0, 1.0, alpha)))
+        ang = rot - math.pi / 2.0               # marker starts at 12 o'clock
+        r = osu(PROC_MARKER_RADIUS_OSU)
+        mx, my = cx + r * math.cos(ang), cy + r * math.sin(ang)
+        d = osu(PROC_MARKER_OSU)
+        out.append(Sprite(mx, my, d, d, "dot", (1.0, 1.0, 1.0, alpha)))
+        ox, oy = cx - r * math.cos(ang), cy - r * math.sin(ang)
+        d2 = d * 0.7
+        out.append(Sprite(ox, oy, d2, d2, "dot",
+                          (1.0, 1.0, 1.0, 0.45 * alpha)))
+
+    def _spinner_overlay_sprites(self, out: list[Sprite], t: float, track,
+                                 start: float, end: float, cx: float,
+                                 cy: float, alpha: float) -> None:
+        """Shared overlays: approach circle (1.9→0.1), spinner-spin,
+        spinner-clear, RPM readout — each per-element skin/procedural."""
+        osu = self.cam.len_to_screen
+        ui_k = self.cam.screen_h / CURSOR_UI_HEIGHT
+
+        asc = spinner_approach_scale(t, start, end)
+        if self.draw_approach_circles and asc is not None:
+            a_alpha = min(alpha, APPROACH_MAX_ALPHA)
+            if self._skinned("spinner-approachcircle"):
+                out.append(self._sk_sprite("spinner-approachcircle", cx, cy,
+                                           a_alpha, scale=asc))
+            else:
+                d = osu(PROC_SPINNER_RING_OSU) * asc
+                out.append(Sprite(cx, cy, d, d, "approach",
+                                  (1.0, 1.0, 1.0, a_alpha)))
+
+        spin_a = spin_prompt_alpha(t, start) * alpha
+        if spin_a > 0.0:
+            sy = cy + osu(SPIN_OFFSET_OSU)
+            if self._skinned("spinner-spin"):
+                out.append(self._sk_sprite("spinner-spin", cx, sy, spin_a))
+            else:
+                self._glyph_run(out, "SPIN!", cx, sy, PROMPT_TEXT_UI * ui_k,
+                                (1.0, 1.0, 1.0), spin_a)
+
+        cas = clear_alpha_scale(t, track.clear_time())
+        if cas is not None:
+            c_alpha, c_scale = cas
+            c_alpha *= alpha
+            ky = cy + osu(CLEAR_OFFSET_OSU)
+            if self._skinned("spinner-clear"):
+                out.append(self._sk_sprite("spinner-clear", cx, ky, c_alpha,
+                                           scale=c_scale))
+            else:
+                self._glyph_run(out, "CLEAR!", cx, ky,
+                                PROMPT_TEXT_UI * ui_k * c_scale,
+                                (0.42, 0.88, 0.47), c_alpha)
+
+        rpm = int(track.rpm(t))
+        bottom = self.cam.screen_h - RPM_BOTTOM_MARGIN_UI * ui_k
+        if self._skinned("spinner-rpm"):
+            bw, bh = self.skin.size["spinner-rpm"]
+            k = self.spin_k
+            bx = self.cam.screen_w / 2.0
+            by = bottom - bh * k / 2.0
+            out.append(Sprite(bx, by, bw * k, bh * k, "sk_spinner-rpm",
+                              (1.0, 1.0, 1.0, alpha)))
+            right_x = bx + (bw / 2.0 - bw * RPM_RIGHT_PAD_FRAC) * k
+            self._rpm_digit_sprites(out, rpm, right_x, by,
+                                    bh * k * RPM_DIGIT_FRAC, alpha)
+        else:
+            h = RPM_TEXT_UI * ui_k
+            self._glyph_run(out, f"{rpm} RPM", self.cam.screen_w / 2.0,
+                            bottom - h / 2.0, h,
+                            (0.86, 0.90, 1.0), 0.9 * alpha)
+
+    def _rpm_digit_sprites(self, out: list[Sprite], value: int,
+                           right_x: float, center_y: float,
+                           target_h_px: float, alpha: float) -> None:
+        """RPM digits, right-aligned at right_x: the skin's ScorePrefix
+        font when complete (§3.3 rpm font — and the plumbing the HUD
+        skin-font remake reuses), else the procedural HUD glyphs."""
+        sk = self.skin
+        if sk is not None and sk.has("score_digits"):
+            entries = layout_skin_digits(value, sk.score_digit_sizes,
+                                         sk.info.score_overlap)
+            native_h = max(h for _, _, _, h in entries)
+            m = target_h_px / native_h
+            half = max(dx + w / 2.0 for _, dx, w, _ in entries)
+            x0 = right_x - half * m
+            for ch, dx, w, h in entries:
+                out.append(Sprite(x0 + dx * m, center_y, w * m, h * m,
+                                  f"sk_score_{ch}", (1.0, 1.0, 1.0, alpha)))
+            return
+        entries, total = layout_run(str(value), self.bank.glyph_aspect,
+                                    target_h_px,
+                                    mono_advance=self.bank.glyph_mono_advance)
+        x0 = right_x - total
+        for ch, cxo, w in entries:
+            out.append(Sprite(x0 + cxo, center_y, w, target_h_px,
+                              f"glyph_{ch}", (1.0, 1.0, 1.0, alpha)))
+
+    # --- hit lighting -------------------------------------------------------------------
+
+    def _lighting_sprites(self, t: float) -> list[Sprite]:
+        """§3.3 `lighting`: combo-tinted additive flash at the popup
+        position of every non-miss judgment, 400 ms fade + quint-out
+        expand (spinner.lighting_alpha_scale) — drawn UNDER the popups."""
+        while (self._lighting_idx < len(self._lightings)
+               and self._lightings[self._lighting_idx].time_ms <= t):
+            self._lighting_active.append(self._lightings[self._lighting_idx])
+            self._lighting_idx += 1
+        out: list[Sprite] = []
+        keep: list = []
+        for ev in self._lighting_active:
+            asa = lighting_alpha_scale(t - ev.time_ms)
+            if asa is None:
+                if t >= ev.time_ms:
+                    continue             # expired
+                keep.append(ev)
+                continue
+            keep.append(ev)
+            alpha, scale = asa
+            color = self._color(self.objects[ev.object_id])
+            x, y = self.cam.to_screen(ev.x, ev.y)
+            k = self.circle_k
+            if self._skinned("lighting"):
+                w, h = self.skin.size["lighting"]
+                out.append(Sprite(x, y, w * k * scale, h * k * scale,
+                                  "sk_lighting", (*color, alpha),
+                                  additive=True))
+            else:
+                d = LIGHTING_LOGICAL_PX * k * scale
+                out.append(Sprite(x, y, d, d, "glow",
+                                  (*color, 0.85 * alpha), additive=True))
+        self._lighting_active = keep
+        return out
+
     # --- judgment popups ---------------------------------------------------------------
 
     def _popup_sprites(self, t: float) -> list[Sprite]:
@@ -994,9 +1338,3 @@ class ScenePlayer:
 
     def draw(self):
         return self.scene.frame_rgb(self.t)
-
-
-def log_skips(scene: StdScene) -> None:
-    if scene.skipped_spinners:
-        print(f"note: skipped {scene.skipped_spinners} spinner(s) "
-              "(no spinner visuals in this phase)", file=sys.stderr)

@@ -201,7 +201,8 @@ def bake_digits(height: int = DIGIT_HEIGHT) -> dict[str, np.ndarray]:
 
 # --- HUD textures (render/hud.py) ------------------------------------------------
 
-HUD_CHARSET = "0123456789.%x,KMSABCDUR"
+HUD_CHARSET = "0123456789.%x,KMSABCDURPINLE!"   # +PINLE! → SPIN!/CLEAR!/RPM
+                                                # (procedural spinner text)
 PIE_STEPS = 48          # quantized progress-pie fill masks
 PIE_SIZE = 96
 KEY_SQUARE_SIZE = 128

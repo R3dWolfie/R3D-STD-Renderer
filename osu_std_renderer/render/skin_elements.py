@@ -33,6 +33,18 @@ Elements loaded this phase (osu file names; animations take frame 0):
                        §3.3 slider head/tail specialisations, applied via
                        GetMostSpecific vs hitcircle(overlay) —
                        circle_elements() hands the scene the winning pair
+  spinner-*            both §3.3 style sets — OLD (background/metre/circle)
+                       and NEW (glow/bottom/top/middle2/middle) — plus the
+                       shared approachcircle/clear/spin/rpm; the scene's
+                       style auto-detect (render/spinner.py) picks which
+                       set draws, per-element fallback within it
+  lighting             the hit-lighting flash (combo-tinted additive,
+                       under the judgment sprite); procedural fallback is
+                       the soft radial `glow` texture
+  <ScorePrefix>-0..9   the skin's score font (skin.ini ScorePrefix,
+                       default "score-"), ALL TEN or fallback — drives the
+                       spinner RPM readout now and is the plumbing the
+                       planned HUD skin-font remake will reuse
 
 ANIMATION FRAMES: sliderb and followpoint upload EVERY frame
 (sk_<name> = frame 0, sk_<name>_fN beyond) and cycle on the map clock via
@@ -46,11 +58,13 @@ files have logical size = pixel size / 2 (TextureFile.scale — resolution
 logic in skin/skin.py). The cursor is UI-space, not playfield-space:
 `logical_px * screen_h / 768` (stable's 768-line virtual UI).
 
-NOT skinnable yet (honest list, stays procedural/absent): spinner (no
-visuals at all), HUD (score/combo fonts, hit-error, key overlay — all
-procedural), scorebar/hp (absent), hitcircle-full (mandala),
-sliderb-nd/-spec companions, cursor rotate/expand animation, animation
-frames beyond frame 0 for everything but sliderb/followpoint, hitsounds.
+NOT skinnable yet (honest list, stays procedural/absent): HUD (score/
+combo fonts, hit-error, key overlay — all procedural; the ScorePrefix
+digits above are loaded but only the spinner RPM consumes them so far),
+scorebar/hp (absent), hitcircle-full (mandala), sliderb-nd/-spec
+companions, particle50/100/300 judgment particles, hit100k/300k/300g
+variants, cursor rotate/expand animation, animation frames beyond frame 0
+for everything but sliderb/followpoint, hitsounds.
 """
 from __future__ import annotations
 
@@ -106,6 +120,21 @@ _CORE_ELEMENTS: dict[str, tuple[bool, bool, bool]] = {
     "hit50": (True, True, False),
     "hit100": (True, True, False),
     "hit300": (True, True, False),
+    # spinner (§3.3 both style sets + shared; single-frame)
+    "spinner-background": (False, False, False),
+    "spinner-metre": (False, False, False),
+    "spinner-circle": (False, False, False),
+    "spinner-glow": (False, False, False),
+    "spinner-bottom": (False, False, False),
+    "spinner-top": (False, False, False),
+    "spinner-middle2": (False, False, False),
+    "spinner-middle": (False, False, False),
+    "spinner-approachcircle": (False, False, False),
+    "spinner-clear": (False, False, False),
+    "spinner-spin": (False, False, False),
+    "spinner-rpm": (False, False, False),
+    # hit lighting (combo-tinted additive flash)
+    "lighting": (False, False, False),
 }
 
 
@@ -114,11 +143,12 @@ class SkinElements:
     `sk_<element>` keys (digits: `sk_digit_<ch>`; animation frames beyond
     0: `sk_<element>_fN`).
 
-    loaded       elements that resolved from the skin/fallback ("digits"
-                 covers the whole HitCirclePrefix set)
+    loaded       elements that resolved from the skin/fallback ("digits" /
+                 "score_digits" cover their whole prefix set)
     empty        loaded but fully transparent → draw NOTHING (hit300 case)
     size         element → (w, h) LOGICAL px (@2x already halved; frame 0)
-    digit_sizes  digit char → (w, h) logical px
+    digit_sizes  HitCirclePrefix digit char → (w, h) logical px
+    score_digit_sizes  ScorePrefix digit char → (w, h) logical px
     frame_counts element → uploaded frame count (cycling elements only)
     """
 
@@ -128,7 +158,6 @@ class SkinElements:
         self.loaded: set[str] = set()
         self.empty: set[str] = set()
         self.size: dict[str, tuple[float, float]] = {}
-        self.digit_sizes: dict[str, tuple[float, float]] = {}
         self.frame_counts: dict[str, int] = {}
 
         for name, (frames, dash, cycle) in _CORE_ELEMENTS.items():
@@ -136,14 +165,13 @@ class SkinElements:
                            cycle=cycle)
 
         prefix = self.info.hit_circle_prefix or "default"
-        tfs = {str(i): skin.find_texture(f"{prefix}-{i}") for i in range(10)}
-        if all(tf is not None for tf in tfs.values()):
-            for ch, tf in tfs.items():
-                rgba = tf.load_rgba()
-                renderer.upload_texture(f"sk_digit_{ch}", rgba)
-                self.digit_sizes[ch] = (rgba.shape[1] * tf.scale,
-                                        rgba.shape[0] * tf.scale)
-            self.loaded.add("digits")
+        self.digit_sizes = self._load_digit_set(renderer, prefix, "digit",
+                                                "digits")
+        # ScorePrefix font (§3.3 "score/acc/rpm: ScorePrefix") — consumed
+        # by the spinner RPM readout; the HUD skin-font remake plugs in here
+        sprefix = self.info.score_prefix or "score"
+        self.score_digit_sizes = self._load_digit_set(
+            renderer, sprefix, "score", "score_digits")
 
         # §3.3 slider head/tail specialisations (GetMostSpecific): the
         # (circle, overlay) element pair each role actually draws
@@ -187,6 +215,23 @@ class SkinElements:
             n += 1
         if cycle and n:
             self.frame_counts[name] = n
+
+    def _load_digit_set(self, renderer, prefix: str, key: str,
+                        flag: str) -> dict[str, tuple[float, float]]:
+        """`<prefix>-0..9` as `sk_<key>_<ch>`: ALL TEN or the set falls
+        back (mixed skin/procedural digit runs would look broken).
+        Returns char → (w, h) logical px; marks `flag` loaded."""
+        tfs = {str(i): self.skin.find_texture(f"{prefix}-{i}")
+               for i in range(10)}
+        if not all(tf is not None for tf in tfs.values()):
+            return {}
+        sizes: dict[str, tuple[float, float]] = {}
+        for ch, tf in tfs.items():
+            rgba = tf.load_rgba()
+            renderer.upload_texture(f"sk_{key}_{ch}", rgba)
+            sizes[ch] = (rgba.shape[1] * tf.scale, rgba.shape[0] * tf.scale)
+        self.loaded.add(flag)
+        return sizes
 
     def has(self, name: str) -> bool:
         return name in self.loaded
@@ -237,7 +282,7 @@ class SkinElements:
     def report_lines(self) -> list[str]:
         """The honesty lines: what came from the skin vs the procedural
         fallback (printed once per render)."""
-        all_names = [*_CORE_ELEMENTS, "digits"]
+        all_names = [*_CORE_ELEMENTS, "digits", "score_digits"]
         got = [n for n in all_names if n in self.loaded]
         missing = [n for n in all_names if n not in self.loaded]
         lines = [f"skin: elements from skin: {', '.join(got) or '(none)'}"]
