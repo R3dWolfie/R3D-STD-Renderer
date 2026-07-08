@@ -58,13 +58,22 @@ files have logical size = pixel size / 2 (TextureFile.scale — resolution
 logic in skin/skin.py). The cursor is UI-space, not playfield-space:
 `logical_px * screen_h / 768` (stable's 768-line virtual UI).
 
-NOT skinnable yet (honest list, stays procedural/absent): HUD (score/
-combo fonts, hit-error, key overlay — all procedural; the ScorePrefix
-digits above are loaded but only the spinner RPM consumes them so far),
-scorebar/hp (absent), hitcircle-full (mandala), sliderb-nd/-spec
-companions, particle50/100/300 judgment particles, hit100k/300k/300g
-variants, cursor rotate/expand animation, animation frames beyond frame 0
-for everything but sliderb/followpoint, hitsounds.
+HUD REMAKE PHASE — the HUD is skin-aware at the component level (lazer's
+architecture): SKINLESS renders draw the Argon HUD (render/hud.py, no
+skin textures involved); CUSTOM-SKIN renders draw the LEGACY HUD from
+these elements — ScorePrefix/ComboPrefix/scoreentry fonts (digits
+all-or-nothing per set, dot/comma/percent/x extras per char),
+scorebar-bg/-colour(-0.. animation)/-marker/-ki(-danger/-danger2),
+inputoverlay-background/-key, ranking-*-small grade badges — with any
+missing piece falling back to the CLASSIC-look legacy bakes
+(textures.TextureBank lg_*), NEVER to Argon.
+
+NOT skinnable yet (honest list, stays procedural/absent):
+hitcircle-full (mandala), sliderb-nd/-spec companions,
+particle50/100/300 judgment particles, hit100k/300k/300g variants,
+cursor rotate/expand animation, animation frames beyond frame 0 for
+everything but sliderb/followpoint/scorebar-colour, section-pass/fail,
+play-skip, arrow-warning, comboburst.
 """
 from __future__ import annotations
 
@@ -135,7 +144,27 @@ _CORE_ELEMENTS: dict[str, tuple[bool, bool, bool]] = {
     "spinner-rpm": (False, False, False),
     # hit lighting (combo-tinted additive flash)
     "lighting": (False, False, False),
+    # HUD (legacy skin components — the custom-skin HUD path):
+    # scorebar-* (LegacyHealthDisplay), inputoverlay-* (LegacyKeyCounter/
+    # Display), ranking-*-small (in-HUD grade badge)
+    "scorebar-bg": (False, False, False),
+    "scorebar-colour": (True, True, True),   # scorebar-colour-0.. animation
+    "scorebar-marker": (False, False, False),
+    "scorebar-ki": (False, False, False),
+    "scorebar-kidanger": (False, False, False),
+    "scorebar-kidanger2": (False, False, False),
+    "inputoverlay-background": (False, False, False),
+    "inputoverlay-key": (False, False, False),
+    "ranking-X-small": (False, False, False),
+    "ranking-S-small": (False, False, False),
+    "ranking-A-small": (False, False, False),
+    "ranking-B-small": (False, False, False),
+    "ranking-C-small": (False, False, False),
+    "ranking-D-small": (False, False, False),
 }
+
+# LegacySpriteText's non-digit lookups: char → texture-name suffix
+FONT_EXTRA_CHARS = {".": "dot", ",": "comma", "%": "percent", "x": "x"}
 
 
 class SkinElements:
@@ -167,24 +196,37 @@ class SkinElements:
         prefix = self.info.hit_circle_prefix or "default"
         self.digit_sizes = self._load_digit_set(renderer, prefix, "digit",
                                                 "digits")
-        # ScorePrefix font (§3.3 "score/acc/rpm: ScorePrefix") — consumed
-        # by the spinner RPM readout; the HUD skin-font remake plugs in here
+        # HUD fonts: ScorePrefix (score/acc/RPM), ComboPrefix (combo
+        # counter) and the scoreentry font (legacy key-overlay counts).
+        # Digits are all-or-nothing per set; the LegacySpriteText extras
+        # (dot/comma/percent/x) load PER CHAR — stable falls back to the
+        # default skin per file, the HUD does the same against its
+        # legacy-default bakes.
         sprefix = self.info.score_prefix or "score"
         self.score_digit_sizes = self._load_digit_set(
             renderer, sprefix, "score", "score_digits")
+        self.score_extra_sizes = self._load_font_extras(
+            renderer, sprefix, "score")
+        cprefix = self.info.combo_prefix or "score"
+        self.combo_digit_sizes = self._load_digit_set(
+            renderer, cprefix, "combo", "combo_digits")
+        self.combo_extra_sizes = self._load_font_extras(
+            renderer, cprefix, "combo")
+        self.scoreentry_digit_sizes = self._load_digit_set(
+            renderer, "scoreentry", "scoreentry", "scoreentry_digits")
 
-        # §3.3 slider head/tail specialisations (GetMostSpecific): the
-        # (circle, overlay) element pair each role actually draws
+        # §3.3 slider head/tail specialisations: the (circle, overlay)
+        # element pair each role actually draws. The OVERLAY is a
+        # COMPANION of the base (lazer LegacyMainCirclePiece's
+        # priorityLookup): once a specialised base resolves — INCLUDING a
+        # skin-blanked one — its overlay is ONLY `<base>overlay`; a
+        # missing companion draws NOTHING (never the hitcircleoverlay,
+        # never the procedural ring). GetMostSpecific still arbitrates
+        # WHICH base wins when both resolved from different sources.
         self._hit_pair = (self._pick("hitcircle"),
                           self._pick("hitcircleoverlay"))
-        self._head_pair = (
-            self._most_specific("sliderstartcircle", "hitcircle"),
-            self._most_specific("sliderstartcircleoverlay",
-                                "hitcircleoverlay"))
-        self._end_pair = (
-            self._most_specific("sliderendcircle", "hitcircle"),
-            self._most_specific("sliderendcircleoverlay",
-                                "hitcircleoverlay"))
+        self._head_pair = self._specialised_pair("sliderstartcircle")
+        self._end_pair = self._specialised_pair("sliderendcircle")
 
     def _load_one(self, renderer, name: str, *, frames: bool,
                   dash: bool, cycle: bool = False) -> None:
@@ -233,6 +275,23 @@ class SkinElements:
         self.loaded.add(flag)
         return sizes
 
+    def _load_font_extras(self, renderer, prefix: str,
+                          key: str) -> dict[str, tuple[float, float]]:
+        """LegacySpriteText's non-digit glyphs (`<prefix>-dot/comma/
+        percent/x`), loaded per char when present — missing chars fall
+        back to the HUD's legacy-default bakes at draw time."""
+        sizes: dict[str, tuple[float, float]] = {}
+        for ch, suffix in FONT_EXTRA_CHARS.items():
+            tf = self.skin.find_texture(f"{prefix}-{suffix}")
+            if tf is None:
+                continue
+            rgba = tf.load_rgba()
+            if rgba.size == 0:
+                continue
+            renderer.upload_texture(f"sk_{key}_{suffix}", rgba)
+            sizes[ch] = (rgba.shape[1] * tf.scale, rgba.shape[0] * tf.scale)
+        return sizes
+
     def has(self, name: str) -> bool:
         return name in self.loaded
 
@@ -256,18 +315,26 @@ class SkinElements:
     def _pick(self, name: str) -> str | None:
         return name if name in self.loaded else None
 
-    def _most_specific(self, special: str, base: str) -> str | None:
-        """§3.1 GetMostSpecific over LOADED elements: the specialised
-        name wins unless the base resolved from a higher-priority source
-        (skin.get_most_specific compares resolution sources)."""
-        s_ok, b_ok = special in self.loaded, base in self.loaded
+    def _specialised_pair(self, special: str) -> tuple[str | None,
+                                                       str | None]:
+        """(circle, overlay) for a slider head/tail role. The base is the
+        specialised element when it wins GetMostSpecific vs hitcircle
+        (§3.1 source comparison); the overlay is STRICTLY the chosen
+        base's companion — `<base>overlay` if loaded, else nothing (the
+        blanked-sliderendcircle rule: a skin-provided base never mixes
+        with the hitcircle overlay or a procedural one)."""
+        s_ok = special in self.loaded
+        b_ok = "hitcircle" in self.loaded
         if s_ok and b_ok:
-            return self.skin.get_most_specific(special, base)
-        if s_ok:
-            return special
-        if b_ok:
-            return base
-        return None
+            base = self.skin.get_most_specific(special, "hitcircle")
+        elif s_ok:
+            base = special
+        elif b_ok:
+            base = "hitcircle"
+        else:
+            return (None, None)
+        overlay = f"{base}overlay"
+        return (base, overlay if overlay in self.loaded else None)
 
     def circle_elements(self, role: str = "hit") \
             -> tuple[str | None, str | None]:
@@ -282,7 +349,8 @@ class SkinElements:
     def report_lines(self) -> list[str]:
         """The honesty lines: what came from the skin vs the procedural
         fallback (printed once per render)."""
-        all_names = [*_CORE_ELEMENTS, "digits", "score_digits"]
+        all_names = [*_CORE_ELEMENTS, "digits", "score_digits",
+                     "combo_digits", "scoreentry_digits"]
         got = [n for n in all_names if n in self.loaded]
         missing = [n for n in all_names if n not in self.loaded]
         lines = [f"skin: elements from skin: {', '.join(got) or '(none)'}"]

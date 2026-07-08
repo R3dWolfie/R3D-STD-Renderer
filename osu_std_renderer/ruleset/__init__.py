@@ -1,5 +1,7 @@
 """Judgment simulation — replay-driven hit results (see ruleset.py for the
-ported-from-ppy/osu logic and the stable-vs-lazer choices)."""
+ported-from-ppy/osu logic and the stable-vs-lazer choices) + the HP model
+(health.py — lazer's OsuHealthProcessor/DrainingHealthProcessor port)."""
+from .health import HealthTimeline, compute_drain_rate  # noqa: F401
 from .ruleset import (  # noqa: F401
     BASE_LARGE_TICK,
     BASE_SCORE,

@@ -105,13 +105,21 @@ class SpriteRenderer:
     # --- texture management ---------------------------------------------------
 
     def upload_texture(self, key: str, rgba: np.ndarray) -> None:
-        """rgba: HxWx4 uint8 array (top-left origin)."""
+        """rgba: HxWx4 uint8 array (top-left origin). Re-uploading a key
+        releases the previous texture (the HUD hp bar re-uploads per
+        frame — without the release that's a VRAM leak)."""
         if rgba.dtype != np.uint8:
             rgba = rgba.astype("u1")
         if rgba.shape[2] == 3:
             a = np.full(rgba.shape[:2] + (1,), 255, dtype="u1")
             rgba = np.concatenate([rgba, a], axis=2)
+        old = self._textures.get(key)
         self._textures[key] = self._make_texture_rgba(rgba)
+        if old is not None:
+            try:
+                old.release()
+            except Exception:  # noqa: BLE001 - context may be tearing down
+                pass
 
     def has_texture(self, key: str) -> bool:
         return key in self._textures

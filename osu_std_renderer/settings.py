@@ -115,9 +115,12 @@ class StdRenderSettings:
     results_screen_time: float = 5.0
     letterbox_breaks: bool = True
 
-    # cursor (§4.7/§4.8)
+    # cursor (§4.7/§4.8). use_skin_cursor defaults TRUE — real osu has no
+    # such toggle: the skin's cursor is always used when the skin ships
+    # one (per-element fallback keeps the procedural cursor otherwise);
+    # --no-skin-cursor remains as an explicit override.
     draw_cursor: bool = True
-    use_skin_cursor: bool = False
+    use_skin_cursor: bool = True
     cursor_scale: float = 1.0
     cursor_trail_scale: float = 1.0
     cursor_long_trail: bool = False
@@ -132,10 +135,11 @@ class StdRenderSettings:
     slider_snaking_out: bool = True
     stack_enabled: bool = True            # Objects.StackEnabled
 
-    # HUD (§4.6) — the HUD phase implements score/acc/grade/progress/
-    # combo/hit-error+UR/key-overlay/break-flash (render/hud.py). show_hp_bar,
-    # show_pp_counter, show_hit_counter, show_mods and show_aim_error_meter
-    # are accepted but their elements are later phases (hud.py docstring).
+    # HUD (§4.6) — render/hud.py: the osu!lazer HUD port (Argon components
+    # when skinless, Legacy components + skin fonts/scorebar/inputoverlay
+    # under a custom skin). show_hp_bar is LIVE (ruleset/health.py drain).
+    # show_pp_counter, show_hit_counter, show_mods, show_aim_error_meter
+    # and progress_style are accepted but ignored (hud.py honest list).
     show_score: bool = True
     show_combo: bool = True
     show_hp_bar: bool = True

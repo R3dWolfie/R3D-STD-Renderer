@@ -13,3 +13,18 @@ LegacyHitPolicy.cs, StartTimeOrderedHitPolicy.cs, DrawableHitCircle.cs,
 DrawableSlider.cs, DrawableSliderBall.cs, SliderInputManager.cs,
 SliderEventGenerator.cs, DrawableSpinner.cs — attribution in the module
 docstring and per-function docstrings.
+
+osu_std_renderer/render/hud.py ports the layout/behaviour/animation
+semantics of MIT-licensed ppy/osu HUD components: ArgonScoreCounter.cs,
+ArgonAccuracyCounter.cs, ArgonComboCounter.cs, ArgonCounterTextComponent.cs,
+ArgonWedgePiece.cs, ArgonHealthDisplay.cs (+ ArgonHealthDisplayParts and
+the osu-resources sh_ArgonBarPath*/sh_ArgonBarPathUtils shaders),
+ArgonKeyCounter(Display).cs, ArgonSongProgress(Bar/Graph).cs,
+SongProgressInfo.cs, RollingCounter.cs, ScoreCounter.cs,
+PercentageCounter.cs, LegacyScoreCounter.cs, LegacyAccuracyCounter.cs,
+LegacyDefaultComboCounter.cs, LegacyHealthDisplay.cs,
+LegacyKeyCounter(Display).cs, LegacySongProgress.cs, LegacySpriteText.cs
+— attribution in the module docstring. osu_std_renderer/ruleset/health.py
+ports osu.Game/Rulesets/Scoring/DrainingHealthProcessor.cs and
+osu.Game.Rulesets.Osu/Scoring/OsuHealthProcessor.cs (MIT, ppy/osu). All
+default textures remain procedurally baked in-repo (no ppy asset files).

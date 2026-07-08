@@ -128,6 +128,7 @@ class Skin:
 
     def _find_in(self, src: Source, name: str) -> TextureFile | None:
         fmap = self._maps.get(src) or {}
+        name = name.replace("\\", "/")   # windows-style skin.ini prefixes
         for ext in _TEX_EXTS:
             two_x = fmap.get(f"{name}@2x{ext}".lower())
             if two_x is not None:
@@ -201,7 +202,11 @@ class Skin:
 
 
 def _file_map(directory: Path | None) -> dict[str, Path]:
-    """Case-insensitive filename → path (reference FileMap)."""
+    """Case-insensitive filename → path (reference FileMap). Files are
+    indexed BOTH by bare filename and by their path relative to the skin
+    root (posix separators), so path-carrying skin.ini prefixes resolve —
+    e.g. `ScorePrefix: Fonts/score/score` looks up
+    "fonts/score/score-0.png"."""
     if directory is None:
         return {}
     d = Path(directory)
@@ -211,4 +216,6 @@ def _file_map(directory: Path | None) -> dict[str, Path]:
     for p in sorted(d.rglob("*")):
         if p.is_file():
             out.setdefault(p.name.lower(), p)
+            rel = p.relative_to(d).as_posix().lower()
+            out.setdefault(rel, p)
     return out

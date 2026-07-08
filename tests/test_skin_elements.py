@@ -156,8 +156,10 @@ def test_followpoint_frames_and_animation_cycling():
 
 
 def test_slider_circle_specialisations_most_specific():
-    # skin ships sliderstartcircle+sliderendcircle → heads/tails use them,
-    # overlays fall back per-asset to hitcircleoverlay
+    # skin ships sliderstartcircle+sliderendcircle → heads/tails use
+    # them; the overlay is STRICTLY the base's companion — a specialised
+    # base WITHOUT its own overlay draws no overlay at all (never
+    # hitcircleoverlay, never a procedural ring)
     with tempfile.TemporaryDirectory() as tmp:
         d = Path(tmp)
         _png(d / "hitcircle.png", 128, 128)
@@ -169,7 +171,7 @@ def test_slider_circle_specialisations_most_specific():
         assert elems.circle_elements("hit") == ("hitcircle",
                                                 "hitcircleoverlay")
         assert elems.circle_elements("slider_head") == (
-            "sliderstartcircle", "hitcircleoverlay")
+            "sliderstartcircle", None)
         assert elems.circle_elements("slider_end") == (
             "sliderendcircle", "sliderendcircleoverlay")
     # no specialisations → heads/tails reuse hitcircle(+overlay)
@@ -184,6 +186,93 @@ def test_slider_circle_specialisations_most_specific():
         elems = SkinElements(Skin(skin_dir=Path(tmp)), FakeRenderer())
         assert elems.circle_elements("hit") == (None, None)
         assert elems.circle_elements("slider_end") == (None, None)
+
+
+def test_blanked_sliderendcircle_suppresses_overlay_fallback():
+    """The owner's hide-the-tail skin: a fully transparent (1×1 alpha 0)
+    sliderendcircle with NO sliderendcircleoverlay must draw NOTHING at
+    the tail — the base is chosen (and blanked), and its missing
+    companion overlay never falls back to hitcircleoverlay."""
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        _png(d / "hitcircle.png", 128, 128)
+        _png(d / "hitcircleoverlay.png", 128, 128)
+        _png(d / "sliderendcircle.png", 1, 1, alpha=0)   # blanked tail
+        elems = SkinElements(Skin(skin_dir=d), FakeRenderer())
+        base, overlay = elems.circle_elements("slider_end")
+        assert base == "sliderendcircle"
+        assert overlay is None
+        assert "sliderendcircle" in elems.empty
+        # heads (no specialisation) still use the hitcircle pair
+        assert elems.circle_elements("slider_head") == (
+            "hitcircle", "hitcircleoverlay")
+
+
+def test_hud_elements_load_scorebar_inputoverlay_ranking():
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        _png(d / "scorebar-bg.png", 600, 40)
+        _png(d / "scorebar-colour-0.png", 440, 16)       # animated fill
+        _png(d / "scorebar-colour-1.png", 440, 16)
+        _png(d / "scorebar-marker.png", 24, 24)
+        _png(d / "inputoverlay-background.png", 200, 50)
+        _png(d / "inputoverlay-key.png", 50, 50)
+        _png(d / "ranking-X-small.png", 34, 40)
+        fake = FakeRenderer()
+        elems = SkinElements(Skin(skin_dir=d), fake)
+        for name in ("scorebar-bg", "scorebar-colour", "scorebar-marker",
+                     "inputoverlay-background", "inputoverlay-key",
+                     "ranking-X-small"):
+            assert elems.has(name), name
+        assert elems.frame_counts["scorebar-colour"] == 2
+        assert "sk_scorebar-colour_f1" in fake.uploaded
+        assert not elems.has("scorebar-ki")
+        assert not elems.has("ranking-S-small")
+
+
+def test_score_combo_fonts_with_path_prefix_and_extras():
+    """skin.ini prefixes may carry paths (ScorePrefix: Fonts/score/score)
+    — the file map indexes relative paths so those resolve; the dot/
+    comma/percent/x extras load per char."""
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        (d / "Fonts" / "score").mkdir(parents=True)
+        (d / "Fonts" / "combo").mkdir(parents=True)
+        for i in range(10):
+            _png(d / "Fonts" / "score" / f"score-{i}.png", 30, 45)
+            _png(d / "Fonts" / "combo" / f"combo-{i}.png", 32, 48)
+        _png(d / "Fonts" / "score" / "score-percent.png", 28, 45)
+        _png(d / "Fonts" / "score" / "score-dot.png", 12, 45)
+        _png(d / "Fonts" / "combo" / "combo-x.png", 24, 48)
+        (d / "skin.ini").write_text(
+            "[Fonts]\nScorePrefix: Fonts/score/score\nScoreOverlap: 3\n"
+            "ComboPrefix: Fonts/combo/combo\nComboOverlap: 8\n",
+            encoding="utf-8")
+        fake = FakeRenderer()
+        elems = SkinElements(Skin(skin_dir=d), fake)
+        assert elems.has("score_digits")
+        assert elems.has("combo_digits")
+        assert not elems.has("scoreentry_digits")
+        assert elems.score_digit_sizes["5"] == (30.0, 45.0)
+        assert elems.combo_digit_sizes["5"] == (32.0, 48.0)
+        assert elems.score_extra_sizes["%"] == (28.0, 45.0)
+        assert elems.score_extra_sizes["."] == (12.0, 45.0)
+        assert "," not in elems.score_extra_sizes
+        assert elems.combo_extra_sizes["x"] == (24.0, 48.0)
+        assert "sk_score_percent" in fake.uploaded
+        assert "sk_combo_x" in fake.uploaded
+
+
+def test_combo_prefix_defaults_to_score_font():
+    """stable's default ComboPrefix is 'score' — a skin shipping only
+    score-0..9 feeds BOTH the score and the combo counters."""
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        for i in range(10):
+            _png(d / f"score-{i}.png", 30, 45)
+        elems = SkinElements(Skin(skin_dir=d), FakeRenderer())
+        assert elems.has("score_digits")
+        assert elems.has("combo_digits")
 
 
 def test_skin_ini_combo_colors_flow_through_skin():

@@ -14,6 +14,7 @@ MODULES = [
     "tests.test_parser_synthetic",
     "tests.test_skin_ini",
     "tests.test_ruleset",
+    "tests.test_health",
     "tests.test_slider_body",
     "tests.test_playfield_pipeline",
     "tests.test_scene",

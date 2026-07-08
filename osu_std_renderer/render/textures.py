@@ -201,8 +201,9 @@ def bake_digits(height: int = DIGIT_HEIGHT) -> dict[str, np.ndarray]:
 
 # --- HUD textures (render/hud.py) ------------------------------------------------
 
-HUD_CHARSET = "0123456789.%x,KMSABCDURPINLE!"   # +PINLE! → SPIN!/CLEAR!/RPM
-                                                # (procedural spinner text)
+# full uppercase set: HUD labels (ACCURACY/COMBO), key names, grades,
+# SPIN!/CLEAR!/RPM, UR, time readouts ("-0:00")
+HUD_CHARSET = "0123456789.%x,:-!ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 PIE_STEPS = 48          # quantized progress-pie fill masks
 PIE_SIZE = 96
 KEY_SQUARE_SIZE = 128
@@ -264,6 +265,237 @@ def bake_pie(fraction: float, size: int = PIE_SIZE) -> np.ndarray:
     return rgba
 
 
+# --- Argon HUD bakes (skinless default — ppy/osu Argon* components) -----------------
+
+def bake_pill(width: int = 256, height: int = 64) -> np.ndarray:
+    """Fully-rounded white bar (radius = height/2). Generic rounded-rect
+    stand-in for the Argon boxes/bars/indicators (BoxElement with
+    CornerRadius 0.5, ArgonSongProgressBar's RoundedBar, the ArgonKeyCounter
+    input indicator). Scaled non-uniformly at draw time — the cap
+    distortion is invisible at HUD bar sizes."""
+    yy, xx = np.mgrid[0:height, 0:width].astype(np.float64)
+    r = height / 2.0 - 1.0
+    qx = np.abs(xx - (width - 1) / 2.0) - (width / 2.0 - 1.0 - r)
+    qy = np.abs(yy - (height - 1) / 2.0) - (height / 2.0 - 1.0 - r)
+    d = np.hypot(np.maximum(qx, 0.0), np.maximum(qy, 0.0)) \
+        + np.minimum(np.maximum(qx, qy), 0.0) - r
+    alpha = np.clip(-d / _AA_PX, 0.0, 1.0)
+    rgba = np.full((height, width, 4), 255, dtype=np.uint8)
+    rgba[..., 3] = np.round(alpha * 255.0).astype(np.uint8)
+    return rgba
+
+
+def bake_wireframe_cell(width: int = 132, height: int = 240,
+                        seg_frac: float = 0.14,
+                        gap_frac: float = 0.045) -> np.ndarray:
+    """One 7-segment "wireframe" digit cell — the segmented '8' the Argon
+    counters draw behind their digits (ArgonCounterTextComponent's
+    `argon-counter-wireframes` texture, WireframeOpacity 0.25). Procedural
+    stand-in, white; the HUD tints/fades it."""
+    yy, xx = np.mgrid[0:height, 0:width].astype(np.float64)
+    t = seg_frac * width                   # segment thickness
+    gap = gap_frac * height
+    m = t * 0.75                           # cell inset
+    x0, x1 = m, width - m
+    y0, ym, y1 = m, height / 2.0, height - m
+
+    def hseg(cy: float) -> np.ndarray:
+        """Horizontal segment at row cy (hexagonal-ish rounded bar)."""
+        qx = np.abs(xx - width / 2.0) - (x1 - x0 - 2 * t - 2 * gap) / 2.0
+        qy = np.abs(yy - cy) - t / 2.0
+        d = np.hypot(np.maximum(qx, 0.0), np.maximum(qy, 0.0)) \
+            + np.minimum(np.maximum(qx, qy), 0.0) - t * 0.18
+        return np.clip(-d / _AA_PX, 0.0, 1.0)
+
+    def vseg(cx: float, cy: float, half: float) -> np.ndarray:
+        qx = np.abs(xx - cx) - t / 2.0
+        qy = np.abs(yy - cy) - (half - t / 2.0 - gap)
+        d = np.hypot(np.maximum(qx, 0.0), np.maximum(qy, 0.0)) \
+            + np.minimum(np.maximum(qx, qy), 0.0) - t * 0.18
+        return np.clip(-d / _AA_PX, 0.0, 1.0)
+
+    half_v = (ym - y0) / 2.0
+    alpha = hseg(y0 + t / 2.0)
+    alpha = np.maximum(alpha, hseg(ym))
+    alpha = np.maximum(alpha, hseg(y1 - t / 2.0))
+    for cx in (x0 + t / 2.0, x1 - t / 2.0):
+        alpha = np.maximum(alpha, vseg(cx, (y0 + ym) / 2.0, half_v))
+        alpha = np.maximum(alpha, vseg(cx, (ym + y1) / 2.0, half_v))
+    rgba = np.full((height, width, 4), 255, dtype=np.uint8)
+    rgba[..., 3] = np.round(alpha * 255.0).astype(np.uint8)
+    return rgba
+
+
+WEDGE_W = 380.0                 # ArgonWedgePiece size in the default layout
+WEDGE_H = 72.0
+WEDGE_SHEAR = 0.8               # osu!framework Shear = (0.8, 0): x' = x - 0.8y
+WEDGE_R = 10.0                  # CornerRadius (pre-shear space)
+WEDGE_COLOR = (0x66, 0xCC, 0xFF)   # AccentColour #66CCFF
+
+
+def bake_wedge(scale: float = 1.0) -> np.ndarray:
+    """ArgonWedgePiece: a rounded rect sheared by (0.8, 0) with a vertical
+    gradient of #66CCFF from alpha 0 (top) to 0.25 (bottom). Baked in the
+    SHEARED frame (canvas width = W + 0.8·H) so the sprite draws axis-
+    aligned; masking (corner radius) applies pre-shear, as upstream."""
+    w = int(round((WEDGE_W + WEDGE_SHEAR * WEDGE_H) * scale))
+    h = int(round(WEDGE_H * scale))
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float64) / scale
+    # unshear: canvas x = u - 0.8·y + 0.8·H  (u = pre-shear x)
+    u = xx + WEDGE_SHEAR * yy - WEDGE_SHEAR * WEDGE_H
+    r = WEDGE_R
+    qx = np.abs(u - WEDGE_W / 2.0) - (WEDGE_W / 2.0 - r)
+    qy = np.abs(yy - WEDGE_H / 2.0) - (WEDGE_H / 2.0 - r)
+    d = np.hypot(np.maximum(qx, 0.0), np.maximum(qy, 0.0)) \
+        + np.minimum(np.maximum(qx, qy), 0.0) - r
+    shape = np.clip(-d / (_AA_PX / scale), 0.0, 1.0)
+    grad = 0.25 * np.clip(yy / WEDGE_H, 0.0, 1.0)
+    rgba = np.empty((h, w, 4), dtype=np.uint8)
+    rgba[..., 0] = WEDGE_COLOR[0]
+    rgba[..., 1] = WEDGE_COLOR[1]
+    rgba[..., 2] = WEDGE_COLOR[2]
+    rgba[..., 3] = np.round(shape * grad * 255.0).astype(np.uint8)
+    return rgba
+
+
+# --- legacy-default HUD bakes (custom-skin fallback — classic osu! look) ------------
+#
+# Under a CUSTOM skin, missing elements fall back to the CLASSIC default
+# skin's look (lazer's legacy-skin fallback chain), NEVER to Argon. These
+# are procedural approximations of the classic assets (house pattern, no
+# ppy asset files): the classic score/combo font (white digits with a dark
+# outline), the classic scorebar (dark frame + warm green fill + round ki
+# marker — LegacyHealthDisplay's old-style pieces), and the classic input
+# overlay (translucent strip + light rounded key — LegacyKeyCounter[Display]).
+
+LEGACY_FONT_HEIGHT = 45.0       # classic score-*.png logical height (768-space)
+LEGACY_BAR_BG_SIZE = (695.0, 44.0)   # classic scorebar-bg logical size
+LEGACY_BAR_FILL_SIZE = (672.0, 16.0)
+LEGACY_KI_SIZE = 24.0
+LEGACY_IO_KEY_SIZE = 43.0       # classic inputoverlay-key logical size
+LEGACY_IO_BG_SIZE = (200.0, 50.0)
+
+
+def bake_legacy_font(chars: str = "0123456789.,%x",
+                     height: int = 128) -> dict[str, np.ndarray]:
+    """Classic score-font stand-in: bold white glyphs with a dark outline
+    (the default skin score-0..9/dot/comma/percent/x look). Used whenever
+    a custom skin lacks its ScorePrefix/ComboPrefix set (or single chars
+    of it — stable falls back per-file to the default skin)."""
+    font = _load_font(int(height * 0.9))
+    boxes = {}
+    for ch in chars:
+        try:
+            boxes[ch] = font.getbbox(ch)
+        except AttributeError:
+            w, h = font.getsize(ch)  # type: ignore[attr-defined]
+            boxes[ch] = (0, 0, w, h)
+    top = min(b[1] for b in boxes.values())
+    bottom = max(b[3] for b in boxes.values())
+    pad = 8
+    outline = max(2, height // 24)
+    out: dict[str, np.ndarray] = {}
+    for ch in chars:
+        x0, _, x1, _ = boxes[ch]
+        w = (x1 - x0) + 2 * pad
+        h = (bottom - top) + 2 * pad
+        img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        drw = ImageDraw.Draw(img)
+        try:
+            drw.text((pad - x0, pad - top), ch, font=font,
+                     fill=(255, 255, 255, 255),
+                     stroke_width=outline, stroke_fill=(40, 40, 48, 255))
+        except TypeError:      # ancient PIL without stroke support
+            drw.text((pad - x0, pad - top), ch, font=font,
+                     fill=(255, 255, 255, 255))
+        out[ch] = np.asarray(img, dtype=np.uint8).copy()
+    return out
+
+
+def _rounded_rect_alpha(w: int, h: int, radius: float) -> np.ndarray:
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float64)
+    qx = np.abs(xx - (w - 1) / 2.0) - (w / 2.0 - 1.0 - radius)
+    qy = np.abs(yy - (h - 1) / 2.0) - (h / 2.0 - 1.0 - radius)
+    d = np.hypot(np.maximum(qx, 0.0), np.maximum(qy, 0.0)) \
+        + np.minimum(np.maximum(qx, qy), 0.0) - radius
+    return d
+
+
+def bake_legacy_scorebar_bg() -> np.ndarray:
+    """Classic scorebar-bg stand-in: a dark translucent panel with a light
+    rim around the fill groove (groove at the LegacyOldStyleFill offset
+    (3,10)·1.6 so the classic fill lines up)."""
+    w, h = int(LEGACY_BAR_BG_SIZE[0]), int(LEGACY_BAR_BG_SIZE[1])
+    d = _rounded_rect_alpha(w, h, 10.0)
+    panel = np.clip(-d / _AA_PX, 0.0, 1.0)
+    rim = panel * np.clip((d + 2.5) / _AA_PX, 0.0, 1.0)
+    rgba = np.zeros((h, w, 4), dtype=np.uint8)
+    base = panel * 0.55
+    rgba[..., 0] = np.round(24 * panel + 200 * rim).astype(np.uint8)
+    rgba[..., 1] = np.round(26 * panel + 205 * rim).astype(np.uint8)
+    rgba[..., 2] = np.round(34 * panel + 215 * rim).astype(np.uint8)
+    rgba[..., 3] = np.round(np.maximum(base, rim * 0.9) * 255).astype(np.uint8)
+    return rgba
+
+
+def bake_legacy_scorebar_colour() -> np.ndarray:
+    """Classic scorebar-colour stand-in: the warm green-yellow fill bar."""
+    w, h = int(LEGACY_BAR_FILL_SIZE[0]), int(LEGACY_BAR_FILL_SIZE[1])
+    yy = np.mgrid[0:h, 0:w][0].astype(np.float64) / max(h - 1, 1)
+    rgba = np.empty((h, w, 4), dtype=np.uint8)
+    top = np.array([214, 242, 120], dtype=np.float64)
+    bot = np.array([158, 208, 60], dtype=np.float64)
+    for c in range(3):
+        rgba[..., c] = np.round(top[c] + (bot[c] - top[c]) * yy).astype(np.uint8)
+    rgba[..., 3] = 255
+    return rgba
+
+
+def bake_legacy_ki(tint: tuple[int, int, int] = (255, 255, 255)) -> np.ndarray:
+    """Classic ki marker stand-in: filled disc + ring, optionally tinted
+    (kidanger → amber, kidanger2 → red)."""
+    size = 96
+    d = _dist_grid(size)
+    radius = size / 2.0 - 2.0
+    disc = np.clip((radius - d) / _AA_PX, 0.0, 1.0)
+    ring = disc * np.clip((d - radius * 0.72) / _AA_PX, 0.0, 1.0)
+    rgba = np.empty((size, size, 4), dtype=np.uint8)
+    for c in range(3):
+        inner = tint[c] * 0.92
+        rgba[..., c] = np.round(inner + (255 - inner) * ring).astype(np.uint8)
+    rgba[..., 3] = np.round(disc * 255.0).astype(np.uint8)
+    return rgba
+
+
+def bake_legacy_io_key() -> np.ndarray:
+    """Classic inputoverlay-key stand-in: light rounded square with a soft
+    border (tinted yellow/pink by the display while pressed)."""
+    size = 128
+    d = _rounded_rect_alpha(size, size, size * 0.22)
+    inside = np.clip(-d / _AA_PX, 0.0, 1.0)
+    border = inside * np.clip((d + size * 0.055) / _AA_PX, 0.0, 1.0)
+    rgba = np.empty((size, size, 4), dtype=np.uint8)
+    grey = 226 - 46 * border
+    for c in range(3):
+        rgba[..., c] = np.round(grey).astype(np.uint8)
+    rgba[..., 3] = np.round(inside * 255.0).astype(np.uint8)
+    return rgba
+
+
+def bake_legacy_io_bg() -> np.ndarray:
+    """Classic inputoverlay-background stand-in: translucent dark strip
+    (drawn rotated 90° at the right screen edge, as stable does)."""
+    w, h = int(LEGACY_IO_BG_SIZE[0]), int(LEGACY_IO_BG_SIZE[1])
+    d = _rounded_rect_alpha(w, h, 12.0)
+    inside = np.clip(-d / _AA_PX, 0.0, 1.0)
+    rgba = np.zeros((h, w, 4), dtype=np.uint8)
+    rgba[..., 0] = 18
+    rgba[..., 1] = 18
+    rgba[..., 2] = 24
+    rgba[..., 3] = np.round(inside * 0.55 * 255.0).astype(np.uint8)
+    return rgba
+
+
 def bake_tri_down(size: int = 64) -> np.ndarray:
     """Downward-pointing AA triangle (hit-error moving-average arrow)."""
     img = Image.new("RGBA", (size * 4, size * 4), (0, 0, 0, 0))
@@ -311,3 +543,27 @@ class TextureBank:
         renderer.upload_texture("tri_down", bake_tri_down())
         for i in range(PIE_STEPS):
             renderer.upload_texture(f"pie_{i:02d}", bake_pie(i / PIE_STEPS))
+
+        # --- Argon HUD set (skinless default) --------------------------------
+        renderer.upload_texture("pill", bake_pill())
+        renderer.upload_texture("argon_wireframe", bake_wireframe_cell())
+        renderer.upload_texture("argon_wedge", bake_wedge())
+        wf = bake_wireframe_cell()
+        self.wireframe_aspect = wf.shape[1] / wf.shape[0]
+
+        # --- legacy-default HUD set (custom-skin fallback, classic look) -----
+        self.legacy_aspect: dict[str, float] = {}
+        for ch, rgba in bake_legacy_font().items():
+            key = {"%": "percent", ".": "dot", ",": "comma"}.get(ch, ch)
+            renderer.upload_texture(f"lg_{key}", rgba)
+            self.legacy_aspect[ch] = rgba.shape[1] / rgba.shape[0]
+        renderer.upload_texture("lg_scorebar_bg", bake_legacy_scorebar_bg())
+        renderer.upload_texture("lg_scorebar_colour",
+                                bake_legacy_scorebar_colour())
+        renderer.upload_texture("lg_ki", bake_legacy_ki())
+        renderer.upload_texture("lg_kidanger",
+                                bake_legacy_ki((255, 196, 70)))
+        renderer.upload_texture("lg_kidanger2",
+                                bake_legacy_ki((255, 80, 80)))
+        renderer.upload_texture("lg_io_key", bake_legacy_io_key())
+        renderer.upload_texture("lg_io_bg", bake_legacy_io_bg())

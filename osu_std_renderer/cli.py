@@ -109,7 +109,10 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--snaking-in", action=BA, default=True)
     ap.add_argument("--snaking-out", action=BA, default=True)
     ap.add_argument("--cursor", action=BA, default=True)
-    ap.add_argument("--skin-cursor", action=BA, default=False)
+    ap.add_argument("--skin-cursor", action=BA, default=True,
+                    help="use the skin's cursor when the skin ships one "
+                         "(real osu has no toggle — this is the default; "
+                         "--no-skin-cursor forces the procedural cursor)")
     ap.add_argument("--cursor-scale", type=float, default=1.0)
     ap.add_argument("--force-long-trail", action=BA, default=False,
                     help="§4.7 ForceLongTrail: long connected skin trail "
@@ -186,7 +189,7 @@ def find_osu_file(beatmap: Path, replay_md5: str) -> Path:
 
 
 def _render(args, settings: StdRenderSettings, beatmap, frames,
-            beatmap_dir: Path, skin_info, judgments=None) -> int:
+            beatmap_dir: Path, skin_info, judgments=None, meta=None) -> int:
     """The Phase-1 record path: scene → record loop → ffmpeg."""
     # GL-touching imports live here so --parse-only works GL-less
     from .record.audio import AudioError, AudioMixer, decode_to_pcm
@@ -239,11 +242,23 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
         print(f"WARNING: background '{beatmap.bg}' not found in the beatmap "
               "dir — rendering without background", file=sys.stderr)
 
-    # the §4.6 HUD needs the judgment stream; --dump-frames without a
-    # replay sim just renders HUD-less (the Phase-1 fallback)
+    # the HUD needs the judgment stream; --dump-frames without a replay
+    # sim just renders HUD-less (the Phase-1 fallback). Component set per
+    # lazer's skin architecture: Argon when skinless, Legacy + skin
+    # textures under a custom skin (hud.py docstring). The HP drain model
+    # (ruleset/health.py) and the .osr score pin wire in here.
     hud = None
     if judgments is not None:
-        hud = StdHud(spr, bank, settings, judgments, frames, beatmap)
+        from .ruleset import HealthTimeline
+        health = HealthTimeline(beatmap, judgments)
+        print(f"health: drain {health.drain_rate * 1000.0:.3f} hp/s "
+              f"(target min {health.target_min:.2f}), "
+              f"end {health.final_hp * 100.0:.0f}%", file=sys.stderr)
+        hud = StdHud(spr, bank, settings, judgments, frames, beatmap,
+                     skin_elems=skin_elems, health=health)
+        if meta is not None and meta.score > 0:
+            # pin the displayed score curve to the .osr's recorded total
+            hud.pin_final_score(meta.score)
 
     combo_colors = [(r / 255.0, g / 255.0, b / 255.0)
                     for r, g, b in skin_info.combo_colors]
@@ -297,7 +312,7 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
             p = out_dir / f"{stem}_t{int(round(t))}ms.png"
             Image.fromarray(rgb).save(p)
             print(f"wrote {p}", file=sys.stderr)
-        _print_hud_final_values(hud, judgments)
+        _print_hud_final_values(hud, judgments, meta)
         spr.release()
         return 0
 
@@ -391,7 +406,7 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
             except OSError:
                 pass
     wall = time.monotonic() - t0
-    _print_hud_final_values(hud, judgments)
+    _print_hud_final_values(hud, judgments, meta)
     print(f"done: {n_frames} frames in {wall:.1f}s "
           f"({n_frames / wall:.1f} fps render, encoder {encoder}) → {output}",
           file=sys.stderr)
@@ -399,12 +414,16 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
     return 0
 
 
-def _print_hud_final_values(hud, judgments) -> None:
+def _print_hud_final_values(hud, judgments, meta=None) -> None:
     """The HUD phase's honesty line: the numbers the LAST frame displays,
-    with the sim-vs-replay accuracy check spelled out."""
+    with the sim-vs-replay score/accuracy checks spelled out."""
     if hud is None:
         return
     fv = hud.final_values()
+    score_line = f"final score {fv['score']}"
+    if meta is not None and meta.score > 0:
+        ok = "==" if fv["score"] == meta.score else "!= MISMATCH"
+        score_line += f" (replay {meta.score} {ok})"
     acc_line = f"acc {fv['acc'] * 100.0:.2f}%"
     if judgments is not None and judgments.real_counts is not None:
         c3, c1, c5, cm = judgments.real_counts
@@ -413,9 +432,13 @@ def _print_hud_final_values(hud, judgments) -> None:
                     if total else 1.0)
         ok = "==" if abs(real_acc - fv["acc"]) < 5e-5 else "!= MISMATCH"
         acc_line += f" (replay {real_acc * 100.0:.2f}% {ok})"
-    print(f"hud: final score {fv['score']} | {acc_line} | "
+    hp_part = ""
+    if fv.get("hp") is not None:
+        hp_part = f" | hp {fv['hp'] * 100.0:.0f}%"
+    print(f"hud: {score_line} | {acc_line} | "
           f"combo {fv['combo']}x (max {fv['max_combo']}x) | "
-          f"UR {fv['ur']:.1f} | grade {fv['grade']}", file=sys.stderr)
+          f"UR {fv['ur']:.1f} | grade {fv['grade']}{hp_part}",
+          file=sys.stderr)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -513,7 +536,7 @@ def main(argv: list[str] | None = None) -> int:
 
     beatmap_dir = args.beatmap if args.beatmap.is_dir() else args.beatmap.parent
     return _render(args, settings, beatmap, frames, beatmap_dir, skin_info,
-                   judgments=judgments)
+                   judgments=judgments, meta=meta)
 
 
 if __name__ == "__main__":
