@@ -20,6 +20,7 @@ MODULES = [
     "tests.test_hud",
     "tests.test_background",
     "tests.test_skin_elements",
+    "tests.test_markers",
 ]
 
 

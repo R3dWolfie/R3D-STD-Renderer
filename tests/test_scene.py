@@ -155,8 +155,10 @@ SliderTickRate:1
 
 [HitObjects]
 256,192,1000,5,0,0:0:0:0:
-100,100,2000,2,0,L|400:100,1,280
+100,100,2000,2,0,L|400:100,2,280
 """
+# the slider REPEATS (2 spans) and shares the circle's combo — the smoke
+# frame exercises reverse arrows, slider ticks and follow points too
 
 
 def test_scene_gpu_smoke():

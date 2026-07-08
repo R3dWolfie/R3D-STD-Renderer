@@ -109,6 +109,83 @@ def test_layout_skin_digits_overlap_math():
     assert run[0][2] == 50.0 and run[0][3] == 70.0
 
 
+def test_new_marker_elements_load_and_fall_back():
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        _make_skin(d)
+        _png(d / "reversearrow.png", 100, 60)
+        _png(d / "sliderscorepoint.png", 16, 16)
+        _png(d / "followpoint.png", 30, 12)
+        elems = SkinElements(Skin(skin_dir=d), FakeRenderer())
+        for name in ("reversearrow", "sliderscorepoint", "followpoint"):
+            assert elems.has(name), name
+        assert elems.size["reversearrow"] == (100.0, 60.0)
+        # absent in a bare skin → procedural fallback per element
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        _png(d / "hitcircle.png", 128, 128)
+        elems = SkinElements(Skin(skin_dir=d), FakeRenderer())
+        for name in ("reversearrow", "sliderscorepoint", "followpoint"):
+            assert not elems.has(name), name
+
+
+def test_followpoint_frames_and_animation_cycling():
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        (d / "skin.ini").write_text("Version: 2.5\nAnimationFramerate: 10\n",
+                                    encoding="utf-8")
+        for i in range(3):
+            _png(d / f"followpoint-{i}.png", 30, 12)
+        for i in range(2):
+            _png(d / f"sliderb{i}.png", 118, 118)
+        fake = FakeRenderer()
+        elems = SkinElements(Skin(skin_dir=d), fake)
+        assert elems.frame_counts["followpoint"] == 3
+        assert elems.frame_counts["sliderb"] == 2
+        assert "sk_followpoint" in fake.uploaded
+        assert "sk_followpoint_f1" in fake.uploaded
+        assert "sk_followpoint_f2" in fake.uploaded
+        # AnimationFramerate 10 → 100 ms per frame, cycling
+        assert elems.frame_key("followpoint", 0.0) == "sk_followpoint"
+        assert elems.frame_key("followpoint", 150.0) == "sk_followpoint_f1"
+        assert elems.frame_key("followpoint", 250.0) == "sk_followpoint_f2"
+        assert elems.frame_key("followpoint", 320.0) == "sk_followpoint"
+        assert elems.frame_key("sliderb", 150.0) == "sk_sliderb_f1"
+        # single-frame / unknown elements always take the base key
+        assert elems.frame_key("hitcircle", 999.0) == "sk_hitcircle"
+
+
+def test_slider_circle_specialisations_most_specific():
+    # skin ships sliderstartcircle+sliderendcircle → heads/tails use them,
+    # overlays fall back per-asset to hitcircleoverlay
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        _png(d / "hitcircle.png", 128, 128)
+        _png(d / "hitcircleoverlay.png", 128, 128)
+        _png(d / "sliderstartcircle.png", 128, 128)
+        _png(d / "sliderendcircle.png", 128, 128)
+        _png(d / "sliderendcircleoverlay.png", 128, 128)
+        elems = SkinElements(Skin(skin_dir=d), FakeRenderer())
+        assert elems.circle_elements("hit") == ("hitcircle",
+                                                "hitcircleoverlay")
+        assert elems.circle_elements("slider_head") == (
+            "sliderstartcircle", "hitcircleoverlay")
+        assert elems.circle_elements("slider_end") == (
+            "sliderendcircle", "sliderendcircleoverlay")
+    # no specialisations → heads/tails reuse hitcircle(+overlay)
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        _png(d / "hitcircle.png", 128, 128)
+        elems = SkinElements(Skin(skin_dir=d), FakeRenderer())
+        assert elems.circle_elements("slider_head") == ("hitcircle", None)
+        assert elems.circle_elements("slider_end") == ("hitcircle", None)
+    # nothing at all → procedural (None, None)
+    with tempfile.TemporaryDirectory() as tmp:
+        elems = SkinElements(Skin(skin_dir=Path(tmp)), FakeRenderer())
+        assert elems.circle_elements("hit") == (None, None)
+        assert elems.circle_elements("slider_end") == (None, None)
+
+
 def test_skin_ini_combo_colors_flow_through_skin():
     # Combo1..N in skin.ini replace the defaults (§3.2) — the CLI feeds
     # skin_info.combo_colors straight into the scene

@@ -29,6 +29,14 @@ void). `--skin DIR` loads a real skin's core gameplay textures
 (render/skin_elements.py) — per-element fallback to the procedural set;
 a `skin:` report line lists what came from the skin.
 
+ARROWS + TICKS + FOLLOW POINTS PHASE (render/markers.py + scene draws):
+reverse arrows (beat-pulsed, white, tangent-oriented), slider ticks of
+the active span, follow points on the lazer schedule (--follow-points
+honors DrawFollowPoints), sliderstartcircle/sliderendcircle head/tail
+specialisations, sliderb/followpoint AnimationFramerate cycling, and the
+§3.3 two-mode skin cursor trail (cursormiddle → long connected trail,
+else sparse 16.67 ms drops; --force-long-trail = §4.7 ForceLongTrail).
+
 Debug extras:
     --parse-only            parse map+replay+skin, print a summary, exit 0
     --start N               start the render N seconds into the map
@@ -88,6 +96,9 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--cursor", action=BA, default=True)
     ap.add_argument("--skin-cursor", action=BA, default=False)
     ap.add_argument("--cursor-scale", type=float, default=1.0)
+    ap.add_argument("--force-long-trail", action=BA, default=False,
+                    help="§4.7 ForceLongTrail: long connected skin trail "
+                         "even without cursormiddle")
     ap.add_argument("--key-overlay", action=BA, default=True)
     ap.add_argument("--pp-counter", action=BA, default=True)
     ap.add_argument("--hit-counter", action=BA, default=False)
@@ -217,8 +228,10 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
         snaking_in=settings.slider_snaking_in,
         draw_approach_circles=settings.draw_approach_circles,
         draw_combo_numbers=settings.draw_combo_numbers,
+        draw_follow_points=settings.draw_follow_points,
         draw_cursor=settings.draw_cursor,
         cursor_scale=settings.cursor_scale,
+        force_long_trail=settings.cursor_long_trail,
         judgments=judgments,
         hud=hud,
         skin_elems=skin_elems,
@@ -356,7 +369,9 @@ def main(argv: list[str] | None = None) -> int:
         draw_follow_points=args.follow_points,
         slider_snaking_in=args.snaking_in, slider_snaking_out=args.snaking_out,
         draw_cursor=args.cursor, use_skin_cursor=args.skin_cursor,
-        cursor_scale=args.cursor_scale, show_key_overlay=args.key_overlay,
+        cursor_scale=args.cursor_scale,
+        cursor_long_trail=args.force_long_trail,
+        show_key_overlay=args.key_overlay,
         show_pp_counter=args.pp_counter, show_hit_counter=args.hit_counter,
         show_hit_error_meter=args.hit_error_meter,
         show_unstable_rate=args.unstable_rate, show_combo=args.show_combo,

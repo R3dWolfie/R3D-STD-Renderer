@@ -18,6 +18,10 @@ Everything the Phase-1 scene draws is baked here at init:
                 took before Torus landed), baked white for tinting
   miss_x        AA diagonal cross for the miss judgment popup (tinted red
                 by the scene — the ruleset phase's judgment sprites)
+  dot           small filled AA disc — the sliderscorepoint (slider tick)
+                and followpoint procedural stand-in (white, untinted)
+  arrow         right-pointing solid arrow — the reversearrow stand-in
+                (white; the scene rotates it along the path tangent)
 
 HUD PHASE additions (render/hud.py consumes these; §4.6 elements, drawn
 in the §5.3 virtual-1080p UI space):
@@ -128,6 +132,30 @@ def bake_miss_x(size: int = 128, thickness: float = 0.16,
     rgba = np.full((size, size, 4), 255, dtype=np.uint8)
     rgba[..., 3] = np.round(alpha * 255.0).astype(np.uint8)
     return rgba
+
+
+def bake_dot(size: int = 64) -> np.ndarray:
+    """Small filled white disc, AA edge (slider tick / followpoint dot)."""
+    d = _dist_grid(size)
+    radius = size / 2.0 - 2.0
+    alpha = np.clip((radius - d) / _AA_PX, 0.0, 1.0)
+    rgba = np.full((size, size, 4), 255, dtype=np.uint8)
+    rgba[..., 3] = np.round(alpha * 255.0).astype(np.uint8)
+    return rgba
+
+
+def bake_arrow(size: int = 256) -> np.ndarray:
+    """White right-pointing arrow (shaft + head), supersampled AA — the
+    reversearrow fallback, sized to sit inside the end circle when drawn
+    at the circle diameter."""
+    s4 = size * 4
+    pts = [(0.16, 0.40), (0.50, 0.40), (0.50, 0.24), (0.84, 0.50),
+           (0.50, 0.76), (0.50, 0.60), (0.16, 0.60)]
+    img = Image.new("RGBA", (s4, s4), (0, 0, 0, 0))
+    ImageDraw.Draw(img).polygon([(x * s4, y * s4) for x, y in pts],
+                                fill=(255, 255, 255, 255))
+    img = img.resize((size, size), Image.LANCZOS)   # cheap supersampled AA
+    return np.asarray(img, dtype=np.uint8).copy()
 
 
 def _load_font(px: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
@@ -262,6 +290,8 @@ class TextureBank:
                                 bake_ring(APPROACH_SIZE, APPROACH_THICKNESS))
         renderer.upload_texture("glow", bake_glow())
         renderer.upload_texture("miss_x", bake_miss_x())
+        renderer.upload_texture("dot", bake_dot())
+        renderer.upload_texture("arrow", bake_arrow())
         self.digit_aspect: dict[str, float] = {}
         for ch, rgba in bake_digits().items():
             renderer.upload_texture(f"digit_{ch}", rgba)

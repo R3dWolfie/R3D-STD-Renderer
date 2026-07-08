@@ -24,6 +24,20 @@ Elements loaded this phase (osu file names; animations take frame 0):
                        0). A skin's FULLY TRANSPARENT texture (classic
                        empty hit300.png) counts as LOADED but draws
                        NOTHING — real osu shows no 300 popup for it.
+  reversearrow         repeat arrow on the slider end circle — WHITE
+                       (never combo-tinted), beat-pulsed (scene draws it)
+  sliderscorepoint     slider tick dot, untinted
+  followpoint          same-combo connection dot (followpoint-0.. frames;
+                       AnimationFramerate cycling via frame_key)
+  sliderstartcircle(overlay) / sliderendcircle(overlay)
+                       §3.3 slider head/tail specialisations, applied via
+                       GetMostSpecific vs hitcircle(overlay) —
+                       circle_elements() hands the scene the winning pair
+
+ANIMATION FRAMES: sliderb and followpoint upload EVERY frame
+(sk_<name> = frame 0, sk_<name>_fN beyond) and cycle on the map clock via
+frame_key() (skin.ini GetFrameTime: AnimationFramerate>0 ? 1000/rate :
+1000/frames). Everything else still takes frame 0.
 
 SIZING — the osu convention: a 128 px @1x hitcircle spans the 64 osu!px
 base radius, i.e. circle-tied textures draw at
@@ -34,11 +48,9 @@ logic in skin/skin.py). The cursor is UI-space, not playfield-space:
 
 NOT skinnable yet (honest list, stays procedural/absent): spinner (no
 visuals at all), HUD (score/combo fonts, hit-error, key overlay — all
-procedural), scorebar/hp (absent), reversearrow (repo has no reverse-arrow
-visuals yet), sliderstartcircle/sliderendcircle specialisations (slider
-head/tail reuse hitcircle), slider ticks/followpoints (not drawn yet),
-cursor rotate/expand animation, connected cursormiddle-style dense trail,
-animation frames beyond frame 0, hitsounds.
+procedural), scorebar/hp (absent), hitcircle-full (mandala),
+sliderb-nd/-spec companions, cursor rotate/expand animation, animation
+frames beyond frame 0 for everything but sliderb/followpoint, hitsounds.
 """
 from __future__ import annotations
 
@@ -72,32 +84,42 @@ def layout_skin_digits(number: int, sizes: dict[str, tuple[float, float]],
     return out
 
 
-# element → (frames?, dash?) — how the file resolves (§3.1 GetFrames)
-_CORE_ELEMENTS: dict[str, tuple[bool, bool]] = {
-    "hitcircle": (False, False),
-    "hitcircleoverlay": (False, False),
-    "approachcircle": (False, False),
-    "sliderb": (True, False),           # sliderb0.png.. animation, no dash
-    "sliderfollowcircle": (True, False),
-    "cursor": (False, False),
-    "cursortrail": (False, False),
-    "cursormiddle": (False, False),
-    "hit0": (True, True),               # hit0-0.png.. animation, dashed
-    "hit50": (True, True),
-    "hit100": (True, True),
-    "hit300": (True, True),
+# element → (frames?, dash?, cycle?) — how the file resolves (§3.1
+# GetFrames) and whether ALL frames upload for frame_key() cycling
+_CORE_ELEMENTS: dict[str, tuple[bool, bool, bool]] = {
+    "hitcircle": (False, False, False),
+    "hitcircleoverlay": (False, False, False),
+    "sliderstartcircle": (False, False, False),
+    "sliderstartcircleoverlay": (False, False, False),
+    "sliderendcircle": (False, False, False),
+    "sliderendcircleoverlay": (False, False, False),
+    "approachcircle": (False, False, False),
+    "reversearrow": (False, False, False),
+    "sliderscorepoint": (False, False, False),
+    "followpoint": (True, True, True),  # followpoint-0.png.. animation
+    "sliderb": (True, False, True),     # sliderb0.png.. animation, no dash
+    "sliderfollowcircle": (True, False, False),
+    "cursor": (False, False, False),
+    "cursortrail": (False, False, False),
+    "cursormiddle": (False, False, False),
+    "hit0": (True, True, False),        # hit0-0.png.. animation, dashed
+    "hit50": (True, True, False),
+    "hit100": (True, True, False),
+    "hit300": (True, True, False),
 }
 
 
 class SkinElements:
     """Loads the core set from a Skin into a SpriteRenderer under
-    `sk_<element>` keys (digits: `sk_digit_<ch>`).
+    `sk_<element>` keys (digits: `sk_digit_<ch>`; animation frames beyond
+    0: `sk_<element>_fN`).
 
     loaded       elements that resolved from the skin/fallback ("digits"
                  covers the whole HitCirclePrefix set)
     empty        loaded but fully transparent → draw NOTHING (hit300 case)
-    size         element → (w, h) LOGICAL px (@2x already halved)
+    size         element → (w, h) LOGICAL px (@2x already halved; frame 0)
     digit_sizes  digit char → (w, h) logical px
+    frame_counts element → uploaded frame count (cycling elements only)
     """
 
     def __init__(self, skin: Skin, renderer):
@@ -107,9 +129,11 @@ class SkinElements:
         self.empty: set[str] = set()
         self.size: dict[str, tuple[float, float]] = {}
         self.digit_sizes: dict[str, tuple[float, float]] = {}
+        self.frame_counts: dict[str, int] = {}
 
-        for name, (frames, dash) in _CORE_ELEMENTS.items():
-            self._load_one(renderer, name, frames=frames, dash=dash)
+        for name, (frames, dash, cycle) in _CORE_ELEMENTS.items():
+            self._load_one(renderer, name, frames=frames, dash=dash,
+                           cycle=cycle)
 
         prefix = self.info.hit_circle_prefix or "default"
         tfs = {str(i): skin.find_texture(f"{prefix}-{i}") for i in range(10)}
@@ -121,23 +145,48 @@ class SkinElements:
                                         rgba.shape[0] * tf.scale)
             self.loaded.add("digits")
 
+        # §3.3 slider head/tail specialisations (GetMostSpecific): the
+        # (circle, overlay) element pair each role actually draws
+        self._hit_pair = (self._pick("hitcircle"),
+                          self._pick("hitcircleoverlay"))
+        self._head_pair = (
+            self._most_specific("sliderstartcircle", "hitcircle"),
+            self._most_specific("sliderstartcircleoverlay",
+                                "hitcircleoverlay"))
+        self._end_pair = (
+            self._most_specific("sliderendcircle", "hitcircle"),
+            self._most_specific("sliderendcircleoverlay",
+                                "hitcircleoverlay"))
+
     def _load_one(self, renderer, name: str, *, frames: bool,
-                  dash: bool) -> None:
+                  dash: bool, cycle: bool = False) -> None:
         if frames:
             found = self.skin.find_frames(name, use_dash=dash)
-            tf = found[0] if found else None   # frame 0 this phase
+            if not cycle:
+                found = found[:1]          # frame 0 only
         else:
             tf = self.skin.find_texture(name)
-        if tf is None:
+            found = [tf] if tf is not None else []
+        if not found:
             return
-        rgba = tf.load_rgba()
-        if rgba.size == 0:
-            return
-        renderer.upload_texture(f"sk_{name}", rgba)
-        self.size[name] = (rgba.shape[1] * tf.scale, rgba.shape[0] * tf.scale)
-        self.loaded.add(name)
-        if int(rgba[..., 3].max()) == 0:
-            self.empty.add(name)   # skin explicitly blanks this element
+        n = 0
+        for i, tf in enumerate(found):
+            rgba = tf.load_rgba()
+            if rgba.size == 0:
+                if i == 0:
+                    return
+                break
+            renderer.upload_texture(
+                f"sk_{name}" if i == 0 else f"sk_{name}_f{i}", rgba)
+            if i == 0:
+                self.size[name] = (rgba.shape[1] * tf.scale,
+                                   rgba.shape[0] * tf.scale)
+                self.loaded.add(name)
+                if int(rgba[..., 3].max()) == 0:
+                    self.empty.add(name)   # skin explicitly blanks this
+            n += 1
+        if cycle and n:
+            self.frame_counts[name] = n
 
     def has(self, name: str) -> bool:
         return name in self.loaded
@@ -145,6 +194,45 @@ class SkinElements:
     @staticmethod
     def key(name: str) -> str:
         return f"sk_{name}"
+
+    def frame_key(self, name: str, t: float) -> str:
+        """Texture key of `name` at map time t: cycling elements pick
+        their frame per skin.ini GetFrameTime (AnimationFramerate > 0 ?
+        1000/rate : 1000/frames); single-frame elements stay sk_<name>."""
+        n = self.frame_counts.get(name, 1)
+        if n <= 1:
+            return f"sk_{name}"
+        ft = self.info.get_frame_time(n)
+        if ft <= 0:
+            return f"sk_{name}"
+        i = int(t / ft) % n
+        return f"sk_{name}" if i == 0 else f"sk_{name}_f{i}"
+
+    def _pick(self, name: str) -> str | None:
+        return name if name in self.loaded else None
+
+    def _most_specific(self, special: str, base: str) -> str | None:
+        """§3.1 GetMostSpecific over LOADED elements: the specialised
+        name wins unless the base resolved from a higher-priority source
+        (skin.get_most_specific compares resolution sources)."""
+        s_ok, b_ok = special in self.loaded, base in self.loaded
+        if s_ok and b_ok:
+            return self.skin.get_most_specific(special, base)
+        if s_ok:
+            return special
+        if b_ok:
+            return base
+        return None
+
+    def circle_elements(self, role: str = "hit") \
+            -> tuple[str | None, str | None]:
+        """(circle_element, overlay_element) a hit circle of `role`
+        ("hit" | "slider_head" | "slider_end") draws; None → procedural."""
+        if role == "slider_head":
+            return self._head_pair
+        if role == "slider_end":
+            return self._end_pair
+        return self._hit_pair
 
     def report_lines(self) -> list[str]:
         """The honesty lines: what came from the skin vs the procedural
