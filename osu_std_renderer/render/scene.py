@@ -32,11 +32,31 @@ JUDGMENT PHASE (ruleset/ruleset.py drives this; pass judgments=SimResult):
   * without a replay/judgments (--dump-frames debug, future --no-replay)
     every object falls back to the Phase-1 "perfect hit at startTime".
 
+BACKGROUND + DIM PHASE (§4.10, render/background.py): the map background
+draws FIRST (under everything), aspect-filled to the frame, tinted grey
+by 1 - DimEnvelope.level(t) so only the background dims. No bg → the
+dark-void clear, unchanged.
+
+SKIN PHASE (render/skin_elements.py): when a SkinElements is attached,
+each core element the skin provides replaces its procedural stand-in —
+hitcircle (combo-tinted) + hitcircleoverlay (untinted, above the circle,
+under the number unless HitCircleOverlayAboveNumber), approachcircle
+(tinted), HitCirclePrefix combo digits (HitCircleOverlap layout), sliderb
+(tint per AllowSliderBallTint/SliderBall), sliderfollowcircle (2.4× while
+tracking), skin.ini SliderBorder/SliderTrackOverride body colours, skin
+cursor/trail/middle (behind --skin-cursor, CursorCentre honored), hit0/
+50/100/300 judgment sprites (a fully-transparent skin texture = draw
+NOTHING — the classic empty hit300). Elements the skin lacks fall back
+per-element to the procedural set (the §3.1 LOCAL source).
+
 REMAINING SIMPLIFICATIONS (each is a later-phase item):
   * spinners: no visuals (judgment popup only); counted and logged.
   * no reverse arrows / slider ticks / follow points / hit lighting yet.
   * slider bodies are rebuilt every frame (0.2 ms/body — fine at this
     phase; an FBO cache per static body is the known perf step).
+  * skin gaps: see skin_elements.py's honest list (spinner/HUD/scorebar
+    stay procedural or absent; animations take frame 0; no start/end
+    circle specialisations; no cursor rotate/expand).
 
 The lifecycle math lives in module-level pure functions so tests need no
 GL context.
@@ -52,6 +72,8 @@ from ..beatmap.objects import Slider, Spinner
 from ..replay.replay import cursor_at
 from ..ruleset import JudgmentKind
 from .gl import Sprite
+from .skin_elements import (FOLLOW_CIRCLE_SCALE, CURSOR_UI_HEIGHT,
+                            circle_pixel_scale, layout_skin_digits)
 from .slider_body import DEFAULT_COMBO_COLORS, BodyStyle, sub_path
 
 EXPLODE_SCALE = 1.4            # §2.5 hit-explosion end scale (skin v2+)
@@ -73,7 +95,13 @@ POPUP_COLORS = {
     JudgmentKind.HIT50: (0.95, 0.76, 0.36),    # orange
     JudgmentKind.MISS: (0.95, 0.25, 0.30),     # red X
 }
-POPUP_300_ALPHA = 0.45         # 300s draw fainter (anti-strobe)
+POPUP_300_ALPHA = 0.45         # 300s draw fainter (anti-strobe; procedural only)
+POPUP_SKIN_ELEMENT = {         # judgment kind → skin sprite element
+    JudgmentKind.MISS: "hit0",
+    JudgmentKind.HIT50: "hit50",
+    JudgmentKind.HIT100: "hit100",
+    JudgmentKind.HIT300: "hit300",
+}
 
 
 def _clamp01(v: float) -> float:
@@ -226,7 +254,14 @@ class StdScene:
                  background: tuple[float, float, float] = (0.043, 0.043, 0.055),
                  judgments=None,
                  draw_judgment_popups: bool = True,
-                 hud=None):
+                 hud=None,
+                 skin_elems=None,
+                 use_skin_cursor: bool = False,
+                 border_color: tuple[float, float, float] = (1.0, 1.0, 1.0),
+                 track_override: tuple[float, float, float] | None = None,
+                 bg_key: str | None = None,
+                 bg_draw_size: tuple[float, float] | None = None,
+                 dim_envelope=None):
         self.beatmap = beatmap
         self.diff = beatmap.diff
         self.frames = frames
@@ -246,9 +281,20 @@ class StdScene:
         self.draw_judgment_popups = draw_judgment_popups
         self.hud = hud                    # hud.StdHud | None (§5.3: topmost)
 
+        self.skin = skin_elems            # skin_elements.SkinElements | None
+        self.use_skin_cursor = bool(use_skin_cursor and skin_elems is not None
+                                    and skin_elems.has("cursor"))
+        self.border_color = tuple(border_color)
+        self.track_override = (tuple(track_override)
+                               if track_override is not None else None)
+        self.bg_key = bg_key              # §4.10 background layer
+        self.bg_draw_size = bg_draw_size  # cover-fit (w, h), frame-centered
+        self.dim = dim_envelope           # background.DimEnvelope | None
+
         self.objects = sorted(beatmap.hit_objects,
                               key=lambda o: o.get_start_time())
         self.radius_px = camera.len_to_screen(self.diff.circle_radius)
+        self.circle_k = circle_pixel_scale(self.radius_px)
         self._spawn_idx = 0
         self._active: list = []
         self._last_t = -math.inf
@@ -291,6 +337,13 @@ class StdScene:
     def render_frame(self, t: float) -> None:
         self._advance(t)
         self.spr.begin(clear=self.background)
+        if self.bg_key is not None and self.bg_draw_size is not None:
+            # §4.10/§5.3: background first, dimmed by tinting the sprite
+            b = 1.0 - (self.dim.level(t) if self.dim is not None else 0.0)
+            bw, bh = self.bg_draw_size
+            self.spr.draw([Sprite(self.cam.screen_w / 2.0,
+                                  self.cam.screen_h / 2.0,
+                                  bw, bh, self.bg_key, (b, b, b, 1.0))])
         approach: list[Sprite] = []
         # §5.3: newest objects draw FIRST → end up under older ones
         for obj in reversed(self._active):
@@ -323,21 +376,64 @@ class StdScene:
     def _color(self, obj) -> tuple[float, float, float]:
         return self.combo_colors[obj.combo_set % len(self.combo_colors)]
 
-    def _circle_sprites(self, x: float, y: float, color, alpha: float,
-                        scale: float, number: int | None,
-                        num_alpha: float) -> list[Sprite]:
+    def _plain_circle_sprites(self, x: float, y: float, color, alpha: float,
+                              scale: float = 1.0) -> list[Sprite]:
+        """Hit-circle visual without a number: skin hitcircle (tinted) +
+        hitcircleoverlay (untinted, osu semantics) when the skin provides
+        them, else the procedural disc + ring."""
+        sk = self.skin
+        if sk is not None and sk.has("hitcircle"):
+            k = self.circle_k
+            w, h = sk.size["hitcircle"]
+            out = [Sprite(x, y, w * k * scale, h * k * scale,
+                          "sk_hitcircle", (*color, alpha))]
+            if sk.has("hitcircleoverlay"):
+                ow, oh = sk.size["hitcircleoverlay"]
+                out.append(Sprite(x, y, ow * k * scale, oh * k * scale,
+                                  "sk_hitcircleoverlay",
+                                  (1.0, 1.0, 1.0, alpha)))
+            return out
         d = 2.0 * self.radius_px * scale
-        sprites = [
+        return [
             Sprite(x, y, d, d, "disc", (*color, alpha)),
             Sprite(x, y, d, d, "ring", (1.0, 1.0, 1.0, alpha)),
         ]
+
+    def _number_sprites(self, x: float, y: float, number: int,
+                        num_alpha: float) -> list[Sprite]:
+        """Combo number: skin HitCirclePrefix digits (HitCircleOverlap
+        layout, native size at circle scale) or the procedural digits."""
+        sk = self.skin
+        out: list[Sprite] = []
+        if sk is not None and sk.has("digits"):
+            k = self.circle_k
+            for ch, dx, w, h in layout_skin_digits(number, sk.digit_sizes,
+                                                   sk.info.hit_circle_overlap):
+                out.append(Sprite(x + dx * k, y, w * k, h * k,
+                                  f"sk_digit_{ch}",
+                                  (1.0, 1.0, 1.0, num_alpha)))
+            return out
+        h = self.radius_px  # digit height = half the circle diameter
+        for ch, dx, w in layout_digits(number, self.bank.digit_aspect, h):
+            out.append(Sprite(x + dx, y, w, h, f"digit_{ch}",
+                              (1.0, 1.0, 1.0, num_alpha)))
+        return out
+
+    def _circle_sprites(self, x: float, y: float, color, alpha: float,
+                        scale: float, number: int | None,
+                        num_alpha: float) -> list[Sprite]:
+        plain = self._plain_circle_sprites(x, y, color, alpha, scale)
+        nums: list[Sprite] = []
         if (number is not None and self.draw_combo_numbers
                 and num_alpha > 0.0):
-            h = self.radius_px  # digit height = half the circle diameter
-            for ch, dx, w in layout_digits(number, self.bank.digit_aspect, h):
-                sprites.append(Sprite(x + dx, y, w, h, f"digit_{ch}",
-                                      (1.0, 1.0, 1.0, num_alpha)))
-        return sprites
+            nums = self._number_sprites(x, y, number, num_alpha)
+        sk = self.skin
+        if (nums and sk is not None and sk.has("hitcircle")
+                and sk.has("hitcircleoverlay")
+                and sk.info.hit_circle_overlay_above_number):
+            # skin.ini flag: circle → number → overlay
+            return plain[:-1] + nums + plain[-1:]
+        return plain + nums  # default: circle → overlay → number
 
     def _verdict(self, obj):
         return self.judgments.verdict_for(obj) if self.judgments else None
@@ -369,9 +465,17 @@ class StdScene:
             asa = approach_scale_alpha(t, start, preempt, fade_in)
             if asa is not None:
                 a_scale, a_alpha = asa
-                ad = 2.0 * self.radius_px * a_scale
-                approach_out.append(Sprite(x, y, ad, ad, "approach",
-                                           (*color, a_alpha)))
+                sk = self.skin
+                if sk is not None and sk.has("approachcircle"):
+                    aw, ah = sk.size["approachcircle"]
+                    k = self.circle_k
+                    approach_out.append(Sprite(
+                        x, y, aw * k * a_scale, ah * k * a_scale,
+                        "sk_approachcircle", (*color, a_alpha)))
+                else:
+                    ad = 2.0 * self.radius_px * a_scale
+                    approach_out.append(Sprite(x, y, ad, ad, "approach",
+                                               (*color, a_alpha)))
         return sprites
 
     def _draw_circle(self, obj, t: float, approach_out) -> None:
@@ -389,34 +493,61 @@ class StdScene:
         sprites: list[Sprite] = []
         if b_alpha > 0.0 and pts:
             snake = snake_end_fraction(t, start, preempt, self.snaking_in)
+            body_base = (self.track_override if self.track_override is not None
+                         else color)   # skin.ini SliderTrackOverride
             body = self.bodies.build_body(
                 pts, self.radius_px,
-                BodyStyle(body_color=color), snake=(0.0, snake))
+                BodyStyle(body_color=body_base,
+                          border_color=self.border_color),
+                snake=(0.0, snake))
             self.bodies.draw_body(body, self.spr.fbo, alpha=b_alpha)
             # tail end circle rides the snake tip (lazer snaking semantics)
             tip = sub_path(pts, 0.0, snake)[-1]
-            d = 2.0 * self.radius_px
-            sprites.append(Sprite(tip[0], tip[1], d, d, "disc",
-                                  (*color, b_alpha)))
-            sprites.append(Sprite(tip[0], tip[1], d, d, "ring",
-                                  (1.0, 1.0, 1.0, b_alpha)))
-        # slider ball: plain disc following PositionAt(t) (repeats included
-        # — scorePath handles the back-and-forth). While the ruleset says
-        # tracking was lost the ball dims — the visible sliderbreak cue
-        # (there is no tail explosion to lose in this phase).
+            sprites.extend(self._plain_circle_sprites(tip[0], tip[1],
+                                                      color, b_alpha))
+        # slider ball following PositionAt(t) (repeats included — scorePath
+        # handles the back-and-forth). While the ruleset says tracking was
+        # lost the ball dims — the visible sliderbreak cue (there is no
+        # tail explosion to lose in this phase).
         if start <= t <= end:
             v = self._verdict(obj)
-            ball_alpha = (1.0 if v is None or v.tracked_at(t)
-                          else BALL_DETACHED_ALPHA)
+            tracked = v is None or v.tracked_at(t)
+            ball_alpha = 1.0 if tracked else BALL_DETACHED_ALPHA
             bx, by = self.cam.to_screen(
                 *obj.get_stacked_position_at(t, self.diff))
-            d = 2.0 * self.radius_px
-            sprites.append(Sprite(bx, by, d, d, "disc", (*color, ball_alpha)))
+            sk = self.skin
+            if tracked and sk is not None and sk.has("sliderfollowcircle"):
+                # follow circle at 2.4× the circle diameter while tracking
+                fw, fh = sk.size["sliderfollowcircle"]
+                m = FOLLOW_CIRCLE_SCALE * 2.0 * self.radius_px / max(fw, fh)
+                sprites.append(Sprite(bx, by, fw * m, fh * m,
+                                      "sk_sliderfollowcircle",
+                                      (1.0, 1.0, 1.0, 1.0)))
+            if sk is not None and sk.has("sliderb"):
+                bw, bh = sk.size["sliderb"]
+                k = self.circle_k
+                sprites.append(Sprite(bx, by, bw * k, bh * k, "sk_sliderb",
+                                      (*self._ball_tint(color), ball_alpha)))
+            else:
+                d = 2.0 * self.radius_px
+                sprites.append(Sprite(bx, by, d, d, "disc",
+                                      (*color, ball_alpha)))
         # head circle (+ its approach ring) on top of body/ball
         sprites.extend(self._head_sprites(
             obj, t, obj.get_stacked_start_position(self.diff), approach_out))
         if sprites:
             self.spr.draw(sprites)
+
+    def _ball_tint(self, combo_color) -> tuple[float, float, float]:
+        """osu semantics: sliderb is combo-tinted only when the skin allows
+        it (AllowSliderBallTint), else the skin.ini SliderBall colour, else
+        white (untinted)."""
+        info = self.skin.info
+        if info.slider_ball_tint:
+            return combo_color
+        if info.slider_ball is not None:
+            return tuple(c / 255.0 for c in info.slider_ball)
+        return (1.0, 1.0, 1.0)
 
     # --- judgment popups ---------------------------------------------------------------
 
@@ -439,6 +570,17 @@ class StdScene:
                 continue
             keep.append(ev)
             alpha, scale = asa
+            sk = self.skin
+            el = POPUP_SKIN_ELEMENT[ev.kind]
+            if sk is not None and sk.has(el):
+                if el in sk.empty:
+                    continue   # skin blanks this judgment (empty hit300)
+                x, y = self.cam.to_screen(ev.x, ev.y)
+                w, h = sk.size[el]
+                k = self.circle_k
+                out.append(Sprite(x, y, w * k * scale, h * k * scale,
+                                  f"sk_{el}", (1.0, 1.0, 1.0, alpha)))
+                continue       # skin sprites draw as-authored, untinted
             color = POPUP_COLORS[ev.kind]
             x, y = self.cam.to_screen(ev.x, ev.y)
             if ev.kind is JudgmentKind.MISS:
@@ -458,6 +600,8 @@ class StdScene:
     # --- cursor -----------------------------------------------------------------------
 
     def _cursor_sprites(self, t: float) -> list[Sprite]:
+        if self.use_skin_cursor:
+            return self._skin_cursor_sprites(t)
         out: list[Sprite] = []
         d_glow = 2.0 * self.cam.len_to_screen(CURSOR_RADIUS_OSU) * self.cursor_scale
         for ti, k in trail_times(t):
@@ -474,6 +618,36 @@ class StdScene:
                           (*CURSOR_GLOW_COLOR, 0.9)))
         out.append(Sprite(sx, sy, d_glow * 1.6, d_glow * 1.6, "glow",
                           (*CURSOR_GLOW_COLOR, 0.5), additive=True))
+        return out
+
+    def _skin_cursor_sprites(self, t: float) -> list[Sprite]:
+        """Skin cursor: trail snapshots under the cursor, cursormiddle on
+        top. Sized in stable's 768-line UI space (native logical px ×
+        screen_h/768 × cursor_scale — NOT circle-tied). CursorCentre=0
+        hangs the texture from the pointer (stable's top-left anchor)."""
+        sk = self.skin
+        k = (self.cam.screen_h / CURSOR_UI_HEIGHT) * self.cursor_scale
+        centre = sk.info.cursor_centre
+        out: list[Sprite] = []
+        if sk.has("cursortrail"):
+            tw, th = sk.size["cursortrail"]
+            ox, oy = (0.0, 0.0) if centre else (tw * k / 2.0, th * k / 2.0)
+            for ti, strength in trail_times(t):
+                x, y, _ = cursor_at(self.frames, ti)
+                sx, sy = self.cam.to_screen(x, y)
+                out.append(Sprite(sx + ox, sy + oy, tw * k, th * k,
+                                  "sk_cursortrail",
+                                  (1.0, 1.0, 1.0, 0.85 * strength)))
+        x, y, _ = cursor_at(self.frames, t)
+        sx, sy = self.cam.to_screen(x, y)
+        cw, ch = sk.size["cursor"]
+        ox, oy = (0.0, 0.0) if centre else (cw * k / 2.0, ch * k / 2.0)
+        out.append(Sprite(sx + ox, sy + oy, cw * k, ch * k, "sk_cursor",
+                          (1.0, 1.0, 1.0, 1.0)))
+        if sk.has("cursormiddle"):
+            mw, mh = sk.size["cursormiddle"]
+            out.append(Sprite(sx, sy, mw * k, mh * k, "sk_cursormiddle",
+                              (1.0, 1.0, 1.0, 1.0)))
         return out
 
 

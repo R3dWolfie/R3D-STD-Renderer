@@ -96,9 +96,10 @@ class StdRenderSettings:
     nightcore_hitsounds: bool = True
     use_skin_hitsounds: bool = False      # True = IgnoreBeatmapSamples
 
-    # background (§4.10; dims 0..100, higher = darker)
+    # background (§4.10; dims 0..100, higher = darker; gameplay default is
+    # HIGH like the R3D presets — readability over scenery)
     bg_dim_intro: int = 0
-    bg_dim_game: int = 80
+    bg_dim_game: int = 90
     bg_dim_breaks: int = 30
     bg_blur: int = 0
     bg_parallax: bool = False

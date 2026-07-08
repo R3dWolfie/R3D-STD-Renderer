@@ -18,6 +18,8 @@ MODULES = [
     "tests.test_playfield_pipeline",
     "tests.test_scene",
     "tests.test_hud",
+    "tests.test_background",
+    "tests.test_skin_elements",
 ]
 
 

@@ -22,9 +22,18 @@ progress/combo/hit-error+UR/key-overlay/break-flash in the §5.3 virtual
 Spinners render nothing (logged; simplified judgment). Progress lines
 match catch's `rendering… NN%` shape.
 
+BACKGROUND + SKIN PHASE: the map's `[Events]` background renders under
+everything with the §4.10 dim envelope (render/background.py; intro/game/
+break dims from the R3D preset keys, missing bg fails soft to the dark
+void). `--skin DIR` loads a real skin's core gameplay textures
+(render/skin_elements.py) — per-element fallback to the procedural set;
+a `skin:` report line lists what came from the skin.
+
 Debug extras:
     --parse-only            parse map+replay+skin, print a summary, exit 0
-    --max-seconds N         stop the render N seconds in (MVP clips)
+    --start N               start the render N seconds into the map
+    --max-seconds N         stop the render N seconds in (MVP clips;
+                            --start 35 --max-seconds 45 → a 35s-45s clip)
     --dump-frames "a,b,c"   write single-frame PNGs at map times a,b,c (ms)
                             instead of encoding video
 """
@@ -101,12 +110,16 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--general-volume", type=int, default=100)
     ap.add_argument("--audio-offset", type=int, default=0, help="ms; -earlier")
     ap.add_argument("--bg-dim-intro", type=int, default=0)
-    ap.add_argument("--bg-dim-game", type=int, default=80)
+    ap.add_argument("--bg-dim-game", type=int, default=90)
     ap.add_argument("--bg-dim-breaks", type=int, default=30)
+    ap.add_argument("--bg-dim", type=int, default=None,
+                    help="override --bg-dim-game (gameplay dim, 0-100)")
     ap.add_argument("--bg-blur", type=int, default=0)
     ap.add_argument("--results-seconds", type=float, default=None)
     ap.add_argument("--parse-only", action="store_true",
                     help="parse map+replay+skin, print a summary, exit 0")
+    ap.add_argument("--start", type=float, default=None,
+                    help="start the render this many seconds into the map")
     ap.add_argument("--max-seconds", type=float, default=None,
                     help="stop the render this many seconds in (debug/MVP)")
     ap.add_argument("--dump-frames", type=_ms_list, default=None,
@@ -139,18 +152,52 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
     from .record.audio import AudioError, AudioMixer, decode_to_pcm
     from .record.encode import FfmpegPipe, build_ffmpeg_cmd, probe_encoder
     from .record.pipeline import RecordPipeline
+    from .render.background import (build_dim_envelope, cover_size,
+                                    load_background)
     from .render.gl import SpriteRenderer
     from .render.hud import StdHud
     from .render.playfield import PlayfieldCamera
     from .render.scene import ScenePlayer, StdScene, log_skips
+    from .render.skin_elements import SkinElements
     from .render.slider_body import SliderBodyRenderer
     from .render.textures import TextureBank
+    from .skin.skin import Skin
 
     w, h = settings.resolution
     spr = SpriteRenderer(w, h)
     bank = TextureBank(spr)
     bodies = SliderBodyRenderer(spr.ctx, w, h)
     cam = PlayfieldCamera(w, h)
+
+    # --- real-skin core textures (per-element procedural fallback) ---------------
+    skin_elems = None
+    if settings.skin_dir is not None:
+        skin = Skin(skin_dir=settings.skin_dir,
+                    fallback_dir=settings.default_skin_dir)
+        skin_elems = SkinElements(skin, spr)
+        for line in skin_elems.report_lines():
+            print(line, file=sys.stderr)
+
+    # --- §4.10 background + dim envelope (fail-soft to the dark void) -------------
+    bg_key = bg_size = dim_env = None
+    bg_path = beatmap.get_related_file(beatmap_dir, beatmap.bg)
+    if bg_path is not None:
+        rgba = load_background(bg_path)
+        if rgba is not None:
+            spr.upload_texture("background", rgba)
+            bg_key = "background"
+            bg_size = cover_size(w, h, rgba.shape[1], rgba.shape[0])
+            dim_env = build_dim_envelope(
+                settings.bg_dim_intro / 100.0, settings.bg_dim_game / 100.0,
+                settings.bg_dim_breaks / 100.0,
+                [o.get_start_time() for o in beatmap.hit_objects],
+                beatmap.diff.preempt, beatmap.pauses)
+        else:
+            print(f"WARNING: background '{beatmap.bg}' failed to decode — "
+                  "rendering without background", file=sys.stderr)
+    elif beatmap.bg:
+        print(f"WARNING: background '{beatmap.bg}' not found in the beatmap "
+              "dir — rendering without background", file=sys.stderr)
 
     # the §4.6 HUD needs the judgment stream; --dump-frames without a
     # replay sim just renders HUD-less (the Phase-1 fallback)
@@ -160,6 +207,10 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
 
     combo_colors = [(r / 255.0, g / 255.0, b / 255.0)
                     for r, g, b in skin_info.combo_colors]
+    track_override = None
+    if skin_info.slider_track_override is not None:
+        track_override = tuple(c / 255.0
+                               for c in skin_info.slider_track_override)
     scene = StdScene(
         beatmap, frames, cam, spr, bodies, bank,
         combo_colors=combo_colors,
@@ -170,13 +221,25 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
         cursor_scale=settings.cursor_scale,
         judgments=judgments,
         hud=hud,
+        skin_elems=skin_elems,
+        use_skin_cursor=settings.use_skin_cursor,
+        border_color=tuple(c / 255.0 for c in skin_info.slider_border),
+        track_override=track_override,
+        bg_key=bg_key,
+        bg_draw_size=bg_size,
+        dim_envelope=dim_env,
     )
 
     last_end = max(o.get_end_time() for o in beatmap.hit_objects)
     end_ms = last_end + HIT_FADE_OUT + settings.fade_out_time * 1000.0
     if args.max_seconds is not None:
         end_ms = min(end_ms, args.max_seconds * 1000.0)
+    start_ms = (args.start or 0.0) * 1000.0
     speed = beatmap.diff.speed
+    if start_ms and start_ms >= end_ms:
+        print(f"error: --start {args.start:g}s is at/after the render end "
+              f"({end_ms / 1000.0:.1f}s)", file=sys.stderr)
+        return 2
 
     # --- keyframe dump mode -----------------------------------------------------
     if args.dump_frames:
@@ -206,10 +269,13 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
     if afile is not None:
         try:
             pcm = decode_to_pcm(afile, rate=speed)
-            mixer = AudioMixer(end_ms / speed)
+            mixer = AudioMixer((end_ms - start_ms) / speed)
             vol = ((settings.music_volume / 100.0)
                    * (settings.general_volume / 100.0))
-            mixer.lay_music(pcm, 0.0, volume=vol)
+            # --start window: map-time start_ms lands at wall t=0, so the
+            # (already rate-adjusted) music is laid start_ms/speed early —
+            # mix_at clips the negative head
+            mixer.lay_music(pcm, -start_ms / speed, volume=vol)
             audio_path = output.with_suffix(".audio.wav")
             mixer.write_wav(audio_path)
         except AudioError as e:
@@ -226,7 +292,7 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
         output_path=output, audio_path=audio_path,
         audio_offset_ms=settings.audio_offset)
 
-    total_wall_ms = end_ms / speed
+    total_wall_ms = (end_ms - start_ms) / speed
     last_pct = [-1]
 
     def progress(frac: float) -> None:
@@ -235,7 +301,7 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
             last_pct[0] = pct
             print(f"rendering… {pct}%", file=sys.stderr, flush=True)
 
-    player = ScenePlayer(scene, end_ms, speed=speed)
+    player = ScenePlayer(scene, end_ms, speed=speed, start_ms=start_ms)
     t0 = time.monotonic()
     try:
         with FfmpegPipe(cmd) as pipe:
@@ -302,7 +368,9 @@ def main(argv: list[str] | None = None) -> int:
         watermark_text=args.watermark, music_volume=args.music_volume,
         hitsound_volume=args.hitsound_volume,
         general_volume=args.general_volume, audio_offset=args.audio_offset,
-        bg_dim_intro=args.bg_dim_intro, bg_dim_game=args.bg_dim_game,
+        bg_dim_intro=args.bg_dim_intro,
+        bg_dim_game=(args.bg_dim if args.bg_dim is not None
+                     else args.bg_dim_game),
         bg_dim_breaks=args.bg_dim_breaks, bg_blur=args.bg_blur,
     )
     if args.results_seconds is not None:
