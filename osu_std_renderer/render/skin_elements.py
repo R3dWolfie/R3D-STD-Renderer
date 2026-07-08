@@ -161,6 +161,14 @@ _CORE_ELEMENTS: dict[str, tuple[bool, bool, bool]] = {
     "ranking-B-small": (False, False, False),
     "ranking-C-small": (False, False, False),
     "ranking-D-small": (False, False, False),
+    # big ranking-* grade images (the results-screen grade; the HUD badge
+    # keeps the -small variants above)
+    "ranking-X": (False, False, False),
+    "ranking-S": (False, False, False),
+    "ranking-A": (False, False, False),
+    "ranking-B": (False, False, False),
+    "ranking-C": (False, False, False),
+    "ranking-D": (False, False, False),
 }
 
 # LegacySpriteText's non-digit lookups: char → texture-name suffix

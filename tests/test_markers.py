@@ -17,9 +17,10 @@ from osu_std_renderer.render.markers import (
     reverse_arrow_schedule, tick_alpha_scale, tick_schedule,
 )
 from osu_std_renderer.render.scene import (
-    TRAIL_SPRITE_INTERVAL_MS, TRAIL_SPRITE_LIFE_MS, long_trail_points,
-    skin_trail_is_long, sparse_trail_times,
+    TRAIL_SPRITE_INTERVAL_MS, TRAIL_SPRITE_LIFE_MS, build_distance_trail,
+    long_trail_points, skin_trail_is_long, sparse_trail_times,
 )
+from osu_std_renderer.replay.replay import StdFrame
 
 
 # --- reverse arrows -----------------------------------------------------------------
@@ -31,12 +32,41 @@ def test_reverse_schedule_end_parity():
     assert [a.time for a in arrows] == [1500.0, 2000.0, 2500.0]
     # r odd → TAIL (forward span arriving), r even → HEAD
     assert [a.at_tail for a in arrows] == [True, False, True]
-    # first two appear with the slider; r=3 appears when r=1 is consumed
+    # without a head_hit_time the first two appear with the slider;
+    # r=3 appears when r=1 is consumed
     assert arrows[0].appear == 400.0 and arrows[1].appear == 400.0
     assert arrows[2].appear == 1500.0
     # no repeats / degenerate → no arrows
     assert reverse_arrow_schedule(1000.0, 500.0, 1, 400.0) == []
     assert reverse_arrow_schedule(1000.0, 0.0, 4, 400.0) == []
+
+
+def test_multireverse_arrows_wait_for_the_head_hit():
+    """OWNER SPEC: a slider reversing MORE THAN ONCE keeps its arrows
+    hidden during the approach — they appear at the head-hit moment
+    (lazer would fade the span-0 repeat in during the preempt; the
+    owner's behaviour deliberately wins — markers.py docstring)."""
+    arrows = reverse_arrow_schedule(1000.0, 500.0, 4, spawn=400.0,
+                                    head_hit_time=1012.0)
+    assert arrows[0].appear == 1012.0 and arrows[1].appear == 1012.0
+    assert arrows[2].appear == 1500.0            # r>2 unchanged
+    # hidden during the whole approach, quick-ramping after the hit
+    a1 = arrows[0]
+    assert arrow_alpha_scale(999.0, a1, 400.0, 400.0) is None
+    assert arrow_alpha_scale(1011.0, a1, 400.0, 400.0) is None
+    al, sc = arrow_alpha_scale(1012.0 + ARROW_FADE_MS / 2, a1, 400.0, 400.0)
+    assert abs(al - 0.5) < 1e-9 and sc == 1.0
+    al, _ = arrow_alpha_scale(1012.0 + ARROW_FADE_MS, a1, 400.0, 400.0)
+    assert al == 1.0
+    # a SINGLE-reverse slider keeps the classic appear-at-spawn rule
+    single = reverse_arrow_schedule(1000.0, 500.0, 2, spawn=400.0,
+                                    head_hit_time=1012.0)
+    assert len(single) == 1 and single[0].appear == 400.0
+    # a missed head passes its window close as head_hit_time — the
+    # arrows appear when the head resolves
+    missed = reverse_arrow_schedule(1000.0, 500.0, 3, spawn=400.0,
+                                    head_hit_time=1199.5)
+    assert missed[0].appear == 1199.5
 
 
 def test_arrow_rotation_points_inward():
@@ -237,33 +267,55 @@ def test_sparse_trail_spacing():
         assert any(abs(ti - tj) < 1e-6 for tj in again)
 
 
-def test_long_trail_distance_resampling():
-    # cursor moving +x at 1 osu!px/ms → over the 100 ms window a point
-    # every `spacing` px plus the head point
-    def sample(ti):
-        return (ti, 0.0)
+def test_distance_trail_uniform_spacing_at_any_speed():
+    """OWNER SPEC: points strictly every N osu!px of cursor TRAVEL —
+    interpolated INSIDE replay-frame segments, so a fast flick (huge
+    px-per-frame) yields the same spacing as slow movement (a continuous
+    ribbon, never separated dots)."""
+    frames = [StdFrame(0, 0.0, 0.0, 0)]
+    # slow: 1 px/ms over 100 ms (10 px per frame)
+    frames += [StdFrame(t, float(t), 0.0, 0) for t in range(10, 101, 10)]
+    # fast flick: 200 px inside ONE 10 ms frame gap (20 px/ms)
+    frames.append(StdFrame(110, 300.0, 0.0, 0))
+    trail = build_distance_trail(frames, spacing_osu=5.0)
+    xs = [p[0] for p in trail]
+    gaps = [b - a for a, b in zip(xs, xs[1:])]
+    assert gaps and all(abs(g - 5.0) < 1e-6 for g in gaps)
+    # 300 px of travel → 60 points, times strictly increasing
+    assert len(trail) == 60
+    ts = [p[2] for p in trail]
+    assert all(ts[i] < ts[i + 1] for i in range(len(ts) - 1))
+    # flick points carry INTERPOLATED pass times inside (100, 110]
+    flick = [p for p in trail if p[0] > 100.0]
+    assert flick and all(100.0 < p[2] <= 110.0 for p in flick)
 
-    pts = long_trail_points(sample, 1000.0, spacing_osu=10.0,
-                            window_ms=100.0, step_ms=1.0, max_points=2048)
-    assert 10 <= len(pts) <= 12
-    # oldest→newest; head point is the cursor itself at full strength
-    assert pts[-1][0] == 1000.0 and pts[-1][2] == 1.0
-    xs = [p[0] for p in pts]
-    assert all(xs[i] < xs[i + 1] for i in range(len(xs) - 1))
-    # spacing ~10 px between consecutive points (resampled by DISTANCE)
-    gaps = [xs[i + 1] - xs[i] for i in range(len(xs) - 2)]
-    assert all(9.0 <= g <= 11.0 for g in gaps)
-    # strengths age toward the tail
-    assert pts[0][2] < pts[-1][2]
-    # max_points cap holds
-    few = long_trail_points(sample, 1000.0, spacing_osu=1.0,
-                            window_ms=500.0, step_ms=1.0, max_points=16)
-    assert len(few) == 16
+
+def test_distance_trail_stationary_cursor_emits_nothing():
+    """No movement → no points: a parked cursor can never stack trail
+    sprites in place (the old brightness pile-up)."""
+    frames = [StdFrame(t, 100.0, 100.0, 0) for t in range(0, 200, 10)]
+    assert build_distance_trail(frames, spacing_osu=2.0) == []
+    assert build_distance_trail([], spacing_osu=2.0) == []
 
 
-def test_long_trail_stationary_cursor():
-    pts = long_trail_points(lambda ti: (256.0, 192.0), 1000.0,
-                            spacing_osu=2.0, window_ms=100.0, step_ms=1.0,
-                            max_points=64)
-    assert len(pts) == 1          # no distance covered → just the head
-    assert pts[0][:2] == (256.0, 192.0)
+def test_long_trail_window_uniform_alpha_and_cap():
+    frames = [StdFrame(0, 0.0, 0.0, 0), StdFrame(100, 100.0, 0.0, 0)]
+    trail = build_distance_trail(frames, spacing_osu=10.0)
+    times = [p[2] for p in trail]
+    pts = long_trail_points(trail, times, 100.0, window_ms=50.0,
+                            max_points=2048)
+    # only points passed in the last 50 ms; oldest→newest
+    assert pts and all(100.0 - 50.0 <= 100.0 - (1.0 - s) * 50.0
+                       for _, _, s in pts)
+    strengths = [s for _, _, s in pts]
+    assert all(strengths[i] < strengths[i + 1]
+               for i in range(len(strengths) - 1))
+    # strength is EXACTLY the age fade — the only alpha factor (uniform
+    # base brightness along the ribbon)
+    for (x, _, s), ti in zip(pts, times[-len(pts):]):
+        assert abs(s - (1.0 - (100.0 - ti) / 50.0)) < 1e-9
+    # newest-N cap
+    capped = long_trail_points(trail, times, 100.0, window_ms=50.0,
+                               max_points=3)
+    assert len(capped) == 3
+    assert [p[0] for p in capped] == [p[0] for p in pts[-3:]]

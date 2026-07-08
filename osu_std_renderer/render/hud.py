@@ -2,9 +2,35 @@
 own skin architecture (MIT, ppy/osu master; class + file cited per
 element):
 
-TWO COMPONENT SETS, chosen per render exactly like lazer chooses them:
+COMPONENT SELECTION IS PER ELEMENT (owner correction, 2026-07): the
+skin→legacy-default fallback chain applies to GAMEPLAY elements only.
+Each HUD element (score+acc, combo, hp bar, key overlay, progress) uses
+the SKIN's textures via its LEGACY component when the skin actually
+ships them, and falls back to the **ARGON** component — NOT the classic
+legacy bakes — when the skin lacks them:
 
-  SKINLESS (no --skin) → the ARGON HUD (lazer's default skin):
+    score + accuracy   skin ScorePrefix digit set → LegacyScoreCounter/
+                       LegacyAccuracyCounter (+ the legacy progress
+                       pie); else ArgonScoreCounter/ArgonAccuracyCounter
+                       (+ the Argon progress strip)
+    combo              skin ComboPrefix digit set → LegacyDefaultCombo-
+                       Counter; else ArgonComboCounter
+    hp bar             skin scorebar-* → LegacyHealthDisplay (missing
+                       companion pieces still take the classic lg_*
+                       bakes INSIDE the component); else ArgonHealth-
+                       Display
+    key overlay        skin inputoverlay-* → LegacyKeyCounterDisplay;
+                       else ArgonKeyCounterDisplay (a skin with no
+                       inputoverlay gets the Argon key counter — never
+                       procedural legacy boxes)
+
+`renderer_default_font_and_ranks` (settings/CLI) forces the renderer's
+own default (Argon) NUMBERS and procedural RANK text even under a skin
+that ships fonts/rank images (fonts + ranks only — hp/keys unaffected).
+
+THE TWO COMPONENT SETS (element classes unchanged):
+
+  ARGON (lazer's default skin):
     ArgonScoreCounter        osu.Game/Screens/Play/HUD/ArgonScoreCounter.cs
                              top-left block, right-aligned at x=250 over two
                              ArgonWedgePiece backdrops, 6-digit wireframe
@@ -34,9 +60,9 @@ TWO COMPONENT SETS, chosen per render exactly like lazer chooses them:
                              row, faint density graph (200 buckets, tiered),
                              10 px rounded bar (bg gray(0.2)@0.3, white fill)
 
-  CUSTOM SKIN (--skin) → the LEGACY HUD (lazer's legacy-skin components),
-  every element from the skin where it speaks, classic-look baked
-  fallbacks (textures.py lg_*) where it doesn't — NEVER Argon:
+  LEGACY (lazer's legacy-skin components, used only when the skin ships
+  the element's textures; classic-look lg_* bakes fill gaps INSIDE a
+  selected component):
     LegacyScoreCounter       osu.Game/Skinning/LegacyScoreCounter.cs —
                              top-right ×0.96, margin 10, ScorePrefix font
                              (FixedWidth by '5', ScoreOverlap spacing),
@@ -67,10 +93,10 @@ TWO COMPONENT SETS, chosen per render exactly like lazer chooses them:
                              colour, counts in the scoreentry font
 
 SHARED (house elements, both paths): the hit-error meter + UR readout
-(kept from the previous phase — moved up clear of the Argon progress
-strip), the combo-break edge vignette, the grade badge (skin
-ranking-*-small when provided, procedural text otherwise; behind
-show_grade).
+(owner-directed: parked near the BOTTOM edge, ~16 UI px margin —
+ERR_Y_FROM_BOTTOM), the combo-break edge vignette, the grade badge
+(skin ranking-*-small when provided and renderer_default_font_and_ranks
+is off, procedural text otherwise; behind show_grade).
 
 HEALTH comes from ruleset/health.py — the lazer OsuHealthProcessor /
 DrainingHealthProcessor port (what lazer itself pairs with BOTH health
@@ -123,7 +149,11 @@ ERR_TICK_W = 3.0
 ERR_TICK_H = 22.0
 ERR_TICK_FADE_MS = 10_000.0    # §4.6 HitErrorMeter.PointFadeOutTime = 10 s
 ERR_ARROW_N = 10               # moving average over the last N hits
-ERR_Y_FROM_BOTTOM = 132.0      # raised above the Argon progress strip
+# owner-directed (2026-07): the hit-error bar + UR readout sit near the
+# BOTTOM edge — the UR text's baseline ends ~16 UI px above the frame
+# (56 = 16 margin + band_h/2 + 10 gap + UR_H). Was 132 (above the Argon
+# progress strip).
+ERR_Y_FROM_BOTTOM = 56.0
 UR_H = 26.0
 
 BREAK_FLASH_MS = 220.0
@@ -846,8 +876,25 @@ class StdHud:
         self.bank = bank
         self.s = settings
         self.sk = skin_elems
-        self.legacy = skin_elems is not None
         self.health = health
+        # -- per-element component selection (module docstring): the
+        # LEGACY component only where the skin actually ships the
+        # element's textures; ARGON otherwise. The
+        # renderer_default_font_and_ranks toggle forces the renderer's
+        # default numbers/ranks (Argon + procedural rank text) even
+        # under a skin's fonts/rank images.
+        sk = skin_elems
+        self.force_default = bool(getattr(
+            settings, "renderer_default_font_and_ranks", False))
+        fonts_ok = not self.force_default
+        self.legacy_score = (fonts_ok and sk is not None
+                             and sk.has("score_digits"))
+        self.legacy_combo = (fonts_ok and sk is not None
+                             and sk.has("combo_digits"))
+        self.legacy_health = sk is not None and (
+            sk.has("scorebar-colour") or sk.has("scorebar-bg"))
+        self.legacy_keys = sk is not None and (
+            sk.has("inputoverlay-background") or sk.has("inputoverlay-key"))
         self.k = sprites.height / UI_HEIGHT       # screen px per UI px
         self.lk = self.k * KL                     # screen px per LAZER px
         self.ui_w = sprites.width / self.k
@@ -864,7 +911,7 @@ class StdHud:
         self._pin = 1.0
         self._graph = self._density_buckets(starts, ends)
         self._hp_field: ArgonBarField | None = None
-        if (not self.legacy and self.health is not None
+        if (not self.legacy_health and self.health is not None
                 and getattr(settings, "show_hp_bar", True)):
             self._hp_field = ArgonBarField(
                 HP_WIDTH, HP_BAR_HEIGHT + 2 * HP_MAIN_RADIUS,
@@ -1023,20 +1070,26 @@ class StdHud:
         if self.op <= 0.0:
             return
         out: list[Sprite] = []
-        if self.legacy:
-            self._legacy_score_block(out, t)
-            self._legacy_combo(out, t)
-            self._legacy_key_overlay(out, t)
+        # per-element skin-else-Argon (module docstring)
+        if self.legacy_score:
+            self._legacy_score_block(out, t)   # includes the legacy pie
         else:
             self._argon_score_block(out, t)
             self._argon_accuracy(out, t)
-            self._argon_health(out, t)
-            self._argon_combo(out, t)
-            self._argon_key_overlay(out, t)
             self._argon_progress(out, t)
+        if self.legacy_combo:
+            self._legacy_combo(out, t)
+        else:
+            self._argon_combo(out, t)
+        if not self.legacy_health:
+            self._argon_health(out, t)
+        if self.legacy_keys:
+            self._legacy_key_overlay(out, t)
+        else:
+            self._argon_key_overlay(out, t)
         self._hit_error(out, t)
         self._break_flash(out, t)
-        if self.legacy:
+        if self.legacy_health:
             # stable draws the scorebar in FRONT of everything (LegacySkin's
             # "hacky full screen area health bars" comment) — last.
             self._legacy_health(out, t)
@@ -1721,13 +1774,14 @@ class StdHud:
                      cy_l: float) -> None:
         """In-HUD grade: the skin's ranking-*-small badge when it ships
         one (legacy small grades, native size), the procedural coloured
-        text otherwise. Behind show_grade; silver (HD/FL) variants are
-        not simulated."""
+        text otherwise. renderer_default_font_and_ranks forces the
+        procedural text even under a skin. Behind show_grade; silver
+        (HD/FL) variants are not simulated."""
         grade = self.data.grade_at(t)
         sk = self.sk
         el = GRADE_RANKING_ELEMENT.get(grade)
-        if (sk is not None and el is not None and sk.has(el)
-                and el not in sk.empty):
+        if (not self.force_default and sk is not None and el is not None
+                and sk.has(el) and el not in sk.empty):
             w, h = sk.size[el]
             es, lk = self.es, self.lk
             out.append(Sprite((right_x_l - w * es / 2.0) * lk, cy_l * lk,

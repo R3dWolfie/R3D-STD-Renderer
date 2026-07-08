@@ -163,8 +163,24 @@ class StdRenderSettings:
     hud_opacity: float = 1.0              # §4.6 shared Opacity (global)
     combo_break_flash: bool = True        # red edge-vignette pulse on breaks
 
+    # owner punch-list additions (2026-07):
+    # classic falling hit0 miss animation (falls + rotates while fading)
+    miss_fall: bool = True
+    # force the renderer's default (Argon) HUD numbers + procedural rank
+    # text even when the skin ships fonts / ranking-* images
+    renderer_default_font_and_ranks: bool = False
+    # subtle white playfield-bounds outline: "none" | "edges" | "full"
+    playfield_borders: str = "none"
+
     # R3D service extras
     watermark_text: str = ""
+
+    # preset-key aliases (the mania/catch preset names for fields whose
+    # dataclass name differs)
+    _PRESET_ALIASES = {
+        "show_result_screen": "show_results",
+        "results": "show_results",
+    }
 
     @classmethod
     def from_preset(cls, preset: dict) -> "StdRenderSettings":
@@ -173,6 +189,7 @@ class StdRenderSettings:
         known = {f.name for f in fields(cls)}
         kwargs = {}
         for k, v in preset.items():
+            k = cls._PRESET_ALIASES.get(k, k)
             if k not in known:
                 continue
             if k == "resolution" and isinstance(v, str):

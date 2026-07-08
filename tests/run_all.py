@@ -24,6 +24,7 @@ MODULES = [
     "tests.test_markers",
     "tests.test_spinner",
     "tests.test_hitsounds",
+    "tests.test_results",
 ]
 
 

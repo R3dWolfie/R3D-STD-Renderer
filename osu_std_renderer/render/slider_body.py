@@ -125,11 +125,17 @@ def border_portion(border_width: float) -> float:
 class BodyStyle:
     """Colours per the plan's defaults (§3.2 skin.ini + §4.9 settings):
     white SliderBorder; body = hit-circle combo colour with the
-    Inner/OuterOffset + Inner/OuterAlpha gradient semantics."""
+    Inner/OuterOffset + Inner/OuterAlpha gradient semantics.
+
+    DEFAULT GRADIENT (owner-directed, 2026-07): BRIGHTER at the
+    centreline fading DARKER toward the border — the classic osu! body
+    read (a faint inner glow). The previous dark-centred defaults
+    (inner -0.5 / outer -0.05) read flat/uncanny; both offsets stay
+    fully parameterized for skins/presets that want the inverse."""
     border_color: tuple[float, float, float] = (1.0, 1.0, 1.0)
     body_color: tuple[float, float, float] = DEFAULT_COMBO_COLORS[0]
-    inner_offset: float = -0.5    # §4.9 Body.InnerOffset (centreline)
-    outer_offset: float = -0.05   # §4.9 Body.OuterOffset (at the border)
+    inner_offset: float = 0.1     # §4.9 Body.InnerOffset (centreline, lifted)
+    outer_offset: float = -0.5    # §4.9 Body.OuterOffset (darker at border)
     inner_alpha: float = 0.8      # §4.9 Body.InnerAlpha
     outer_alpha: float = 0.8      # §4.9 Body.OuterAlpha
     border_width: float = 1.0     # §4.9 Sliders.BorderWidth

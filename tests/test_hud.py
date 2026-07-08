@@ -312,6 +312,86 @@ def test_final_acc_reads_last_event_not_a_timestamp():
     assert d.acc_at(last_obj_end + 1.0) != d.final_acc()
 
 
+# --- per-element component selection (skin-else-ARGON, owner correction) -------------
+
+class _FakeSkin:
+    """Just enough of SkinElements for StdHud's selection logic."""
+
+    def __init__(self, loaded):
+        self.loaded = set(loaded)
+        self.empty = set()
+        self.size = {}
+
+    def has(self, name):
+        return name in self.loaded
+
+
+def _hud_with(skin, **setting_overrides):
+    from osu_std_renderer.render.hud import StdHud
+    from osu_std_renderer.settings import StdRenderSettings
+
+    class _Spr:
+        width, height = 1920, 1080
+
+        def upload_texture(self, key, rgba):
+            pass
+
+    sim = _three_circle_run(click_third=True)
+    bm = _map("100,100,1000,1,0,0:0:0:0:\n")
+    settings = StdRenderSettings(**setting_overrides)
+    return StdHud(_Spr(), None, settings, sim, [], bm, skin_elems=skin,
+                  health=None)
+
+
+def test_hud_component_selection_per_element():
+    """The owner correction: HUD elements pick the LEGACY component only
+    where the skin ships that element's textures, ARGON otherwise — a
+    skin without inputoverlay gets the Argon key counter, without a
+    scorebar the Argon HP bar."""
+    # skinless → all Argon
+    hud = _hud_with(None)
+    assert not hud.legacy_score and not hud.legacy_combo
+    assert not hud.legacy_health and not hud.legacy_keys
+    # the owner's skin shape: fonts, no scorebar, no inputoverlay
+    hud = _hud_with(_FakeSkin({"score_digits", "combo_digits"}))
+    assert hud.legacy_score and hud.legacy_combo
+    assert not hud.legacy_health          # → Argon HP bar
+    assert not hud.legacy_keys            # → Argon key counter (owner!!)
+    # scorebar/inputoverlay pieces flip only their own element
+    hud = _hud_with(_FakeSkin({"scorebar-colour"}))
+    assert hud.legacy_health and not hud.legacy_score
+    hud = _hud_with(_FakeSkin({"inputoverlay-key"}))
+    assert hud.legacy_keys and not hud.legacy_health
+    hud = _hud_with(_FakeSkin({"inputoverlay-background"}))
+    assert hud.legacy_keys
+
+
+def test_renderer_default_font_and_ranks_toggle():
+    """renderer_default_font_and_ranks=ON forces the renderer's default
+    numbers (Argon) + procedural rank text even under a skin with fonts;
+    hp/keys selection is untouched (fonts + ranks only)."""
+    sk = _FakeSkin({"score_digits", "combo_digits", "scorebar-colour",
+                    "inputoverlay-key", "ranking-S-small"})
+    hud = _hud_with(sk)
+    assert hud.legacy_score and hud.legacy_combo and not hud.force_default
+    hud = _hud_with(sk, renderer_default_font_and_ranks=True)
+    assert hud.force_default
+    assert not hud.legacy_score and not hud.legacy_combo   # Argon numbers
+    assert hud.legacy_health and hud.legacy_keys            # unaffected
+
+
+def test_hit_error_block_parks_near_the_bottom():
+    """Owner item: the hit-error bar + UR meter sit near the bottom edge
+    with a small (12-20 UI px) margin — the block's lowest pixel (the UR
+    readout baseline) must land inside that band."""
+    from osu_std_renderer.render.hud import (ERR_BAND_H, ERR_Y_FROM_BOTTOM,
+                                             UI_HEIGHT, UR_H)
+    cy = UI_HEIGHT - ERR_Y_FROM_BOTTOM
+    block_bottom = cy + ERR_BAND_H / 2.0 + 10.0 + UR_H   # _hit_error layout
+    margin = UI_HEIGHT - block_bottom
+    assert 12.0 <= margin <= 20.0, margin
+
+
 def test_endpoint_pin_scales_display():
     """pin math (the mania pattern): displayed scores scale so the final
     event lands exactly on the .osr total — 423154 in the proof render."""

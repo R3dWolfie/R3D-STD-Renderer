@@ -5,11 +5,15 @@ from __future__ import annotations
 
 import math
 
-from osu_std_renderer.beatmap.difficulty import HIT_FADE_OUT
+from osu_std_renderer.beatmap.difficulty import (HIT_FADE_OUT,
+                                                 RESULT_FADE_IN,
+                                                 RESULT_FADE_OUT)
 from osu_std_renderer.render.scene import (
-    APPROACH_MAX_ALPHA, APPROACH_START_SCALE, EXPLODE_SCALE, NUMBER_FADE_OUT,
+    APPROACH_MAX_ALPHA, APPROACH_START_SCALE, EXPLODE_SCALE,
+    MISS_FALL_DISTANCE_OSU, MISS_FALL_ROT_RAD, NUMBER_FADE_OUT,
     approach_scale_alpha, body_alpha, circle_alpha_scale, fade_in_alpha,
-    layout_digits, number_alpha, snake_end_fraction, trail_times,
+    layout_digits, miss_fall_transform, number_alpha,
+    playfield_border_rects, snake_end_fraction, trail_times,
     visible_window,
 )
 
@@ -126,6 +130,47 @@ def test_trail_times_shape():
     assert all(ts[i][0] < ts[i + 1][0] for i in range(11))
     assert all(0.0 < k < 1.0 for _, k in ts)
     assert ts[-1][1] > ts[0][1]                          # newer = stronger
+
+
+def test_miss_fall_transform():
+    """Classic miss: starts at the popup position, drifts DOWN with a
+    slight rotation as the popup fades (quad-in over the popup life)."""
+    dur = RESULT_FADE_IN + RESULT_FADE_OUT
+    dy0, rot0 = miss_fall_transform(0.0, seed=7)
+    assert dy0 == 0.0 and rot0 == 0.0
+    dy_end, rot_end = miss_fall_transform(dur, seed=7)
+    assert abs(dy_end - MISS_FALL_DISTANCE_OSU) < 1e-9
+    assert abs(rot_end) <= MISS_FALL_ROT_RAD + 1e-9
+    # monotone fall, ease-in (slow start)
+    dys = [miss_fall_transform(a, seed=7)[0] for a in range(0, 721, 60)]
+    assert all(b >= a for a, b in zip(dys, dys[1:]))
+    assert dys[1] < MISS_FALL_DISTANCE_OSU * (60.0 / dur)   # slower than linear
+    # deterministic per seed; different objects can rotate differently
+    assert miss_fall_transform(500.0, seed=7) == miss_fall_transform(500.0, seed=7)
+    rots = {round(miss_fall_transform(dur, seed=s)[1], 6) for s in range(6)}
+    assert len(rots) > 1
+
+
+def test_playfield_border_rects_modes():
+    x0, y0, x1, y1 = 100.0, 50.0, 500.0, 350.0
+    assert playfield_border_rects(x0, y0, x1, y1, "none", 2.0, 30.0) == []
+    full = playfield_border_rects(x0, y0, x1, y1, "full", 2.0, 30.0)
+    assert len(full) == 4
+    # every rect stays INSIDE the bounds box
+    for cx, cy, w, h in full:
+        assert x0 - 1e-9 <= cx - w / 2.0 and cx + w / 2.0 <= x1 + 1e-9
+        assert y0 - 1e-9 <= cy - h / 2.0 and cy + h / 2.0 <= y1 + 1e-9
+    # top edge spans the full width at thickness 2
+    top = min(full, key=lambda r: r[1])
+    assert abs(top[2] - (x1 - x0)) < 1e-9 and abs(top[3] - 2.0) < 1e-9
+    edges = playfield_border_rects(x0, y0, x1, y1, "edges", 2.0, 30.0)
+    assert len(edges) == 8            # an L pair per corner
+    for cx, cy, w, h in edges:
+        assert max(w, h) <= 30.0 + 1e-9          # short corner strokes
+        assert x0 - 1e-9 <= cx - w / 2.0 and cx + w / 2.0 <= x1 + 1e-9
+        assert y0 - 1e-9 <= cy - h / 2.0 and cy + h / 2.0 <= y1 + 1e-9
+    # degenerate box → nothing
+    assert playfield_border_rects(10.0, 10.0, 10.0, 40.0, "full", 2.0, 30.0) == []
 
 
 # --- GPU smoke test (skips without EGL) ------------------------------------------

@@ -63,10 +63,17 @@ schedule/lifecycle math — see its docstring for the semantics):
     when the skin ships them (§3.3 GetMostSpecific vs hitcircle).
 
 CURSOR TRAIL (§3.3 two-mode rule, skin cursor only): skin HAS
-cursormiddle (or ForceLongTrail) → the LONG CONNECTED trail — cursortrail
-sprites laid along the cursor path every LONG_TRAIL_SPACING_OSU osu!px
-(distance-resampled, LongTrailDensity semantics, capped at
-LONG_TRAIL_MAX_POINTS≈stable's 2048), aged out over LONG_TRAIL_WINDOW_MS.
+cursormiddle (or ForceLongTrail) → the LONG CONNECTED trail, STRICTLY
+DISTANCE-BASED (owner-directed 2026-07): the whole replay path is
+resampled ONCE at init into points every LONG_TRAIL_SPACING_OSU osu!px
+of cursor TRAVEL (build_distance_trail — interpolating between replay
+frames, so spacing is uniform at ANY cursor speed: fast = a continuous
+ribbon, never separated dots; slow = the same per-point brightness,
+just a shorter ribbon — points are only emitted by MOVEMENT, so they
+can never stack up and over-brighten in place). Per frame the points
+inside the last LONG_TRAIL_WINDOW_MS are drawn (newest
+LONG_TRAIL_MAX_POINTS≈stable's 2048 at most), each at a UNIFORM base
+alpha scaled only by its age fade along the ribbon.
 No cursormiddle → the classic sparse trail: one sprite dropped every
 16.67 ms, each fading over TRAIL_SPRITE_LIFE_MS. The procedural (non-skin)
 cursor keeps its shader-style glow trail.
@@ -113,6 +120,7 @@ GL context.
 """
 from __future__ import annotations
 
+import bisect
 import math
 
 from ..beatmap.difficulty import (HIT_FADE_OUT, RESULT_FADE_IN,
@@ -150,7 +158,6 @@ TRAIL_SPRITE_LIFE_MS = 150.0               # sparse sprite fade-out
 LONG_TRAIL_SPACING_OSU = 2.0               # long mode: point every 2 osu!px
 LONG_TRAIL_MAX_POINTS = 2048               # stable LongTrailLength scale
 LONG_TRAIL_WINDOW_MS = 800.0               # long-mode age-out horizon
-LONG_TRAIL_STEP_MS = 2.0                   # cursor path sampling step
 TICK_LOGICAL_PX = 16.0         # procedural slider-tick dot, logical skin px
 FP_DOT_LOGICAL_PX = 16.0       # procedural followpoint dot, logical skin px
 CURSOR_RADIUS_OSU = 14.0       # cursor core sizing base, osu!px
@@ -171,6 +178,16 @@ POPUP_SKIN_ELEMENT = {         # judgment kind → skin sprite element
     JudgmentKind.HIT100: "hit100",
     JudgmentKind.HIT300: "hit300",
 }
+# classic miss animation (stable / lazer LegacyJudgementPieceOld): the
+# hit0 popup falls + slightly rotates while fading (miss_fall_transform)
+MISS_FALL_DISTANCE_OSU = 100.0     # MoveToOffset (0, 100) over the fade
+MISS_FALL_ROT_RAD = math.radians(8.6)   # RotateTo(RNG ±8.6°) stand-in
+
+# playfield borders (--playfield-borders none|edges|full): subtle
+# low-alpha white outline of the playfield bounds
+BORDER_THICKNESS_OSU = 1.6         # ~2 screen px at 1080p
+BORDER_CORNER_LEN_OSU = 24.0       # "edges" corner-L stroke length
+BORDER_ALPHA = 0.28
 
 # --- spinner draw constants (render/spinner.py has the lifecycle math) ---------
 SPINNER_DIM_ALPHA = 0.85       # SpinnerFadePlayfield backdrop strength
@@ -271,6 +288,59 @@ def popup_alpha_scale(t: float, popup_time: float) -> tuple[float, float] | None
     return 1.0 - p, 1.0
 
 
+def miss_fall_transform(age_ms: float,
+                        seed: int = 0) -> tuple[float, float]:
+    """(dy_osu, rotation_rad) of the FALLING miss popup at popup age
+    `age_ms` — stable's classic hit0 animation (lazer's
+    LegacyJudgementPieceOld miss branch: MoveToOffset((0, 100)) +
+    RotateTo(±8.6°), both Easing.In over the popup's remaining life):
+    the sprite starts at the normal popup position and slowly drifts
+    DOWN (gravity-ish, quad-in over MISS_FALL_DISTANCE_OSU) with a
+    slight rotation while the popup alpha fades. `seed` (the object id)
+    picks a deterministic rotation direction/amount standing in for
+    lazer's RNG.NextSingle(-8.6, 8.6) — same replay, same render."""
+    dur = RESULT_FADE_IN + RESULT_FADE_OUT
+    p = _clamp01(age_ms / dur)
+    ease = p * p                       # Easing.In (quad)
+    frac = (seed * 0.618033988749895) % 1.0     # golden-ratio hash → [0,1)
+    rot_final = MISS_FALL_ROT_RAD * (2.0 * frac - 1.0)
+    return MISS_FALL_DISTANCE_OSU * ease, rot_final * ease
+
+
+def playfield_border_rects(x0: float, y0: float, x1: float, y1: float,
+                           mode: str, thickness: float,
+                           corner_len: float) -> list[tuple[float, float,
+                                                            float, float]]:
+    """[(cx, cy, w, h)] solid rects outlining the playfield bounds
+    (screen px, INSIDE the box):
+      "full"  → the four thin edges of the border box
+      "edges" → corner markers only: an L pair (corner_len long) at each
+                of the four corners
+      anything else → [] (borders off)."""
+    t = thickness
+    w, h = x1 - x0, y1 - y0
+    if w <= 0 or h <= 0:
+        return []
+    if mode == "full":
+        return [
+            (x0 + w / 2.0, y0 + t / 2.0, w, t),            # top
+            (x0 + w / 2.0, y1 - t / 2.0, w, t),            # bottom
+            (x0 + t / 2.0, y0 + h / 2.0, t, h - 2.0 * t),  # left
+            (x1 - t / 2.0, y0 + h / 2.0, t, h - 2.0 * t),  # right
+        ]
+    if mode == "edges":
+        c = min(corner_len, w / 2.0, h / 2.0)
+        out: list[tuple[float, float, float, float]] = []
+        for cx, sx in ((x0, 1.0), (x1, -1.0)):
+            for cy, sy in ((y0, 1.0), (y1, -1.0)):
+                # horizontal stroke then vertical stroke of the corner L
+                out.append((cx + sx * c / 2.0, cy + sy * t / 2.0, c, t))
+                out.append((cx + sx * t / 2.0, cy + sy * (t + (c - t) / 2.0),
+                            t, c - t))
+        return out
+    return []
+
+
 def snake_end_fraction(t: float, start_time: float, preempt: float,
                        snaking_in: bool = True) -> float:
     """§4.9 Snaking.In (lazer timing): 0→1 over the first preempt/3."""
@@ -350,34 +420,56 @@ def sparse_trail_times(t: float,
     return out
 
 
-def long_trail_points(sample_fn, t: float, *,
-                      spacing_osu: float = LONG_TRAIL_SPACING_OSU,
+def build_distance_trail(frames, spacing_osu: float = LONG_TRAIL_SPACING_OSU,
+                         ) -> list[tuple[float, float, float]]:
+    """[(x_osu, y_osu, pass_time_ms)] — the ENTIRE replay's cursor path
+    resampled by TRAVEL DISTANCE: one point every spacing_osu osu!px of
+    cursor movement, positions AND pass times linearly interpolated
+    INSIDE replay-frame segments so the spacing stays uniform at any
+    cursor speed (a 400 px flick between two frames still yields a point
+    every spacing_osu px). A stationary cursor emits nothing — points
+    can never pile up in place. Built once; the per-frame draw bisects
+    into it (long_trail_points)."""
+    out: list[tuple[float, float, float]] = []
+    if not frames:
+        return out
+    px, py = float(frames[0].x), float(frames[0].y)
+    pt = float(frames[0].time_ms)
+    since = 0.0                       # distance travelled since last point
+    for f in frames[1:]:
+        x, y, ft = float(f.x), float(f.y), float(f.time_ms)
+        dx, dy, dt = x - px, y - py, ft - pt
+        seg = math.hypot(dx, dy)
+        if seg > 1e-9:
+            d = spacing_osu - since
+            while d <= seg:
+                u = d / seg
+                out.append((px + dx * u, py + dy * u, pt + dt * u))
+                d += spacing_osu
+            since = seg - (d - spacing_osu)
+        px, py, pt = x, y, ft
+    return out
+
+
+def long_trail_points(trail: list[tuple[float, float, float]],
+                      trail_times: list[float], t: float, *,
                       window_ms: float = LONG_TRAIL_WINDOW_MS,
-                      step_ms: float = LONG_TRAIL_STEP_MS,
                       max_points: int = LONG_TRAIL_MAX_POINTS,
                       ) -> list[tuple[float, float, float]]:
     """[(x_osu, y_osu, strength 0..1)] oldest→newest for the LONG
-    connected trail: the cursor path over the last window_ms resampled by
-    DISTANCE — one point every spacing_osu osu!px (LongTrailDensity
-    semantics), at most max_points (stable LongTrailLength scale) —
-    each aged linearly to 0 at the window edge. sample_fn(time)→(x, y)."""
+    connected trail at time t: the build_distance_trail points passed in
+    the last window_ms (newest max_points at most), strength = the age
+    fade along the ribbon (1 at the cursor → 0 at the window edge).
+    Strength is the ONLY per-point alpha factor — the base alpha is
+    uniform, so a slow cursor draws a shorter ribbon at the SAME
+    brightness, never a brighter blob."""
+    hi = bisect.bisect_right(trail_times, t)
+    lo = bisect.bisect_left(trail_times, t - window_ms, 0, hi)
+    lo = max(lo, hi - max_points)
     out: list[tuple[float, float, float]] = []
-    px, py = sample_fn(t)
-    out.append((px, py, 1.0))
-    acc = 0.0
-    ti = t
-    while len(out) < max_points:
-        ti -= step_ms
-        age = t - ti
-        if age >= window_ms:
-            break
-        x, y = sample_fn(ti)
-        acc += math.hypot(x - px, y - py)
-        px, py = x, y
-        if acc >= spacing_osu:
-            out.append((x, y, 1.0 - age / window_ms))
-            acc = 0.0
-    out.reverse()
+    for i in range(lo, hi):
+        x, y, ti = trail[i]
+        out.append((x, y, 1.0 - (t - ti) / window_ms))
     return out
 
 
@@ -412,7 +504,11 @@ class StdScene:
                  track_override: tuple[float, float, float] | None = None,
                  bg_key: str | None = None,
                  bg_draw_size: tuple[float, float] | None = None,
-                 dim_envelope=None):
+                 dim_envelope=None,
+                 miss_fall: bool = True,
+                 playfield_borders: str = "none",
+                 results=None,
+                 results_start_ms: float | None = None):
         self.beatmap = beatmap
         self.diff = beatmap.diff
         self.frames = frames
@@ -439,16 +535,34 @@ class StdScene:
         self.skin = skin_elems            # skin_elements.SkinElements | None
         self.use_skin_cursor = bool(use_skin_cursor and skin_elems is not None
                                     and skin_elems.has("cursor"))
-        # §3.3 trail mode: cursormiddle present (or forced) → long trail
+        # §3.3 trail mode: cursormiddle present (or forced) → long trail;
+        # the long trail is DISTANCE-resampled once from the full replay
         self.long_trail = skin_trail_is_long(
             skin_elems is not None and skin_elems.has("cursormiddle"),
             force_long_trail)
+        self._trail_pts: list[tuple[float, float, float]] = []
+        self._trail_times: list[float] = []
+        if self.long_trail and frames:
+            self._trail_pts = build_distance_trail(frames)
+            self._trail_times = [p[2] for p in self._trail_pts]
         self.border_color = tuple(border_color)
         self.track_override = (tuple(track_override)
                                if track_override is not None else None)
         self.bg_key = bg_key              # §4.10 background layer
         self.bg_draw_size = bg_draw_size  # cover-fit (w, h), frame-centered
         self.dim = dim_envelope           # background.DimEnvelope | None
+        self.miss_fall = miss_fall        # classic falling hit0 (owner: ON)
+        self.results = results            # results.ResultsScreen | None
+        self.results_start_ms = results_start_ms
+        # playfield borders: precomputed subtle white rects (screen px)
+        self._border_rects: list[tuple[float, float, float, float]] = []
+        if playfield_borders in ("edges", "full"):
+            bx0, by0 = camera.to_screen(0.0, 0.0)
+            bx1, by1 = camera.to_screen(512.0, 384.0)
+            self._border_rects = playfield_border_rects(
+                bx0, by0, bx1, by1, playfield_borders,
+                max(camera.len_to_screen(BORDER_THICKNESS_OSU), 1.0),
+                camera.len_to_screen(BORDER_CORNER_LEN_OSU))
 
         self.objects = sorted(beatmap.hit_objects,
                               key=lambda o: o.get_start_time())
@@ -550,8 +664,15 @@ class StdScene:
                           outcomes.get(("tick", round(tm.time, 2)), True)))
         arrows = []
         spawn = obj.get_start_time() - self.diff.preempt
+        # owner spec: multi-reverse arrows only show once the head is HIT
+        # (a missed head resolves at its window close); no judgments →
+        # the perfect-play head hit at startTime
+        head_hit = obj.get_start_time()
+        if v is not None:
+            head_hit = v.hit_time if v.hit_time is not None else v.deadline
         schedule = reverse_arrow_schedule(obj.get_start_time(), obj.part_len,
-                                          obj.repeat_count, spawn)
+                                          obj.repeat_count, spawn,
+                                          head_hit_time=head_hit)
         markers = obj.tick_reverse
         for arrow in schedule:
             marker = markers[arrow.r - 1] if arrow.r - 1 < len(markers) else None
@@ -578,6 +699,10 @@ class StdScene:
             self.spr.draw([Sprite(self.cam.screen_w / 2.0,
                                   self.cam.screen_h / 2.0,
                                   bw, bh, self.bg_key, (b, b, b, 1.0))])
+        if self._border_rects:
+            self.spr.draw([Sprite(cx, cy, w, h, None,
+                                  (1.0, 1.0, 1.0, BORDER_ALPHA))
+                           for cx, cy, w, h in self._border_rects])
         if self.draw_follow_points and self._fp_dots:
             fps = self._followpoint_sprites(t)
             if fps:
@@ -605,6 +730,11 @@ class StdScene:
             self.spr.draw(self._cursor_sprites(t))
         if self.hud is not None:
             self.hud.draw(t)          # §5.3 draw order: … → cursors → HUD
+        if self.results is not None and self.results_start_ms is not None \
+                and t >= self.results_start_ms:
+            # Red's shared results card (render/results.py) — dims the
+            # whole scene (HUD included, the mania draw order) under it
+            self.results.draw(t - self.results_start_ms)
 
     def frame_rgb(self, t: float):
         self.render_frame(t)
@@ -1180,6 +1310,12 @@ class StdScene:
                 continue
             keep.append(ev)
             alpha, scale = asa
+            # classic miss animation: hit0 falls + rotates while fading
+            dy_px, rot = 0.0, 0.0
+            if ev.kind is JudgmentKind.MISS and self.miss_fall:
+                dy_osu, rot = miss_fall_transform(t - ev.time_ms,
+                                                  seed=ev.object_id)
+                dy_px = self.cam.len_to_screen(dy_osu)
             sk = self.skin
             el = POPUP_SKIN_ELEMENT[ev.kind]
             if sk is not None and sk.has(el):
@@ -1188,14 +1324,16 @@ class StdScene:
                 x, y = self.cam.to_screen(ev.x, ev.y)
                 w, h = sk.size[el]
                 k = self.circle_k
-                out.append(Sprite(x, y, w * k * scale, h * k * scale,
-                                  f"sk_{el}", (1.0, 1.0, 1.0, alpha)))
+                out.append(Sprite(x, y + dy_px, w * k * scale,
+                                  h * k * scale, f"sk_{el}",
+                                  (1.0, 1.0, 1.0, alpha), rotation=rot))
                 continue       # skin sprites draw as-authored, untinted
             color = POPUP_COLORS[ev.kind]
             x, y = self.cam.to_screen(ev.x, ev.y)
             if ev.kind is JudgmentKind.MISS:
                 d = 2.2 * self.radius_px * scale
-                out.append(Sprite(x, y, d, d, "miss_x", (*color, alpha)))
+                out.append(Sprite(x, y + dy_px, d, d, "miss_x",
+                                  (*color, alpha), rotation=rot))
                 continue
             if ev.kind is JudgmentKind.HIT300:
                 alpha *= POPUP_300_ALPHA
@@ -1280,8 +1418,10 @@ class StdScene:
 
         Trail per the §3.3 two-mode rule (self.long_trail): cursormiddle
         present (or ForceLongTrail) → LONG CONNECTED trail — cursortrail
-        laid along the cursor path by DISTANCE; else the classic sparse
-        16.67 ms drops fading over TRAIL_SPRITE_LIFE_MS."""
+        laid along the cursor path strictly by DISTANCE (the
+        build_distance_trail resample: uniform spacing at any speed,
+        uniform base alpha, age fade along the ribbon); else the classic
+        sparse 16.67 ms drops fading over TRAIL_SPRITE_LIFE_MS."""
         sk = self.skin
         k = (self.cam.screen_h / CURSOR_UI_HEIGHT) * self.cursor_scale
         centre = sk.info.cursor_centre
@@ -1290,8 +1430,8 @@ class StdScene:
             tw, th = sk.size["cursortrail"]
             ox, oy = (0.0, 0.0) if centre else (tw * k / 2.0, th * k / 2.0)
             if self.long_trail:
-                pts = long_trail_points(
-                    lambda ti: cursor_at(self.frames, ti)[:2], t)
+                pts = long_trail_points(self._trail_pts, self._trail_times,
+                                        t)
                 for x, y, strength in pts:
                     sx, sy = self.cam.to_screen(x, y)
                     out.append(Sprite(sx + ox, sy + oy, tw * k, th * k,

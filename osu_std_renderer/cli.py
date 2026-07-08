@@ -51,6 +51,16 @@ ruleset's tracking windows and spinnerspin over spins (--no-hitsounds /
 judgment-driven, so they require a replay; `--no-replay` stays a bare
 debug flag (visuals only — no cursor/HUD/judgments/hitsounds).
 
+OWNER PUNCH-LIST PHASE (2026-07): distance-based long cursor trail
+(uniform spacing/brightness at any speed), per-element HUD selection
+(skin's legacy component where the skin ships it, ARGON otherwise —
+hud.py docstring), brighter-inside slider bodies (BodyStyle defaults),
+the classic falling hit0 miss (--miss-fall), skin ranking-* images with
+--renderer-default-font-and-ranks, multi-reverse arrows gated on the
+head hit, the bottom-parked hit-error/UR block, --playfield-borders,
+and RED'S results screen as the outro (render/results.py — --results is
+now IMPLEMENTED, results_screen_time honored, mania-card layout).
+
 Debug extras:
     --parse-only            parse map+replay+skin, print a summary, exit 0
     --start N               start the render N seconds into the map
@@ -136,6 +146,20 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--hit-lighting", action=BA, default=True,
                     help="§3.3 combo-tinted lighting flash under non-miss "
                          "judgments (R3D preset default ON)")
+    ap.add_argument("--miss-fall", action=BA, default=True,
+                    help="classic miss animation: the hit0 popup falls + "
+                         "slightly rotates while it fades (stable's look; "
+                         "owner default ON)")
+    ap.add_argument("--renderer-default-font-and-ranks", action=BA,
+                    default=False,
+                    help="force the renderer's default (Argon) HUD numbers "
+                         "+ procedural rank text even when the skin ships "
+                         "fonts / ranking-* images")
+    ap.add_argument("--playfield-borders",
+                    choices=("none", "edges", "full"), default="none",
+                    help="subtle white outline of the playfield bounds: "
+                         "'full' = thin border box, 'edges' = corner "
+                         "markers only")
     ap.add_argument("--watermark", default="")
     ap.add_argument("--music-volume", type=int, default=100)
     ap.add_argument("--hitsound-volume", type=int, default=100)
@@ -260,6 +284,30 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
             # pin the displayed score curve to the .osr's recorded total
             hud.pin_final_score(meta.score)
 
+    # --- RED'S results screen (render/results.py; §4.6 ShowResultsScreen) --------
+    last_end = max(o.get_end_time() for o in beatmap.hit_objects)
+    gameplay_end_ms = last_end + HIT_FADE_OUT + settings.fade_out_time * 1000.0
+    speed = beatmap.diff.speed
+    results = results_start_ms = None
+    if settings.show_results and hud is not None and meta is not None:
+        from .render.results import ResultsScreen
+        fv = hud.final_values()
+        deltas = hud.data.err_deltas
+        avg_ms = (sum(deltas) / len(deltas)) if deltas else 0.0
+        results = ResultsScreen(
+            spr, skin_elems,
+            counts=(meta.count_300, meta.count_100, meta.count_50,
+                    meta.count_miss),
+            acc_pct=meta.accuracy, score=(meta.score or fv["score"]),
+            max_combo=meta.max_combo, grade=meta.grade, ur=fv["ur"],
+            avg_ms=avg_ms, err_deltas=deltas, meh_ms=hud.hw.meh,
+            player=meta.player_name,
+            map_line=f"{beatmap.artist} - {beatmap.name}",
+            diff_name=beatmap.difficulty_name, mods=meta.mods,
+            use_skin_ranks=not settings.renderer_default_font_and_ranks)
+        results.set_windows(hud.hw.great, hud.hw.ok)
+        results_start_ms = gameplay_end_ms
+
     combo_colors = [(r / 255.0, g / 255.0, b / 255.0)
                     for r, g, b in skin_info.combo_colors]
     track_override = None
@@ -288,14 +336,20 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
         bg_key=bg_key,
         bg_draw_size=bg_size,
         dim_envelope=dim_env,
+        miss_fall=settings.miss_fall,
+        playfield_borders=settings.playfield_borders,
+        results=results,
+        results_start_ms=results_start_ms,
     )
 
-    last_end = max(o.get_end_time() for o in beatmap.hit_objects)
-    end_ms = last_end + HIT_FADE_OUT + settings.fade_out_time * 1000.0
+    end_ms = gameplay_end_ms
+    if results is not None:
+        # results_screen_time is WALL seconds — scale by the rate mod so
+        # the card holds the same real time under DT/HT
+        end_ms += settings.results_screen_time * 1000.0 * speed
     if args.max_seconds is not None:
         end_ms = min(end_ms, args.max_seconds * 1000.0)
     start_ms = (args.start or 0.0) * 1000.0
-    speed = beatmap.diff.speed
     if start_ms and start_ms >= end_ms:
         print(f"error: --start {args.start:g}s is at/after the render end "
               f"({end_ms / 1000.0:.1f}s)", file=sys.stderr)
@@ -474,6 +528,9 @@ def main(argv: list[str] | None = None) -> int:
         hud_scale=args.hud_scale, hud_opacity=args.hud_opacity,
         combo_break_flash=args.break_flash,
         show_hit_lighting=args.hit_lighting,
+        miss_fall=args.miss_fall,
+        renderer_default_font_and_ranks=args.renderer_default_font_and_ranks,
+        playfield_borders=args.playfield_borders,
         watermark_text=args.watermark, music_volume=args.music_volume,
         hitsound_volume=args.hitsound_volume,
         use_skin_hitsounds=args.use_skin_hitsounds,
