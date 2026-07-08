@@ -54,12 +54,15 @@ debug flag (visuals only — no cursor/HUD/judgments/hitsounds).
 OWNER PUNCH-LIST PHASE (2026-07): distance-based long cursor trail
 (uniform spacing/brightness at any speed), per-element HUD selection
 (skin's legacy component where the skin ships it, ARGON otherwise —
-hud.py docstring), brighter-inside slider bodies (BodyStyle defaults),
-the classic falling hit0 miss (--miss-fall), skin ranking-* images with
---renderer-default-font-and-ranks, multi-reverse arrows gated on the
-head hit, the bottom-parked hit-error/UR block, --playfield-borders,
-and RED'S results screen as the outro (render/results.py — --results is
-now IMPLEMENTED, results_screen_time honored, mania-card layout).
+hud.py docstring; --legacy-defaults forces the ALL-LEGACY look for HUD
+AND the synth hitsound bank, --renderer-default-font-and-ranks wins
+over it for numbers/ranks), brighter-inside slider bodies (BodyStyle
+defaults), the classic falling hit0 miss (--miss-fall), skin ranking-*
+images with --renderer-default-font-and-ranks, multi-reverse arrows
+gated on the head hit, the bottom-parked hit-error/UR block,
+--playfield-borders, and RED'S results screen as the outro
+(render/results.py — --results is now IMPLEMENTED, results_screen_time
+honored, mania-card layout).
 
 SETTINGS-SURFACE PHASE (2026-07 — the full R3D website preset surface):
 every std setting mania_ordr/presets.py exposes now maps to a flag and
@@ -204,7 +207,15 @@ def build_parser() -> argparse.ArgumentParser:
                     default=False,
                     help="force the renderer's default (Argon) HUD numbers "
                          "+ procedural rank text even when the skin ships "
-                         "fonts / ranking-* images")
+                         "fonts / ranking-* images (wins over "
+                         "--legacy-defaults for numbers/ranks)")
+    ap.add_argument("--legacy-defaults", action=BA, default=False,
+                    help="the ALL-LEGACY look: every HUD element uses its "
+                         "legacy component (skin textures where shipped, "
+                         "classic lg_* bakes otherwise — no Argon anywhere, "
+                         "even skinless) and missing hitsound samples "
+                         "synthesize in the LEGACY sound family; gameplay "
+                         "elements already fall back skin-else-legacy")
     ap.add_argument("--playfield-borders",
                     choices=("none", "edges", "full"), default="none",
                     help="subtle white outline of the playfield bounds: "
@@ -380,9 +391,10 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
 
     # the HUD needs the judgment stream; --dump-frames without a replay
     # sim just renders HUD-less (the Phase-1 fallback). Component set per
-    # lazer's skin architecture: Argon when skinless, Legacy + skin
-    # textures under a custom skin (hud.py docstring). The HP drain model
-    # (ruleset/health.py) and the .osr score pin wire in here.
+    # the hud.py hybrid rule: per element, the skin's legacy component
+    # where the skin ships it, Argon otherwise (legacy_defaults → all
+    # legacy). The HP drain model (ruleset/health.py) and the .osr score
+    # pin wire in here.
     hud = None
     if judgments is not None:
         from .ruleset import HealthTimeline
@@ -595,18 +607,22 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
         print(f"WARNING: beatmap audio '{beatmap.audio}' not found — "
               "mixing without the music bed", file=sys.stderr)
 
-    # sample bank shared by judged hitsounds + the nightcore overlay
+    # sample bank shared by judged hitsounds + the nightcore overlay;
+    # the synth-default bank follows the visual league (skinless→argon,
+    # custom-skin gaps→legacy, --legacy-defaults→legacy)
     sample_bank = None
     if settings.hitsound_volume > 0 and settings.general_volume > 0 and (
             (settings.use_replay_hitsounds and judgments is not None)
             or settings.nightcore_hitsounds):
-        from .record.hitsounds import SampleBank
+        from .record.hitsounds import SampleBank, synth_style_for
         from .skin.skin import Skin as SampleSkin
         sample_skin = SampleSkin(skin_dir=settings.skin_dir,
                                  fallback_dir=settings.default_skin_dir)
         sample_bank = SampleBank(
             skin=sample_skin, beatmap_dir=beatmap_dir,
-            use_beatmap_samples=not settings.use_skin_hitsounds)
+            use_beatmap_samples=not settings.use_skin_hitsounds,
+            synth_style=synth_style_for(settings.skin_dir is not None,
+                                        settings.legacy_defaults))
     hs_gain = ((settings.hitsound_volume / 100.0)
                * (settings.general_volume / 100.0))
 
@@ -624,7 +640,8 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
         print(f"hitsounds: {stats.oneshots} one-shots, "
               f"{stats.loop_ms / 1000.0:.1f}s loops | samples: "
               f"beatmap {srcs['beatmap']}, skin {srcs['skin']}, "
-              f"synth {srcs['synth']} | track peak "
+              f"synth {srcs['synth']} ({sample_bank.synth_style} bank) | "
+              f"track peak "
               f"{stats.peak_before:.2f}→{stats.peak_after:.2f}",
               file=sys.stderr)
         have_audio = have_audio or stats.oneshots > 0 or stats.loop_ms > 0
@@ -773,6 +790,7 @@ def main(argv: list[str] | None = None) -> int:
         show_hit_lighting=args.hit_lighting,
         miss_fall=args.miss_fall,
         renderer_default_font_and_ranks=args.renderer_default_font_and_ranks,
+        legacy_defaults=args.legacy_defaults,
         playfield_borders=args.playfield_borders,
         watermark_text=args.watermark, music_volume=args.music_volume,
         hitsound_volume=args.hitsound_volume,

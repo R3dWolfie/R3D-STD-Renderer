@@ -312,7 +312,7 @@ def test_final_acc_reads_last_event_not_a_timestamp():
     assert d.acc_at(last_obj_end + 1.0) != d.final_acc()
 
 
-# --- per-element component selection (skin-else-ARGON, owner correction) -------------
+# --- per-element component selection (the HYBRID rule, owner 2026-07-08) -------------
 
 class _FakeSkin:
     """Just enough of SkinElements for StdHud's selection logic."""
@@ -343,11 +343,11 @@ def _hud_with(skin, **setting_overrides):
                   health=None)
 
 
-def test_hud_component_selection_custom_skin_goes_legacy():
-    """Owner correction 2026-07-08 (supersedes the per-element rule): ANY
-    custom skin selects the LEGACY component set for EVERY HUD element —
-    textures the skin lacks come from the classic lg_* bakes INSIDE the
-    component, never Argon pieces. Skinless renders keep Argon."""
+def test_hud_component_selection_hybrid_per_element():
+    """The HYBRID rule (owner decision 2026-07-08, supersedes the
+    same-day all-legacy correction): PER ELEMENT — the skin's legacy
+    component where the skin SHIPS that element's textures, ARGON for
+    whatever the skin lacks. Skinless renders stay all-Argon."""
     # skinless → all Argon
     hud = _hud_with(None)
     assert not hud.legacy_score and not hud.legacy_combo
@@ -357,11 +357,46 @@ def test_hud_component_selection_custom_skin_goes_legacy():
                                "scorebar-colour", "inputoverlay-key"}))
     assert hud.legacy_score and hud.legacy_combo
     assert hud.legacy_health and hud.legacy_keys
-    # an EMPTY skin (zero textures — the legacy-only proof shape) still
-    # selects legacy everywhere: the lg_* bakes carry the whole HUD
+    # the owner-skin shape (fonts only, e.g. osu_30196342): skin
+    # score/combo fonts render, hp bar + key counter go ARGON
+    hud = _hud_with(_FakeSkin({"score_digits", "combo_digits"}))
+    assert hud.legacy_score and hud.legacy_combo
+    assert not hud.legacy_health and not hud.legacy_keys
+    # scorebar only → legacy hp, Argon everything else; either
+    # inputoverlay texture is enough for legacy keys
+    hud = _hud_with(_FakeSkin({"scorebar-colour"}))
+    assert hud.legacy_health
+    assert not hud.legacy_score and not hud.legacy_combo
+    assert not hud.legacy_keys
+    hud = _hud_with(_FakeSkin({"inputoverlay-background"}))
+    assert hud.legacy_keys and not hud.legacy_health
+    # an EMPTY skin (zero textures) ships nothing → all-Argon HUD by
+    # default (gameplay keeps its legacy fallback — unchanged)
     hud = _hud_with(_FakeSkin(set()))
+    assert not hud.legacy_score and not hud.legacy_combo
+    assert not hud.legacy_health and not hud.legacy_keys
+
+
+def test_legacy_defaults_forces_all_legacy():
+    """legacy_defaults=ON (--legacy-defaults) = the ALL-LEGACY look:
+    every HUD element selects its legacy component even skinless / under
+    an empty skin — the lg_* bakes carry whatever the skin doesn't ship.
+    PRECEDENCE: renderer_default_font_and_ranks wins over it when both
+    are set (numbers/ranks go Argon/procedural, the rest stays legacy)."""
+    # empty skin + legacy_defaults → all legacy (legacy_only_v2 shape)
+    hud = _hud_with(_FakeSkin(set()), legacy_defaults=True)
     assert hud.legacy_score and hud.legacy_combo
     assert hud.legacy_health and hud.legacy_keys
+    # skinless + legacy_defaults → still all legacy
+    hud = _hud_with(None, legacy_defaults=True)
+    assert hud.legacy_score and hud.legacy_combo
+    assert hud.legacy_health and hud.legacy_keys
+    # precedence: renderer_default_font_and_ranks wins for fonts+ranks
+    hud = _hud_with(_FakeSkin(set()), legacy_defaults=True,
+                    renderer_default_font_and_ranks=True)
+    assert hud.force_default
+    assert not hud.legacy_score and not hud.legacy_combo   # Argon numbers
+    assert hud.legacy_health and hud.legacy_keys            # stay legacy
 
 
 def test_renderer_default_font_and_ranks_toggle():

@@ -33,7 +33,16 @@ Semantics ported:
     ticks). The spinner's own hitsound fires at its end when cleared.
   * When no source provides a sample, a DETERMINISTIC synthesized
     placeholder is generated (short sine/noise bursts @48 kHz stereo) —
-    a skinless render never goes silent.
+    a skinless render never goes silent. TWO synth banks exist (owner
+    decision 2026-07-08), selected by the SAME league rule as the HUD
+    visuals (synth_style_for): skinless renders synthesize in the ARGON
+    sound family (the lazer-ish bank below); a CUSTOM SKIN's missing
+    samples — and everything under --legacy-defaults — synthesize in
+    the LEGACY family, approximating the CLASSIC osu default sample
+    character (hitnormal = the short soft tock, whistle = the two-tone
+    whistle, finish = a cymbal-ish crash decay, clap = a multi-burst
+    clap; soft/drum sets are tonal/filter variations). Zero ppy sample
+    files — everything stays procedural and deterministic.
 
 All event times are gameplay (map) ms; mixing converts to wall time via
 (t - start_ms) / speed, matching the rate-modded music bed. Everything is
@@ -272,15 +281,29 @@ def mix_nightcore(mixer, bank: "SampleBank", beats, *, speed: float = 1.0,
 
 # --- sample bank -----------------------------------------------------------------
 
+def synth_style_for(has_custom_skin: bool,
+                    legacy_defaults: bool = False) -> str:
+    """Which synthesized-default bank a render's missing samples use —
+    the SAME league rule as the HUD visuals (owner decision 2026-07-08):
+    skinless → "argon" (the lazer sound family); a custom skin's gaps →
+    "legacy" (the classic osu character); --legacy-defaults → "legacy"
+    always."""
+    return "legacy" if (has_custom_skin or legacy_defaults) else "argon"
+
+
 class SampleBank:
     """Resolve (set, sound, index) → 48 kHz stereo float32 PCM through
     BEATMAP(custom index) → SKIN chain → SYNTH default, with caching and
-    per-source bookkeeping for the render report."""
+    per-source bookkeeping for the render report. `synth_style` picks
+    the synthesized-default bank ("argon" | "legacy" —
+    synth_style_for's league rule)."""
 
     def __init__(self, skin=None, beatmap_dir: Path | None = None,
-                 use_beatmap_samples: bool = True):
+                 use_beatmap_samples: bool = True,
+                 synth_style: str = "argon"):
         self.skin = skin
         self.use_beatmap_samples = use_beatmap_samples
+        self.synth_style = synth_style
         self._beatmap_files: dict[str, Path] = {}
         if beatmap_dir is not None:
             d = Path(beatmap_dir)
@@ -322,8 +345,8 @@ class SampleBank:
                 pcm = self._decode(p)
                 if pcm is not None:
                     return pcm, "skin"
-        # 3. deterministic synthesized default
-        return synth_sample(name), "synth"
+        # 3. deterministic synthesized default (league-selected bank)
+        return synth_sample(name, style=self.synth_style), "synth"
 
     def _decode(self, path: Path) -> np.ndarray | None:
         """Decode a sample file; zero-byte files mean SILENCE (the classic
@@ -377,11 +400,20 @@ def _stereo(x: np.ndarray) -> np.ndarray:
     return np.repeat(x.astype(np.float32)[:, None], 2, axis=1)
 
 
-def synth_sample(name: str) -> np.ndarray:
-    """Deterministic placeholder samples (short click/noise bursts) for
-    the full §3.4 surface — used when neither the beatmap nor any skin in
-    the chain provides the file. Loopable sounds carry edge fades so
-    tiling doesn't click."""
+def synth_sample(name: str, style: str = "argon") -> np.ndarray:
+    """Deterministic placeholder samples for the full §3.4 surface —
+    used when neither the beatmap nor any skin in the chain provides the
+    file. Two banks (synth_style_for's league rule): "argon" = the
+    lazer-ish family this engine always synthesized; "legacy" = the
+    classic-osu character. Loopable sounds carry edge fades so tiling
+    doesn't click."""
+    if style == "legacy":
+        return _synth_legacy(name)
+    return _synth_argon(name)
+
+
+def _synth_argon(name: str) -> np.ndarray:
+    """The ARGON (lazer-family) synth bank — the original bank."""
     base = name.split("-", 1)[-1]          # strip the set prefix
     if base == "hitnormal":
         t = _t(0.05)
@@ -419,6 +451,130 @@ def synth_sample(name: str) -> np.ndarray:
         t = _t(0.03)
         x = 0.4 * np.sin(2 * math.pi * 1000.0 * t) * np.exp(-150.0 * t)
     return _stereo(x)
+
+
+# --- the LEGACY synth bank (classic-osu character, owner 2026-07-08) -----------------
+
+def _lowpass(x: np.ndarray, k: int) -> np.ndarray:
+    """Cheap moving-average low-pass (k-sample window)."""
+    if k <= 1:
+        return x
+    kern = np.ones(k, dtype=np.float32) / float(k)
+    return np.convolve(x, kern, mode="same").astype(np.float32)
+
+
+def _highpass(x: np.ndarray, k: int) -> np.ndarray:
+    return (x - _lowpass(x, k)).astype(np.float32)
+
+
+def _lg_noise(dur: float, name: str) -> np.ndarray:
+    """Raw (unfiltered) deterministic noise, decorrelated from the argon
+    bank by the lg: seed prefix."""
+    rng = np.random.default_rng(zlib.crc32(f"lg:{name}".encode()))
+    return rng.standard_normal(int(dur * SAMPLE_RATE)).astype(np.float32)
+
+
+def _synth_legacy(name: str) -> np.ndarray:
+    """The LEGACY synth bank: procedural approximations of the CLASSIC
+    osu default sample character (no ppy files) — hitnormal = the short
+    soft tock, whistle = the two-tone whistle, finish = a cymbal-ish
+    crash decay, clap = a multi-burst clap. The soft set is duller/
+    gentler and the drum set punchier/lower (tonal + filter variations
+    of the normal set). Deterministic like the argon bank; loopables
+    carry edge fades."""
+    set_name, dash, base = name.partition("-")
+    if not dash:                       # un-prefixed (spinnerspin/bonus)
+        set_name, base = "", set_name
+    soft = set_name == "soft"
+    drum = set_name == "drum"
+
+    if base == "hitnormal":
+        # the familiar short tock: mid thump + a filtered noise snap
+        dur = 0.07
+        t = _t(dur)
+        n = _lg_noise(dur, name)
+        if soft:
+            x = (0.38 * np.sin(2 * math.pi * 330.0 * t) * np.exp(-65.0 * t)
+                 + 0.30 * _lowpass(n, 24) * np.exp(-120.0 * t))
+        elif drum:
+            x = (0.70 * np.sin(2 * math.pi * 175.0 * t) * np.exp(-50.0 * t)
+                 + 0.35 * _lowpass(_highpass(n, 96), 6)
+                 * np.exp(-160.0 * t))
+        else:
+            x = (0.55 * np.sin(2 * math.pi * 440.0 * t) * np.exp(-85.0 * t)
+                 + 0.45 * _lowpass(_highpass(n, 48), 4)
+                 * np.exp(-170.0 * t))
+    elif base == "hitwhistle":
+        # the two-tone whistle: pitch steps high→low mid-sample
+        dur = 0.13 if drum else 0.22
+        t = _t(dur)
+        f_hi, f_lo = (2093.0, 1568.0)          # C7 → G6
+        if soft:
+            f_hi, f_lo = f_hi * 0.75, f_lo * 0.75
+        freq = np.where(t < dur * 0.45, f_hi, f_lo).astype(np.float32)
+        phase = 2.0 * math.pi * np.cumsum(freq) / SAMPLE_RATE
+        amp = 0.30 if soft else 0.42
+        x = amp * np.sin(phase) * np.exp(-9.0 * t)
+        x += 0.3 * amp * np.sin(2.0 * phase) * np.exp(-14.0 * t)
+    elif base == "hitfinish":
+        # cymbal-ish crash: bright high-passed noise + inharmonic shimmer
+        dur = 0.45 if soft else (0.5 if drum else 0.7)
+        t = _t(dur)
+        n = _highpass(_lg_noise(dur, name), 10 if soft else 5)
+        x = (0.35 if soft else 0.5) * n * np.exp(-4.5 * t)
+        for i, f in enumerate((3135.0, 4699.0, 6271.0)):
+            x += 0.07 * np.sin(2 * math.pi * f * t) * np.exp(-(6.0 + i) * t)
+        if drum:
+            x += 0.40 * np.sin(2 * math.pi * 100.0 * t) * np.exp(-18.0 * t)
+    elif base == "hitclap":
+        # the clap burst: 3 quick taps into a band-passed body decay
+        dur = 0.12
+        t = _t(dur)
+        n = _lowpass(_highpass(_lg_noise(dur, name), 64),
+                     12 if soft else 6)
+        env = np.exp(-60.0 * t)
+        for tap_ms, amp in ((0.0, 0.5), (11.0, 0.7), (22.0, 1.0)):
+            i0 = int(tap_ms / 1000.0 * SAMPLE_RATE)
+            tap = np.zeros_like(env)
+            tt = t[: len(t) - i0]
+            tap[i0:] = np.exp(-220.0 * tt)
+            env = np.maximum(env, amp * tap)
+        x = (0.55 if soft else 0.8) * n * env
+        if drum:
+            x += 0.30 * np.sin(2 * math.pi * 160.0 * t) * np.exp(-70.0 * t)
+    elif base == "slidertick":
+        dur = 0.02
+        t = _t(dur)
+        f = 1200.0 if drum else (1500.0 if soft else 1900.0)
+        x = (0.35 if soft else 0.45) * np.sin(2 * math.pi * f * t) \
+            * np.exp(-320.0 * t)
+    elif base == "sliderslide":
+        # rolling filtered noise (duller than the argon hiss)
+        x = 0.18 * _lowpass(_lg_noise(0.25, name), 32 if soft else 16)
+        if drum:
+            t = _t(0.25)
+            x += 0.05 * np.sin(2 * math.pi * 90.0 * t)
+        x = _edge_fade(x)
+    elif base == "sliderwhistle":
+        t = _t(0.25)
+        f = 1975.0 * (0.75 if soft else 1.0)
+        trem = 1.0 + 0.25 * np.sin(2 * math.pi * 5.0 * t)
+        x = 0.13 * np.sin(2 * math.pi * f * t) * trem
+        x = _edge_fade(x)
+    elif base == "spinnerspin":
+        t = _t(0.3)
+        x = 0.15 * _lowpass(_lg_noise(0.3, name), 24) \
+            * (0.7 + 0.3 * np.sin(2 * math.pi * 8.0 * t))
+        x = _edge_fade(x)
+    elif base == "spinnerbonus":
+        t = _t(0.2)
+        x = 0.30 * (np.sin(2 * math.pi * 1568.0 * t)
+                    + 0.6 * np.sin(2 * math.pi * 2093.0 * t)) \
+            * np.exp(-15.0 * t)
+    else:   # unknown name — quiet classic click, never silence
+        t = _t(0.03)
+        x = 0.35 * np.sin(2 * math.pi * 800.0 * t) * np.exp(-140.0 * t)
+    return _stereo(x.astype(np.float32))
 
 
 # --- mixing --------------------------------------------------------------------------

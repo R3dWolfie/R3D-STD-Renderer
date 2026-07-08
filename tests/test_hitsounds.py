@@ -19,7 +19,7 @@ from osu_std_renderer.beatmap.objects.timing import TimingPoint
 from osu_std_renderer.record.audio import SAMPLE_RATE, AudioMixer
 from osu_std_renderer.record.hitsounds import (
     Loop, OneShot, SampleBank, collect_hitsound_events, mix_hitsounds,
-    resolve_volume, sounds_for_bits, synth_sample,
+    resolve_volume, sounds_for_bits, synth_sample, synth_style_for,
 )
 from osu_std_renderer.replay.replay import KEY_K1, KEY_K2, StdFrame
 from osu_std_renderer.ruleset import StdRuleset
@@ -214,6 +214,68 @@ def test_synth_samples_deterministic_and_stereo():
         assert a.dtype == np.float32
         assert np.array_equal(a, b)
         assert float(np.abs(a).max()) > 0.0
+
+
+# --- the two synth banks + the league rule (owner 2026-07-08) -------------------------
+
+def test_synth_style_league_rule():
+    """The synth-default bank follows the SAME league as the HUD
+    visuals: skinless → argon; a custom skin's gaps → legacy;
+    --legacy-defaults → legacy always."""
+    assert synth_style_for(False, False) == "argon"       # skinless
+    assert synth_style_for(True, False) == "legacy"       # custom skin
+    assert synth_style_for(False, True) == "legacy"       # legacy_defaults
+    assert synth_style_for(True, True) == "legacy"
+
+
+def test_legacy_synth_bank_deterministic_distinct_and_full_surface():
+    """The legacy bank covers the full §3.4 surface, stays deterministic
+    stereo float32, and is a genuinely DIFFERENT sound family from the
+    argon bank (per name); soft/drum are variations, not copies."""
+    names = ["spinnerspin", "spinnerbonus"]
+    for s in ("normal", "soft", "drum"):
+        for snd in ("hitnormal", "hitwhistle", "hitfinish", "hitclap",
+                    "slidertick", "sliderslide", "sliderwhistle"):
+            names.append(f"{s}-{snd}")
+    for name in names:
+        a = synth_sample(name, style="legacy")
+        b = synth_sample(name, style="legacy")
+        assert a.shape == b.shape and a.shape[1] == 2
+        assert a.dtype == np.float32
+        assert np.array_equal(a, b)
+        assert float(np.abs(a).max()) > 0.0
+        ar = synth_sample(name, style="argon")
+        assert a.shape != ar.shape or not np.array_equal(a, ar)
+    # set variants differ from the normal set (tonal/filter variations)
+    for snd in ("hitnormal", "hitwhistle", "hitfinish", "hitclap"):
+        n = synth_sample(f"normal-{snd}", style="legacy")
+        for s in ("soft", "drum"):
+            v = synth_sample(f"{s}-{snd}", style="legacy")
+            assert n.shape != v.shape or not np.array_equal(n, v)
+    # unknown names still make a sound in both banks
+    assert float(np.abs(synth_sample("mystery", style="legacy")).max()) > 0
+
+
+def test_sample_bank_selects_the_league_bank():
+    """SampleBank(synth_style=…) hands out the selected bank's synth
+    defaults when nothing on disk provides the sample."""
+    lg = SampleBank(skin=None, synth_style="legacy")
+    ar = SampleBank(skin=None)                      # default = argon
+    pcm_lg, src_lg = lg.get(1, "hitnormal", 0)
+    pcm_ar, src_ar = ar.get(1, "hitnormal", 0)
+    assert src_lg == "synth" and src_ar == "synth"
+    assert lg.synth_style == "legacy" and ar.synth_style == "argon"
+    assert np.array_equal(pcm_lg, synth_sample("normal-hitnormal",
+                                               style="legacy"))
+    assert np.array_equal(pcm_ar, synth_sample("normal-hitnormal"))
+    assert (pcm_lg.shape != pcm_ar.shape
+            or not np.array_equal(pcm_lg, pcm_ar))
+    # a skin-shipped sample still wins over the bank (chain unchanged)
+    skin_d = Path(tempfile.mkdtemp(prefix="hs_lg_"))
+    _write_wav(skin_d / "normal-hitnormal.wav", value=0.5)
+    bank = SampleBank(skin=Skin(skin_dir=skin_d), synth_style="legacy")
+    pcm, src = bank.get(1, "hitnormal", 0)
+    assert src == "skin" and abs(float(pcm.max()) - 0.5) < 0.02
 
 
 # --- event collection -----------------------------------------------------------------

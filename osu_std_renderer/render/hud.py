@@ -2,32 +2,44 @@
 own skin architecture (MIT, ppy/osu master; class + file cited per
 element):
 
-COMPONENT SELECTION (owner correction, 2026-07-08 — supersedes the
-per-element skin-else-Argon rule): a CUSTOM SKIN selects the LEGACY
-component set for EVERY HUD element; textures the skin doesn't ship come
-from the classic lg_* bakes INSIDE the component (lazer's legacy-skin
-fallback chain: a legacy skin never mixes in Argon pieces). Skinless
-renders keep the ARGON set. `renderer_default_font_and_ranks` still
-forces Argon NUMBERS + procedural ranks under a skin (fonts+ranks only):
+COMPONENT SELECTION (owner decision 2026-07-08, the HYBRID rule —
+supersedes the same-day all-legacy-under-any-skin correction): selection
+is PER ELEMENT — a custom skin's LEGACY component is used for each HUD
+element the skin actually SHIPS textures for; every element the skin
+LACKS uses the ARGON component. Skinless renders stay all-Argon:
 
-    score + accuracy   custom skin → LegacyScoreCounter/LegacyAccuracy-
-                       Counter (+ the legacy progress pie), the skin's
-                       ScorePrefix set or the classic lg_* font per
-                       char; skinless → ArgonScoreCounter/ArgonAccuracy-
-                       Counter (+ the Argon progress strip)
-    combo              custom skin → LegacyDefaultComboCounter (skin
-                       ComboPrefix or lg_* font); skinless → Argon-
-                       ComboCounter
-    hp bar             custom skin → LegacyHealthDisplay (scorebar-* or
-                       the lg_scorebar/lg_ki bakes); skinless →
+    score + accuracy   skin ships the ScorePrefix digit set →
+                       LegacyScoreCounter/LegacyAccuracyCounter (+ the
+                       legacy progress pie); otherwise → ArgonScore-
+                       Counter/ArgonAccuracyCounter (+ the Argon
+                       progress strip)
+    combo              skin ships the ComboPrefix digit set →
+                       LegacyDefaultComboCounter; otherwise →
+                       ArgonComboCounter
+    hp bar             skin ships scorebar-colour/-bg →
+                       LegacyHealthDisplay; otherwise →
                        ArgonHealthDisplay
-    key overlay        custom skin → LegacyKeyCounterDisplay
-                       (inputoverlay-* or lg_io_* bakes); skinless →
+    key overlay        skin ships inputoverlay-key/-background →
+                       LegacyKeyCounterDisplay; otherwise →
                        ArgonKeyCounterDisplay
+    grade badge        skin ranking-*-small when shipped, procedural
+                       text otherwise (shared element, unchanged)
+
+Inside a SELECTED legacy component, individual textures the skin doesn't
+provide still come from the classic lg_* bakes (per-char font extras
+etc.) — a selected legacy component never mixes in Argon pieces.
+
+`legacy_defaults` (settings/CLI --legacy-defaults) forces the ALL-LEGACY
+look: EVERY HUD element uses its legacy component (skin textures where
+shipped, lg_* classic bakes otherwise — no Argon anywhere, even
+skinless). Gameplay elements already fall back skin-else-legacy in every
+mode; the synth hitsound bank follows the same league
+(record/hitsounds.synth_style_for).
 
 `renderer_default_font_and_ranks` (settings/CLI) forces the renderer's
 own default (Argon) NUMBERS and procedural RANK text even under a skin
-that ships fonts/rank images (fonts + ranks only — hp/keys stay legacy).
+that ships fonts/rank images (fonts + ranks only — hp/keys keep their
+league). PRECEDENCE: it WINS over legacy_defaults when both are set.
 
 THE TWO COMPONENT SETS (element classes unchanged):
 
@@ -980,7 +992,8 @@ class ArgonBarField:
 class StdHud:
     """Draws the HUD over the scene each frame (called by StdScene after
     the cursor — §5.3 draw order ends `cursors → HUD`). Component set per
-    the module docstring: Argon when skinless, Legacy under a custom skin."""
+    the module docstring: PER ELEMENT, the skin's legacy component where
+    the skin ships it, Argon otherwise (legacy_defaults → all legacy)."""
 
     def __init__(self, sprites, bank, settings, judgments, frames, beatmap,
                  skin_elems=None, health=None, mods: int = 0,
@@ -990,21 +1003,36 @@ class StdHud:
         self.s = settings
         self.sk = skin_elems
         self.health = health
-        # -- component selection (module docstring, owner correction
-        # 2026-07-08): a CUSTOM SKIN → the LEGACY component set for EVERY
-        # element (textures the skin lacks come from the classic lg_*
-        # bakes INSIDE the component — never Argon pieces); skinless →
-        # Argon. renderer_default_font_and_ranks still forces the
-        # renderer's default numbers/ranks (Argon + procedural rank
-        # text) under a skin — fonts+ranks only, hp/keys stay legacy.
+        # -- component selection (module docstring, owner decision
+        # 2026-07-08 — the HYBRID rule): PER ELEMENT, the skin's legacy
+        # component where the skin SHIPS that element's textures, ARGON
+        # for whatever the skin lacks; skinless → all Argon.
+        # legacy_defaults forces every element legacy (lg_* bakes fill
+        # everything, even skinless). renderer_default_font_and_ranks
+        # forces the renderer's default numbers/ranks (Argon +
+        # procedural rank text) and WINS over legacy_defaults —
+        # fonts+ranks only, hp/keys keep their league.
         sk = skin_elems
         self.force_default = bool(getattr(
             settings, "renderer_default_font_and_ranks", False))
+        self.legacy_defaults = bool(getattr(
+            settings, "legacy_defaults", False))
         fonts_ok = not self.force_default
-        self.legacy_score = fonts_ok and sk is not None
-        self.legacy_combo = fonts_ok and sk is not None
-        self.legacy_health = sk is not None
-        self.legacy_keys = sk is not None
+
+        def ships(*names: str) -> bool:
+            return sk is not None and any(sk.has(n) for n in names)
+
+        if self.legacy_defaults:
+            self.legacy_score = fonts_ok
+            self.legacy_combo = fonts_ok
+            self.legacy_health = True
+            self.legacy_keys = True
+        else:
+            self.legacy_score = fonts_ok and ships("score_digits")
+            self.legacy_combo = fonts_ok and ships("combo_digits")
+            self.legacy_health = ships("scorebar-colour", "scorebar-bg")
+            self.legacy_keys = ships("inputoverlay-key",
+                                     "inputoverlay-background")
         # -- settings-surface data (mod pills / pp / aim / strain) --------
         self.mods = int(mods)
         self._mod_acrs = (mods_to_acronyms(self.mods)
@@ -1192,7 +1220,8 @@ class StdHud:
         out: list[Sprite] = []
         # strain graph first — UNDER every other HUD element
         self._strain_graph(out, t)
-        # custom skin → legacy set, skinless → Argon (module docstring)
+        # per-element skin-else-Argon (module docstring hybrid rule;
+        # legacy_defaults flips every flag legacy)
         if self.legacy_score:
             self._legacy_score_block(out, t)   # includes the legacy pie
         else:

@@ -59,14 +59,17 @@ logic in skin/skin.py). The cursor is UI-space, not playfield-space:
 `logical_px * screen_h / 768` (stable's 768-line virtual UI).
 
 HUD REMAKE PHASE — the HUD is skin-aware at the component level (lazer's
-architecture): SKINLESS renders draw the Argon HUD (render/hud.py, no
-skin textures involved); CUSTOM-SKIN renders draw the LEGACY HUD from
-these elements — ScorePrefix/ComboPrefix/scoreentry fonts (digits
-all-or-nothing per set, dot/comma/percent/x extras per char),
-scorebar-bg/-colour(-0.. animation)/-marker/-ki(-danger/-danger2),
-inputoverlay-background/-key, ranking-*-small grade badges — with any
-missing piece falling back to the CLASSIC-look legacy bakes
-(textures.TextureBank lg_*), NEVER to Argon.
+architecture, hud.py's HYBRID rule): PER ELEMENT, a custom skin's LEGACY
+component is used where the skin SHIPS that element's textures —
+ScorePrefix/ComboPrefix/scoreentry fonts (digits all-or-nothing per set,
+dot/comma/percent/x extras per char), scorebar-bg/-colour(-0..
+animation)/-marker/-ki(-danger/-danger2), inputoverlay-background/-key,
+ranking-*-small grade badges — and the ARGON component draws every HUD
+element the skin lacks (skinless renders stay all-Argon). Inside a
+selected legacy component, missing pieces fall back to the CLASSIC-look
+legacy bakes (textures.TextureBank lg_*), never to Argon.
+settings.legacy_defaults forces every HUD element legacy (lg_* bakes
+carry a skinless/empty-skin render whole).
 
 NOT skinnable yet (honest list, stays procedural/absent):
 hitcircle-full (mandala), sliderb-nd/-spec companions,

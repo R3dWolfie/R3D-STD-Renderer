@@ -242,6 +242,16 @@ class StdRenderSettings:
     # force the renderer's default (Argon) HUD numbers + procedural rank
     # text even when the skin ships fonts / ranking-* images
     renderer_default_font_and_ranks: bool = False
+    # the ALL-LEGACY look (owner decision 2026-07-08): every HUD element
+    # goes skin-else-legacy (the classic lg_* bakes — no Argon anywhere,
+    # even skinless) and missing hitsound samples synthesize in the
+    # LEGACY sound family instead of the Argon one. Gameplay elements
+    # already fall back skin-else-legacy in every mode, so this only
+    # moves the HUD component league + the synth hitsound bank.
+    # PRECEDENCE: renderer_default_font_and_ranks WINS over
+    # legacy_defaults when both are set — numbers/ranks go
+    # Argon/procedural, everything else stays legacy.
+    legacy_defaults: bool = False
     # subtle white playfield-bounds outline: "none" | "edges" | "full"
     playfield_borders: str = "none"
 
