@@ -605,7 +605,12 @@ class KeySeries:
     edge ages). Stable sets M1|K1 together for keyboard taps, so a channel
     counts as MOUSE only when its M bit is set WITHOUT the K bit."""
 
-    def __init__(self, frames):
+    def __init__(self, frames, gameplay_start: float = -float("inf")):
+        # m-1: presses BEFORE gameplay_start (the first object's start) are
+        # warm-up taps — danser/stable start the key counters at 0 and never
+        # count them. The held state + edge times still track (so a key still
+        # lights up if held), but the displayed COUNT ignores pre-gameplay
+        # press edges.
         self.times: list[float] = []
         self.held: list[int] = []          # 4-bit mask: 1=K1 2=K2 4=M1 8=M2
         self.counts: list[tuple[int, int, int, int]] = []
@@ -621,9 +626,11 @@ class KeySeries:
             mask = k1 | (k2 << 1) | (m1 << 2) | (m2 << 3)
             edges = mask & ~prev
             drops = prev & ~mask
+            counts_press = f.time_ms >= gameplay_start
             for ch in range(4):
                 if edges & (1 << ch):
-                    c[ch] += 1
+                    if counts_press:
+                        c[ch] += 1
                     self.press_times[ch].append(f.time_ms)
                 if drops & (1 << ch):
                     self.release_times[ch].append(f.time_ms)
@@ -1050,12 +1057,20 @@ class StdHud:
         self.es = float(getattr(settings, "hud_scale", 1.0))
         self.op = float(getattr(settings, "hud_opacity", 1.0))
         self.data = HudData(judgments)
-        self.keys = KeySeries(frames)
         self.hw = OsuHitWindows(beatmap.diff.od)
         starts = [o.get_start_time() for o in beatmap.hit_objects]
         ends = [o.get_end_time() for o in beatmap.hit_objects]
         self.first_t = min(starts) if starts else 0.0
         self.last_t = max(ends) if ends else 1.0
+        # m-1: key counters ignore warm-up taps before the first object.
+        self.keys = KeySeries(frames, gameplay_start=self.first_t)
+        # m-8: grade badge + hit-error strip stay hidden until the first
+        # judgment (danser shows neither from frame 0).
+        self._first_ev_t = (self.data.ev_times[0] if self.data.ev_times
+                            else float("inf"))
+        # M-3c: the scorebar hides across [Events] breaks (stable behaviour).
+        self._breaks = [(float(p.start_time), float(p.end_time))
+                        for p in beatmap.pauses]
         self._pin = 1.0
         self._graph = self._density_buckets(starts, ends)
         self._hp_field: ArgonBarField | None = None
@@ -1740,6 +1755,20 @@ class StdHud:
                               pivot=(pivot[0] + 3.0 * es, pivot[1]),
                               additive=True)
 
+    def _scorebar_break_alpha(self, t: float) -> float:
+        """M-3c: the scorebar fades out across [Events] breaks and back in as
+        gameplay resumes (stable hides it during breaks). 1.0 outside breaks,
+        0.0 in the middle, with a short ramp at each edge. Breaks shorter than
+        SCOREBAR_BREAK_MIN_MS are ignored (nothing to hide for)."""
+        fade = 300.0
+        min_break = 1500.0
+        for bs, be in self._breaks:
+            if be - bs < min_break or not (bs <= t < be):
+                continue
+            hidden = min(_clamp01((t - bs) / fade), _clamp01((be - t) / fade))
+            return 1.0 - hidden
+        return 1.0
+
     def _legacy_health(self, out, t: float) -> None:
         """LegacyHealthDisplay: scorebar-bg at (0,0) native size, the
         colour fill cropped to hp (fill width eased ~OutQuint 200 ms →
@@ -1750,6 +1779,9 @@ class StdHud:
         768-space (legacy sprite convention); missing pieces come from the
         classic lg_* bakes."""
         if not getattr(self.s, "show_hp_bar", True) or self.health is None:
+            return
+        op = self.op * self._scorebar_break_alpha(t)   # M-3c break-hide
+        if op <= 0.0:
             return
         sk = self.sk
         es, lk = self.es, self.lk
@@ -1769,7 +1801,7 @@ class StdHud:
             bg_key = "lg_scorebar_bg"
         out.append(Sprite(bw / 2.0 * es * lk, bh / 2.0 * es * lk,
                           bw * es * lk, bh * es * lk, bg_key,
-                          (1, 1, 1, self.op)))
+                          (1, 1, 1, op)))
         new_style = sk_ok("scorebar-marker")
         # fill (cropped to hp fraction, animation frames honored)
         if sk_ok("scorebar-colour"):
@@ -1786,23 +1818,25 @@ class StdHud:
             out.append(Sprite((fx + vis_w / 2.0) * es * lk,
                               (fy + fh / 2.0) * es * lk,
                               vis_w * es * lk, fh * es * lk, fill_key,
-                              (*fill_rgb, self.op),
+                              (*fill_rgb, op),
                               uv_scale=(hp_now, 1.0)))
-        # marker / ki pieces at the fill end
-        mx = (fx + fw * hp_now) * es
-        my = (fy + (fh / 2.0 if new_style else 0.0)) * es
-        gain = self.health.last_gain_at(t)
-        m_scale = 0.8
-        if gain is not None:
-            age = t - gain
-            if 0.0 <= age < 150.0:
-                m_scale = 1.2 - 0.4 * (age / 150.0)   # Bulge 1.2→0.8
+        # marker / ki pieces at the fill end. M-3b: only when the SKIN SHIPS
+        # the piece — a skin that ships the bar but no marker/ki (BTMC) gets
+        # NO marker (danser draws none), not the procedural lg_* dot.
         if new_style:
             mw, mh = sk.size["scorebar-marker"]
             m_key = "sk_scorebar-marker"
             m_rgb = _legacy_fill_colour(hp_now)
             m_add = hp_now >= LEGACY_EPIC_CUTOFF
         else:
+            # M-3b: only when the skin ships AT LEAST ONE ki piece. A skin
+            # with the bar but no marker/ki at all (BTMC) draws NO marker —
+            # not the procedural lg_ki dot danser never shows. Skins that ship
+            # some ki tiers keep the classic per-tier fallback (default bake
+            # for a missing tier, mirroring stable's default-skin fallback).
+            if not (sk_ok("scorebar-ki") or sk_ok("scorebar-kidanger")
+                    or sk_ok("scorebar-kidanger2")):
+                return
             if hp_now < 0.2:
                 name, lg = "scorebar-kidanger2", "lg_kidanger2"
             elif hp_now < LEGACY_EPIC_CUTOFF:
@@ -1818,16 +1852,24 @@ class StdHud:
                 m_key = lg
             m_rgb = (1.0, 1.0, 1.0)
             m_add = False
+        mx = (fx + fw * hp_now) * es
+        my = (fy + (fh / 2.0 if new_style else 0.0)) * es
+        gain = self.health.last_gain_at(t)
+        m_scale = 0.8
+        if gain is not None:
+            age = t - gain
+            if 0.0 <= age < 150.0:
+                m_scale = 1.2 - 0.4 * (age / 150.0)   # Bulge 1.2→0.8
         out.append(Sprite(mx * lk, my * lk, mw * m_scale * es * lk,
                           mh * m_scale * es * lk, m_key,
-                          (*m_rgb, self.op), additive=m_add))
+                          (*m_rgb, op), additive=m_add))
         if gain is not None:
             age = t - gain
             if 0.0 <= age < 120.0:      # marker Flash: explode ghost
                 epic = hp_now >= LEGACY_EPIC_CUTOFF
                 gsc = m_scale * (1.0 + (1.0 if epic else 0.6)
                                  * ease_out_quad(age / 120.0))
-                galpha = (1.0 - age / 120.0) * self.op
+                galpha = (1.0 - age / 120.0) * op
                 out.append(Sprite(mx * lk, my * lk, mw * gsc * es * lk,
                                   mh * gsc * es * lk, m_key,
                                   (*m_rgb, galpha), additive=True))
@@ -2106,6 +2148,8 @@ class StdHud:
         text otherwise. renderer_default_font_and_ranks forces the
         procedural text even under a skin. Behind show_grade; silver
         (HD/FL) variants are not simulated."""
+        if t < self._first_ev_t:
+            return                     # m-8: no SS badge before the 1st judgment
         grade = self.data.grade_at(t)
         sk = self.sk
         el = GRADE_RANKING_ELEMENT.get(grade)
@@ -2129,6 +2173,8 @@ class StdHud:
         s, d = self.s, self.data
         if not s.show_hit_error_meter:
             return
+        if t < self._first_ev_t:
+            return                     # m-8: no hit-error strip pre-gameplay
         k = self.k
         es = self.es
         cx = self.ui_w / 2.0

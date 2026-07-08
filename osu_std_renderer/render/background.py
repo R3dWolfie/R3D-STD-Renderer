@@ -14,17 +14,20 @@ DIM ENVELOPE (§4.10 Dim{Intro, Normal, Breaks}; R3D preset keys
 bg_dim_intro/game/breaks, 0-100%)
   Dim is applied by tinting the bg sprite grey (1-dim) — objects/HUD above
   keep full brightness, matching the reference's background-only dim.
-  The envelope is a piecewise level with smoothstep glides (~500 ms,
-  the reference's dim glider feel):
+  The envelope is a piecewise level with smoothstep glides (~900 ms, the
+  reference's measured break/intro dim fades):
 
-    intro dim   until the FIRST object's approach begins (startTime -
-                Preempt); the glide INTO gameplay dim completes exactly
-                at that moment so the first approach is never half-dimmed
+    intro dim   HELD until the FIRST object's approach begins (startTime -
+                Preempt); the glide INTO gameplay dim STARTS there and runs
+                over the glide, so the background is still bright as the
+                first approach appears and dims underneath it (danser)
     normal dim  through gameplay
-    breaks dim  during `[Events]` breaks (beatmap.pauses): glide starts at
-                the break start; the glide BACK completes by
-                min(break end, next object's approach start) — "back for
-                the next object"
+    breaks dim  during `[Events]` breaks (beatmap.pauses): the brighten
+                glide starts at the break start, holds bright across the
+                break, and the re-dim glide STARTS at the resume anchor
+                (min(break end, next object's approach start)) — the
+                background stays bright until gameplay resumes and dims
+                during the first post-break approach
     breaks too short to fit both glides are skipped (dim stays at normal)
 
   Pure math (DimEnvelope) so tests need no GL.
@@ -59,7 +62,9 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageFilter
 
-GLIDE_MS = 500.0     # dim glide length (~danser's dim glider feel)
+GLIDE_MS = 900.0     # dim glide length. Matches danser's measured break/intro
+                     # dim fades (~0.85-0.9 s) — the earlier 500 ms ramped the
+                     # background dark too fast on both the intro and break exit.
 BLUR_PX_PER_STEP = 2.2       # gaussian radius per preset step @1080 rows
 PARALLAX_SCALE = 1.02        # bg oversize (task spec ~1.01-1.02×)
 FLASH_AMOUNT = 0.14          # flash-to-beat brightness lift at the beat
@@ -134,17 +139,26 @@ def build_dim_envelope(intro: float, normal: float, breaks: float,
         return DimEnvelope(normal)
     glides: list[tuple[float, float, float]] = []
     first_spawn = starts[0] - preempt
-    glides.append((first_spawn - glide_ms, first_spawn, normal))
-    last_end = first_spawn
+    # m-2: HOLD Dim.Intro until the first object's approach begins, then fade
+    # to gameplay dim over the glide (danser dims DURING that first approach —
+    # our old envelope completed the dim BEFORE it, darkening the intro early).
+    glides.append((first_spawn, first_spawn + glide_ms, normal))
+    last_end = first_spawn + glide_ms
     for p in sorted(pauses, key=lambda p: p.start_time):
         nxt = next((s for s in starts if s >= p.end_time), None)
         anchor = p.end_time if nxt is None else min(p.end_time, nxt - preempt)
-        # both glides must fit: enter [start, start+g], return [anchor-g, anchor]
-        if p.start_time < last_end or anchor - glide_ms < p.start_time + glide_ms:
+        # CRITICAL-2: enter the break BRIGHT at break start, hold, then begin
+        # the re-dim AT the resume anchor (break end / next approach) — the
+        # background stays bright until gameplay actually resumes and dims
+        # DURING the first post-break approach. Old code completed the re-dim
+        # AT the anchor, so ours went dark ~0.5-0.9 s before danser.
+        # Both glides must fit: enter [start, start+g] then a bright plateau
+        # up to the anchor, then exit [anchor, anchor+g].
+        if p.start_time < last_end or p.start_time + glide_ms > anchor:
             continue  # too short / out of order → dim stays at normal
         glides.append((p.start_time, p.start_time + glide_ms, breaks))
-        glides.append((anchor - glide_ms, anchor, normal))
-        last_end = anchor
+        glides.append((anchor, anchor + glide_ms, normal))
+        last_end = anchor + glide_ms
     return DimEnvelope(intro, glides)
 
 

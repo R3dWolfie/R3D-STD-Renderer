@@ -171,9 +171,14 @@ from .spinner import (CLEAR_OFFSET_OSU, GLOW_BLUE, SPIN_OFFSET_OSU,
                       required_rotations, spin_prompt_alpha,
                       spinner_approach_scale, wants_lighting)
 
-EXPLODE_SCALE = 1.4            # §2.5 hit-explosion end scale (skin v2+)
+EXPLODE_SCALE = 1.5            # §2.5 hit-explosion end scale (skin v2+).
+                               # m-5: nudged 1.4→1.5 so the just-hit circle
+                               # expands slightly larger, matching danser (the
+                               # soft halo is the retained subtle hit lighting).
 NUMBER_FADE_OUT = 60.0         # §3.2 v2+ combo-number quick fade (ms)
 MISS_FADE_OUT = 60.0           # missed circle: quick fade at window close
+RESULT_HOLD = 250.0            # M-2: judgment popups hold full opacity this
+                               # long after fade-in before ResultFadeOut
 APPROACH_START_SCALE = 4.0     # §2.5 approach circle 4→1
 APPROACH_MAX_ALPHA = 0.9       # stable caps the approach ring alpha
 SNAKE_IN_PORTION = 1.0 / 3.0   # lazer: snake-in completes after preempt/3
@@ -230,8 +235,16 @@ RPM_BOTTOM_MARGIN_UI = 84.0    # RPM bottom offset (768-space) — raised off
                                # hit-error/UR block (stable overlaps them)
 RPM_DIGIT_FRAC = 0.62          # skin digits: height / rpm-box height
 RPM_RIGHT_PAD_FRAC = 0.06      # skin digits: right inset / box width
-LIGHTING_LOGICAL_PX = 260.0    # procedural lighting glow size (circle-tied)
+LIGHTING_LOGICAL_PX = 155.0    # procedural lighting glow size (circle-tied).
+                               # M-1: was 260 — a ~2× circle cloud that, added
+                               # over dense streams, dominated the frame vs
+                               # danser's subtle default lighting. Tied nearer
+                               # the circle diameter now (see _lighting_sprites
+                               # alpha too).
+LIGHTING_PROC_ALPHA = 0.34     # M-1: procedural-glow additive peak (was 0.85)
 MIDDLE_RED = (1.0, 0.0, 0.0)   # spinner-middle fade target (white→red)
+WARN_SPRITE_OSU = 160.0        # arrow-warning canvas edge in osu!px (≈240 px
+                               # at 720p → the ~96 px white diamond danser draws)
 
 
 def _clamp01(v: float) -> float:
@@ -301,15 +314,23 @@ def miss_fade_alpha(t: float, start_time: float, preempt: float,
 
 def popup_alpha_scale(t: float, popup_time: float) -> tuple[float, float] | None:
     """(alpha, scale) of a judgment popup, or None outside its life.
-    §2.4 ResultFadeIn=120 / ResultFadeOut=600; a small 0.85→1 pop on the
-    way in."""
+    §2.4 ResultFadeIn=120, then a HOLD at full, then ResultFadeOut=600.
+
+    M-2: the popup used to start fading the instant the fade-in finished, so
+    two closely-spaced judgments read as one crisp + one washed-out vs the
+    reference's two crisp popups. Stable/lazer's legacy judgement holds full
+    opacity briefly before the fade-out (the number stays legible while the
+    next one appears), so we hold RESULT_HOLD ms at 1.0 first."""
     age = t - popup_time
     if age < 0:
         return None
     if age <= RESULT_FADE_IN:
         w = age / RESULT_FADE_IN
         return w, 0.85 + 0.15 * w
-    p = (age - RESULT_FADE_IN) / RESULT_FADE_OUT
+    held = age - RESULT_FADE_IN
+    if held <= RESULT_HOLD:
+        return 1.0, 1.0
+    p = (held - RESULT_HOLD) / RESULT_FADE_OUT
     if p >= 1.0:
         return None
     return 1.0 - p, 1.0
@@ -326,7 +347,7 @@ def miss_fall_transform(age_ms: float,
     slight rotation while the popup alpha fades. `seed` (the object id)
     picks a deterministic rotation direction/amount standing in for
     lazer's RNG.NextSingle(-8.6, 8.6) — same replay, same render."""
-    dur = RESULT_FADE_IN + RESULT_FADE_OUT
+    dur = RESULT_FADE_IN + RESULT_HOLD + RESULT_FADE_OUT
     p = _clamp01(age_ms / dur)
     ease = p * p                       # Easing.In (quad)
     frac = (seed * 0.618033988749895) % 1.0     # golden-ratio hash → [0,1)
@@ -541,6 +562,7 @@ class StdScene:
 
     def __init__(self, beatmap, frames, camera, sprites, bodies, bank, *,
                  combo_colors=DEFAULT_COMBO_COLORS,
+                 combo_colors_from_beatmap: bool = False,
                  snaking_in: bool = True,
                  snaking_out: bool = True,
                  slider_merge: bool = False,
@@ -590,6 +612,7 @@ class StdScene:
         self.bodies = bodies
         self.bank = bank
         self.combo_colors = [tuple(c) for c in combo_colors]
+        self.combo_colors_from_beatmap = combo_colors_from_beatmap
         self.snaking_in = snaking_in
         self.snaking_out = snaking_out
         self.slider_merge = slider_merge
@@ -921,20 +944,36 @@ class StdScene:
         return out
 
     def _warning_arrow_sprites(self, t: float) -> list[Sprite]:
-        """§4.6 ShowWarningArrows: stable's flashing resume arrows at the
-        playfield's left/right edges during the last second of a break,
-        pointing INWARD, blinking on the effects.WARN_BLINK_MS square."""
+        """§4.6 ShowWarningArrows: the break-end resume warning at the FOUR
+        playfield corners (stable/danser layout), blinking on the
+        effects.WARN_BLINK_MS square during the last second of a break.
+
+        CRITICAL-3: uses the skin's `arrow-warning` diamond+"!" sprite when it
+        ships one (BTMC does) — untinted, all four corners — instead of the
+        old two procedural red arrows at the left/right edge midpoints. The
+        procedural fallback (skinless) is also corner-positioned, pointing
+        inward. Corners: 59 osu!px OUTSIDE each side edge, 52 osu!px INSIDE
+        from the top/bottom (measured off danser)."""
         a = warning_arrow_alpha(t, self._warn_anchors)
         if a <= 0.0:
             return []
+        corners_osu = ((-59.0, 52.0), (571.0, 52.0),
+                       (-59.0, 332.0), (571.0, 332.0))
+        corners = [self.cam.to_screen(x, y) for x, y in corners_osu]
+        if self._skinned("arrow-warning"):
+            w0, h0 = self.skin.size["arrow-warning"]
+            w = self.cam.len_to_screen(WARN_SPRITE_OSU)
+            h = w * (h0 / w0)
+            return [Sprite(sx, sy, w, h, "sk_arrow-warning",
+                           (1.0, 1.0, 1.0, a)) for sx, sy in corners]
+        # procedural fallback: inward-pointing arrows at the corners
         d = self.cam.len_to_screen(72.0)
-        y = self.cam.screen_h / 2.0
-        xl = self.cam.screen_w * 0.10
-        xr = self.cam.screen_w * 0.90
+        cx = self.cam.screen_w / 2.0
+        cy = self.cam.screen_h / 2.0
         color = (0.92, 0.22, 0.28)
-        return [Sprite(xl, y, d, d, "arrow", (*color, a)),
-                Sprite(xr, y, d, d, "arrow", (*color, a),
-                       rotation=math.pi)]
+        return [Sprite(sx, sy, d, d, "arrow", (*color, a),
+                       rotation=math.atan2(cy - sy, cx - sx))
+                for sx, sy in corners]
 
     def _ripple_sprites(self, t: float) -> list[Sprite]:
         """§4.8 CursorRipples: an expanding ring at each press edge."""
@@ -1020,7 +1059,19 @@ class StdScene:
     # --- per-object draws -----------------------------------------------------------
 
     def _color(self, obj) -> tuple[float, float, float]:
-        return self.combo_colors[obj.combo_set % len(self.combo_colors)]
+        # osu!(lazer) legacy combo-colour indexing. The first combo lands on
+        # the SECOND colour, not the first: IHasComboInformation.UpdateComboInformation
+        # sets ComboIndex/ComboIndexWithOffsets to 1 for the opening combo
+        # (index starts 0, then `index++` on the first NewCombo), and the skin
+        # lookup is ComboColours[index % Count] with no further offset
+        # (LegacySkin.GetComboColour / ArgonSkin.getComboColour). Our parser
+        # keeps a 0-based combo_set/combo_set_hax, so we add +1 to match.
+        # Beatmap [Colours] use ComboIndexWithOffsets (LegacyBeatmapSkin
+        # override → combo_set_hax); skin/default colours use ComboIndex
+        # (→ combo_set).
+        idx = (obj.combo_set_hax if self.combo_colors_from_beatmap
+               else obj.combo_set) + 1
+        return self.combo_colors[idx % len(self.combo_colors)]
 
     def _plain_circle_sprites(self, x: float, y: float, color, alpha: float,
                               scale: float = 1.0,
@@ -1282,9 +1333,12 @@ class StdScene:
             if asa is None:
                 continue
             alpha, pop_scale = asa
-            if at_tail and snake < 1.0 and tip is not None:
-                sx, sy = tip
-                rot = arrow_rotation(sub_path(pts, 0.0, snake), True)
+            # M-4: the reverse arrow is PINNED at the slider end (marker.pos),
+            # matching danser/lazer (DrawableSliderRepeat fades in at its fixed
+            # position during the preempt). Previously the tail arrow rode the
+            # snake-in tip (`tip`/`snake`), which floated the chevron above the
+            # end circle for slow sliders and dropped a stray crescent near the
+            # head early in snake-in — both diffed against the reference.
             p_scale, p_rot = arrow_pulse(beat_phase(t, self.beatmap.timings),
                                          legacy)
             scale = pop_scale * p_scale
@@ -1575,7 +1629,8 @@ class StdScene:
             else:
                 d = LIGHTING_LOGICAL_PX * k * scale
                 out.append(Sprite(x, y, d, d, "glow",
-                                  (*color, 0.85 * alpha), additive=True))
+                                  (*color, LIGHTING_PROC_ALPHA * alpha),
+                                  additive=True))
         self._lighting_active = keep
         return out
 

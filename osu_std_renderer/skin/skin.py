@@ -192,12 +192,21 @@ class Skin:
 
             UseColorsFromSkin && colors exist:
                 colors = UseBeatmapColors && map has colours ? beatmap : skin
-                pick colors[(UseBeatmapColors ? comboSetHax : comboSet) % len]
+                pick colors[((UseBeatmapColors ? comboSetHax : comboSet)+1) % len]
+
+        The +1 matches osu!(lazer): the opening combo lands on the SECOND
+        colour because IHasComboInformation.UpdateComboInformation sets
+        ComboIndex/ComboIndexWithOffsets to 1 for it (0-based here → +1), and
+        the skin lookup is ComboColours[index % Count] with no extra offset
+        (LegacySkin/ArgonSkin.GetComboColour). Beatmap [Colours] use
+        ComboIndexWithOffsets (LegacyBeatmapSkin override → comboSetHax);
+        skin colours use ComboIndex (→ comboSet).
         """
         if use_beatmap_colors and beatmap_colors:
-            return beatmap_colors[combo_set_hax % len(beatmap_colors)]
+            return beatmap_colors[(combo_set_hax + 1) % len(beatmap_colors)]
         if use_skin_colors and self.info.combo_colors:
-            return self.info.combo_colors[combo_set % len(self.info.combo_colors)]
+            return self.info.combo_colors[
+                (combo_set + 1) % len(self.info.combo_colors)]
         return (0, 255, 255)  # settings-HSV path lands with settings wiring
 
 

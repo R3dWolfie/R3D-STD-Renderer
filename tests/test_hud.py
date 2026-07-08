@@ -241,6 +241,25 @@ def test_key_series_edges_and_deconflation():
     assert ks.last_press_at(2, 1e9) is None
 
 
+def test_key_series_ignores_pre_gameplay_presses():
+    # m-1: warm-up taps before gameplay_start (the first object) don't COUNT,
+    # but the held state + press-edge times still track (a held key still
+    # lights up).
+    ks = KeySeries(_frames([
+        (10, 0, 0, KEY_K1),            # warm-up tap, before gameplay
+        (20, 0, 0, 0),
+        (30, 0, 0, KEY_K2),            # warm-up tap
+        (40, 0, 0, 0),
+        (100, 0, 0, KEY_K1),           # first real press at gameplay start
+        (110, 0, 0, 0),
+    ]), gameplay_start=100.0)
+    assert ks.total_counts == (1, 0, 0, 0)     # only the t=100 press counts
+    assert ks.state_at(105)[1] == (1, 0, 0, 0)
+    assert ks.state_at(35)[1] == (0, 0, 0, 0)  # warm-up not counted
+    assert ks.press_times[0] == [10, 100]      # edge times untouched
+    assert ks.state_at(15)[0] == 1             # warm-up hold still lights K1
+
+
 # --- standardised score + combo timeline over a real sim --------------------------------
 
 def _three_circle_run(click_third: bool, third_delta: float = 0.0):

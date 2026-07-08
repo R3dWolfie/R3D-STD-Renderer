@@ -10,9 +10,9 @@ from osu_std_renderer.beatmap.difficulty import (HIT_FADE_OUT,
                                                  RESULT_FADE_OUT)
 from osu_std_renderer.render.scene import (
     APPROACH_MAX_ALPHA, APPROACH_START_SCALE, EXPLODE_SCALE,
-    MISS_FALL_DISTANCE_OSU, MISS_FALL_ROT_RAD, NUMBER_FADE_OUT,
+    MISS_FALL_DISTANCE_OSU, MISS_FALL_ROT_RAD, NUMBER_FADE_OUT, RESULT_HOLD,
     approach_scale_alpha, body_alpha, circle_alpha_scale, fade_in_alpha,
-    layout_digits, miss_fall_transform, number_alpha,
+    layout_digits, miss_fall_transform, number_alpha, popup_alpha_scale,
     playfield_border_rects, snake_end_fraction, trail_times,
     visible_window,
 )
@@ -135,7 +135,7 @@ def test_trail_times_shape():
 def test_miss_fall_transform():
     """Classic miss: starts at the popup position, drifts DOWN with a
     slight rotation as the popup fades (quad-in over the popup life)."""
-    dur = RESULT_FADE_IN + RESULT_FADE_OUT
+    dur = RESULT_FADE_IN + RESULT_HOLD + RESULT_FADE_OUT
     dy0, rot0 = miss_fall_transform(0.0, seed=7)
     assert dy0 == 0.0 and rot0 == 0.0
     dy_end, rot_end = miss_fall_transform(dur, seed=7)
@@ -149,6 +149,101 @@ def test_miss_fall_transform():
     assert miss_fall_transform(500.0, seed=7) == miss_fall_transform(500.0, seed=7)
     rots = {round(miss_fall_transform(dur, seed=s)[1], 6) for s in range(6)}
     assert len(rots) > 1
+
+
+def test_popup_holds_full_then_fades():
+    """M-2: a judgment popup fades in, HOLDS full opacity for RESULT_HOLD ms,
+    then fades out — so two closely-spaced popups both read crisp."""
+    from osu_std_renderer.beatmap.difficulty import (RESULT_FADE_IN,
+                                                     RESULT_FADE_OUT)
+    t0 = 1000.0
+    # mid fade-in: below full
+    a_in, _ = popup_alpha_scale(t0 + RESULT_FADE_IN * 0.5, t0)
+    assert 0.4 < a_in < 0.6
+    # just after fade-in and all through the hold: FULL
+    a_hold0, _ = popup_alpha_scale(t0 + RESULT_FADE_IN + 1.0, t0)
+    a_hold1, _ = popup_alpha_scale(t0 + RESULT_FADE_IN + RESULT_HOLD - 1.0, t0)
+    assert a_hold0 == 1.0 and a_hold1 == 1.0
+    # into the fade-out: strictly decreasing, still visible partway
+    a_out = popup_alpha_scale(
+        t0 + RESULT_FADE_IN + RESULT_HOLD + RESULT_FADE_OUT * 0.5, t0)[0]
+    assert 0.3 < a_out < 0.7
+    # gone after the full life
+    assert popup_alpha_scale(
+        t0 + RESULT_FADE_IN + RESULT_HOLD + RESULT_FADE_OUT + 1.0, t0) is None
+
+
+def test_reverse_arrow_pinned_at_marker_position():
+    """M-4: the reverse arrow is drawn at its marker position (slider end),
+    NOT the snake-in tip — so it no longer floats above the end circle or
+    leaves a crescent near the head. Exercise _arrow_sprites with a bogus
+    `tip` far away and a mid-snake `snake`; the emitted sprite must sit at
+    the input (sx, sy)."""
+    from types import SimpleNamespace
+    from osu_std_renderer.render.scene import StdScene
+    from osu_std_renderer.render.markers import ReverseArrow
+
+    class _Pt:
+        beat_length_base = 500.0
+        time = 0.0
+
+    class _Timings:
+        def get_original_point_at(self, t):
+            return _Pt()
+
+    fake = SimpleNamespace(
+        skin=None, circle_k=1.0, radius_px=30.0,
+        beatmap=SimpleNamespace(timings=_Timings()))
+    arrow = ReverseArrow(r=1, time=2000.0, appear=1000.0, at_tail=True)
+    marker_x, marker_y = 400.0, 250.0
+    records = [(arrow, marker_x, marker_y, 0.0, True)]
+    tip = (999.0, 5.0)             # deliberately nowhere near the marker
+    sprites = StdScene._arrow_sprites(
+        fake, 1500.0, records, True, spawn=1000.0, fade_in=400.0,
+        pts=[(0.0, 0.0), (marker_x, marker_y)], snake=0.4, tip=tip)
+    assert len(sprites) == 1
+    assert abs(sprites[0].x - marker_x) < 1e-6
+    assert abs(sprites[0].y - marker_y) < 1e-6
+
+
+def test_warning_arrows_at_four_corners():
+    """CRITICAL-3: break-end warning arrows sit at the FOUR playfield corners
+    (skin arrow-warning sprite when shipped, procedural fallback otherwise),
+    not two mid-edge arrows."""
+    from types import SimpleNamespace
+    from osu_std_renderer.render.scene import StdScene
+
+    class _Cam:
+        screen_w = 1280
+        screen_h = 720
+
+        def to_screen(self, x, y):
+            return (256.0 + x * 1.5, 72.0 + y * 1.5)
+
+        def len_to_screen(self, v):
+            return v * 1.5
+
+    t = 850.0                                 # inside a blink "on" window
+    # procedural fallback (no skin)
+    proc = SimpleNamespace(_warn_anchors=[1000.0], cam=_Cam(), skin=None,
+                           _skinned=lambda name: False)
+    ps = StdScene._warning_arrow_sprites(proc, t)
+    assert len(ps) == 4
+    want = {(256.0 + x * 1.5, 72.0 + y * 1.5)
+            for x, y in ((-59, 52), (571, 52), (-59, 332), (571, 332))}
+    assert {(round(s.x, 3), round(s.y, 3)) for s in ps} == \
+        {(round(x, 3), round(y, 3)) for x, y in want}
+    # skin arrow-warning path: four sk_arrow-warning sprites, same corners
+    sk = SimpleNamespace(size={"arrow-warning": (260.0, 250.0)})
+    skn = SimpleNamespace(_warn_anchors=[1000.0], cam=_Cam(), skin=sk,
+                          _skinned=lambda name: True)
+    ss = StdScene._warning_arrow_sprites(skn, t)
+    assert len(ss) == 4
+    assert all(s.texture_key == "sk_arrow-warning" for s in ss)
+    xs = sorted({round(s.x) for s in ss})
+    ys = sorted({round(s.y) for s in ss})
+    assert len(xs) == 2 and len(ys) == 2         # symmetric 2×2 corner grid
+    assert abs((xs[0] + xs[1]) / 2 - 640) < 1.0   # centred horizontally
 
 
 def test_playfield_border_rects_modes():

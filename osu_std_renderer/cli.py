@@ -477,8 +477,10 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
     # §3.5/§4.7 combo colour source: the .osu [Colours] when the preset
     # says "beatmap" AND the map defines them; the skin.ini set otherwise
     color_src = skin_info.combo_colors
+    combo_colors_from_beatmap = False
     if settings.use_beatmap_colors and beatmap.combo_colors:
         color_src = beatmap.combo_colors
+        combo_colors_from_beatmap = True
         print(f"colors: beatmap [Colours] ({len(color_src)} combo colours)",
               file=sys.stderr)
     combo_colors = [(r / 255.0, g / 255.0, b / 255.0)
@@ -519,6 +521,7 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
     scene = StdScene(
         beatmap, frames, cam, spr, bodies, bank,
         combo_colors=combo_colors,
+        combo_colors_from_beatmap=combo_colors_from_beatmap,
         snaking_in=settings.slider_snaking_in,
         snaking_out=settings.slider_snaking_out,
         slider_merge=settings.slider_merge,

@@ -158,6 +158,8 @@ _CORE_ELEMENTS: dict[str, tuple[bool, bool, bool]] = {
     "scorebar-kidanger2": (False, False, False),
     "inputoverlay-background": (False, False, False),
     "inputoverlay-key": (False, False, False),
+    # break-end resume warning (four corners); §4.6 ShowWarningArrows
+    "arrow-warning": (False, False, False),
     "ranking-X-small": (False, False, False),
     "ranking-S-small": (False, False, False),
     "ranking-A-small": (False, False, False),

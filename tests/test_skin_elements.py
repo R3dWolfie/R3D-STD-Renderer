@@ -287,3 +287,43 @@ def test_skin_ini_combo_colors_flow_through_skin():
         _png(d / "hitcircle.png", 128, 128)
         skin = Skin(skin_dir=d)
         assert skin.info.combo_colors == [(10, 20, 30), (40, 50, 60)]
+
+
+def test_combo_colour_starts_on_second_colour_legacy():
+    # CRITICAL-1: osu!(lazer) legacy convention starts the map's FIRST combo
+    # on the SECOND skin colour (ComboIndex==1 for the opening combo, colour =
+    # ComboColours[ComboIndex % Count]). Our combo_set is 0-based → +1.
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        (d / "skin.ini").write_text(
+            "[General]\nName: T\nVersion: 2.5\n"
+            "[Colours]\nCombo1: 1,1,1\nCombo2: 2,2,2\nCombo3: 3,3,3\n",
+            encoding="utf-8")
+        skin = Skin(skin_dir=d)
+        # skin colours use ComboIndex (→ combo_set): 0→Combo2, 1→Combo3, 2→Combo1
+        assert skin.get_combo_color(0, 0, None) == (2, 2, 2)
+        assert skin.get_combo_color(1, 1, None) == (3, 3, 3)
+        assert skin.get_combo_color(2, 2, None) == (1, 1, 1)
+        # beatmap colours use ComboIndexWithOffsets (→ combo_set_hax), same +1
+        bm = [(10, 10, 10), (20, 20, 20)]
+        assert skin.get_combo_color(0, 0, bm, use_beatmap_colors=True) \
+            == (20, 20, 20)
+        assert skin.get_combo_color(0, 1, bm, use_beatmap_colors=True) \
+            == (10, 10, 10)  # hax offset skips a colour
+
+
+def test_scene_color_index_plus_one():
+    # Directly exercise StdScene._color (no GL needed): skin path uses
+    # combo_set+1, beatmap path uses combo_set_hax+1, both mod len.
+    from types import SimpleNamespace
+    from osu_std_renderer.render.scene import StdScene
+    cols = [(0.1, 0.1, 0.1), (0.2, 0.2, 0.2), (0.3, 0.3, 0.3)]
+    obj = SimpleNamespace(combo_set=0, combo_set_hax=0)
+    skin_self = SimpleNamespace(combo_colors=cols,
+                                combo_colors_from_beatmap=False)
+    assert StdScene._color(skin_self, obj) == (0.2, 0.2, 0.2)   # 2nd colour
+    obj2 = SimpleNamespace(combo_set=2, combo_set_hax=5)
+    assert StdScene._color(skin_self, obj2) == (0.1, 0.1, 0.1)  # (2+1)%3=0
+    bm_self = SimpleNamespace(combo_colors=cols,
+                              combo_colors_from_beatmap=True)
+    assert StdScene._color(bm_self, obj2) == (0.1, 0.1, 0.1)    # (5+1)%3=0

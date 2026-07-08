@@ -35,43 +35,44 @@ def test_smoothstep_shape():
 
 
 def test_intro_hold_then_glide_to_gameplay():
-    # first object 2212, preempt 540 → approach begins at 1672; the glide
-    # completes EXACTLY there (never a half-dimmed first approach)
+    # first object 2212, preempt 540 → approach begins at 1672; the dim HOLDS
+    # at intro until then, then glides to gameplay dim OVER the glide (the
+    # background stays bright as the first approach appears and dims under it)
     env = build_dim_envelope(INTRO, NORMAL, BREAKS, [2212.0, 5000.0], PRE, [])
     fs = 2212.0 - PRE
     assert env.level(-1000.0) == INTRO
-    assert env.level(fs - GLIDE_MS) == INTRO
-    mid = env.level(fs - GLIDE_MS / 2.0)
+    assert env.level(fs) == INTRO                  # held until the approach
+    mid = env.level(fs + GLIDE_MS / 2.0)
     assert abs(mid - (INTRO + (NORMAL - INTRO) * 0.5)) < 1e-9
-    assert env.level(fs) == NORMAL
+    assert env.level(fs + GLIDE_MS) == NORMAL      # dimmed by then
     assert env.level(60_000.0) == NORMAL
 
 
 def test_break_glide_and_return_for_next_object():
     # break 20s→30s, next object at 35s (approach 34.46s > break end →
-    # the return anchors on the BREAK END)
+    # the re-dim anchors on the BREAK END and STARTS there)
     starts = [2212.0, 19_000.0, 35_000.0]
     env = build_dim_envelope(INTRO, NORMAL, BREAKS, starts, PRE,
                              [Pause(20_000.0, 30_000.0)])
     assert env.level(19_500.0) == NORMAL          # before the break
-    assert env.level(20_000.0) == NORMAL          # glide starts here
+    assert env.level(20_000.0) == NORMAL          # brighten glide starts here
     assert env.level(20_000.0 + GLIDE_MS) == BREAKS
     assert env.level(25_000.0) == BREAKS          # held through the break
-    assert env.level(30_000.0 - GLIDE_MS) == BREAKS
-    assert env.level(30_000.0) == NORMAL          # back at break end
+    assert env.level(30_000.0) == BREAKS          # STILL bright at break end
+    assert env.level(30_000.0 + GLIDE_MS) == NORMAL   # re-dim completes after
     assert env.level(34_000.0) == NORMAL
 
 
 def test_break_return_before_next_approach():
     # next object at 30.2s → its approach begins at 29.66s, INSIDE the
-    # break → the return anchors there ("back for the next object")
+    # break → the re-dim anchors there and STARTS then ("bright until resume")
     starts = [2212.0, 19_000.0, 30_200.0]
     env = build_dim_envelope(INTRO, NORMAL, BREAKS, starts, PRE,
                              [Pause(20_000.0, 30_000.0)])
     anchor = 30_200.0 - PRE
-    assert env.level(anchor) == NORMAL
-    assert env.level(anchor - GLIDE_MS) == BREAKS
-    mid = env.level(anchor - GLIDE_MS / 2.0)
+    assert env.level(anchor) == BREAKS             # still bright at the anchor
+    assert env.level(anchor + GLIDE_MS) == NORMAL  # dimmed a glide later
+    mid = env.level(anchor + GLIDE_MS / 2.0)
     assert abs(mid - (BREAKS + (NORMAL - BREAKS) * 0.5)) < 1e-9
 
 
