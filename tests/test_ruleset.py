@@ -1,0 +1,441 @@
+"""Judgment simulation tests — hit-window evaluation, press-edge
+detection, stable notelock ordering, slider tracking + the three distinct
+slider-part miss kinds (head / tick / tail), spinner model, reconcile
+snap. Pure CPU (no GL)."""
+from __future__ import annotations
+
+import math
+import tempfile
+from pathlib import Path
+
+from osu_std_renderer.beatmap import load_full
+from osu_std_renderer.beatmap.objects import Slider
+from osu_std_renderer.replay.replay import KEY_K1, KEY_K2, KEY_M1, StdFrame
+from osu_std_renderer.ruleset import (
+    MISS_WINDOW, JudgmentKind, OsuHitWindows, StdRuleset, press_edges,
+)
+
+# OD7 windows (lazer floor-0.5): great 37.5, ok 83.5, meh 129.5
+MAP_HEADER = """osu file format v14
+
+[General]
+AudioFilename: audio.mp3
+StackLeniency: 0.7
+Mode: 0
+
+[Metadata]
+Title:RulesetTest
+Artist:Unit
+Creator:R3D
+Version:Judge
+
+[Difficulty]
+HPDrainRate:5
+CircleSize:4
+OverallDifficulty:7
+ApproachRate:9
+SliderMultiplier:1.0
+SliderTickRate:1
+
+[TimingPoints]
+0,500,4,2,1,60,1,0
+
+[HitObjects]
+"""
+
+
+def _map(objects: str) -> object:
+    d = Path(tempfile.mkdtemp(prefix="stdruleset_"))
+    p = d / "test.osu"
+    p.write_text(MAP_HEADER + objects, encoding="utf-8")
+    return load_full(p)
+
+
+def _meta(c300: int, c100: int, c50: int, miss: int, max_combo: int = 0):
+    from osu_std_renderer.replay.replay import ReplayMeta
+    return ReplayMeta(
+        mode=0, beatmap_md5="", player_name="test", mods=0, score=0,
+        max_combo=max_combo, count_300=c300, count_100=c100, count_50=c50,
+        count_geki=0, count_katu=0, count_miss=miss, accuracy=0.0, grade="A")
+
+
+def _frames(entries) -> list[StdFrame]:
+    """[(t, x, y, keys)] → frames (always prepend an idle frame)."""
+    fr = [StdFrame(time_ms=0, x=0.0, y=0.0, keys=0)]
+    fr += [StdFrame(time_ms=t, x=float(x), y=float(y), keys=k)
+           for t, x, y, k in entries]
+    return fr
+
+
+# --- hit windows -----------------------------------------------------------------
+
+def test_hit_windows_od5_od7():
+    hw5 = OsuHitWindows(5.0)
+    assert (hw5.great, hw5.ok, hw5.meh) == (49.5, 99.5, 149.5)
+    hw7 = OsuHitWindows(7.0)
+    assert (hw7.great, hw7.ok, hw7.meh) == (37.5, 83.5, 129.5)
+    assert OsuHitWindows.MISS_WINDOW == 400.0 == MISS_WINDOW
+
+
+def test_window_evaluation_boundaries():
+    hw = OsuHitWindows(7.0)
+    assert hw.result_for(0.0) is JudgmentKind.HIT300
+    assert hw.result_for(37.5) is JudgmentKind.HIT300
+    assert hw.result_for(-37.5) is JudgmentKind.HIT300
+    assert hw.result_for(37.6) is JudgmentKind.HIT100
+    assert hw.result_for(83.5) is JudgmentKind.HIT100
+    assert hw.result_for(83.6) is JudgmentKind.HIT50
+    assert hw.result_for(129.5) is JudgmentKind.HIT50
+    assert hw.result_for(129.6) is None
+    assert hw.result_for(-200.0) is None
+    assert hw.can_be_hit(129.5) and not hw.can_be_hit(129.6)
+
+
+# --- press-edge detection -----------------------------------------------------------
+
+def test_press_edges_held_keys_do_not_reclick():
+    fr = _frames([
+        (10, 5, 5, KEY_K1),                 # ch1 down
+        (20, 5, 5, KEY_K1 | KEY_M1),        # M1 joins K1 — SAME channel, no edge
+        (30, 5, 5, KEY_K1 | KEY_K2),        # ch2 down (ch1 still held)
+        (40, 5, 5, 0),                      # all up
+        (50, 5, 5, KEY_K2),                 # ch2 again
+    ])
+    presses = press_edges(fr)
+    assert [(p.time_ms, p.channel) for p in presses] == [(10, 1), (30, 2), (50, 2)]
+
+
+# --- circle judgment by timing delta -------------------------------------------------
+
+def _one_circle_run(click_t: float | None, pos=(100, 100)):
+    bm = _map("100,100,1000,1,0,0:0:0:0:\n")
+    entries = []
+    if click_t is not None:
+        entries = [(click_t, pos[0], pos[1], KEY_K1), (click_t + 20, pos[0], pos[1], 0)]
+    else:
+        entries = [(2000, 400, 300, 0)]
+    sim = StdRuleset(bm, _frames(entries)).run()
+    v = sim.verdict_for(bm.hit_objects[0])
+    return sim, v
+
+
+def test_circle_window_tiers():
+    for click_t, want in ((1010, JudgmentKind.HIT300),
+                          (1050, JudgmentKind.HIT100),
+                          (1100, JudgmentKind.HIT50)):
+        sim, v = _one_circle_run(click_t)
+        assert v.kind is want, (click_t, v.kind)
+        assert v.hit_time == click_t
+        assert v.delta == click_t - 1000
+
+
+def test_circle_miss_at_window_close():
+    sim, v = _one_circle_run(None)
+    assert v.kind is JudgmentKind.MISS
+    assert v.hit_time is None
+    assert v.deadline == 1000 + 129.5
+    assert sim.sim_counts == (0, 0, 0, 1)
+    # miss popup at the window close
+    ev = sim.events[0]
+    assert ev.kind is JudgmentKind.MISS and ev.time_ms == v.deadline
+    assert ev.combo_after == 0
+
+
+def test_click_outside_radius_does_not_hit():
+    # CS4 radius ≈ 36.5 osu!px; click 60px away → no target → miss
+    sim, v = _one_circle_run(1000, pos=(160, 100))
+    assert v.kind is JudgmentKind.MISS
+
+
+# --- notelock (stable LegacyHitPolicy) ------------------------------------------------
+
+def test_notelock_blocks_later_object_while_earlier_alive():
+    bm = _map("100,100,1000,1,0,0:0:0:0:\n"
+              "300,300,1100,1,0,0:0:0:0:\n")
+    a, b = bm.hit_objects
+    # click B in its window at t=1090 while A (deadline 1129.5) is unjudged
+    # → notelock Shake, nothing judged; A misses at 1129.5; a second click
+    # at t=1150 (A now judged) hits B with delta 50 → 100.
+    fr = _frames([
+        (1090, 300, 300, KEY_K1),
+        (1120, 300, 300, 0),
+        (1150, 300, 300, KEY_K1),
+        (1200, 300, 300, 0),
+    ])
+    sim = StdRuleset(bm, fr).run()
+    va, vb = sim.verdict_for(a), sim.verdict_for(b)
+    assert va.kind is JudgmentKind.MISS
+    assert vb.kind is JudgmentKind.HIT100 and vb.hit_time == 1150
+    assert sim.shakes == 1
+
+
+def test_notelock_click_routes_to_earliest_when_overlapping():
+    # two stacked-in-time circles, same position: the click must hit A (the
+    # EARLIEST unjudged), not B
+    bm = _map("100,100,1000,1,0,0:0:0:0:\n"
+              "100,100,1080,1,0,0:0:0:0:\n")
+    a, b = bm.hit_objects
+    fr = _frames([(1005, 100, 100, KEY_K1), (1030, 100, 100, 0)])
+    sim = StdRuleset(bm, fr).run()
+    assert sim.verdict_for(a).kind is JudgmentKind.HIT300
+    assert sim.verdict_for(b).kind is JudgmentKind.MISS
+
+
+def test_early_click_shakes_without_consuming():
+    bm = _map("100,100,1000,1,0,0:0:0:0:\n")
+    fr = _frames([
+        (800, 100, 100, KEY_K1),    # 200ms early: inside hittable, outside meh
+        (850, 100, 100, 0),
+        (1000, 100, 100, KEY_K1),   # perfect
+        (1050, 100, 100, 0),
+    ])
+    sim = StdRuleset(bm, fr).run()
+    v = sim.verdict_for(bm.hit_objects[0])
+    assert v.kind is JudgmentKind.HIT300 and v.hit_time == 1000
+    assert sim.shakes == 1
+
+
+# --- sliders: tracking + the three distinct miss kinds --------------------------------
+
+# L slider: start 1000, velocity 0.2 px/ms, span 1250ms → end 2250,
+# ticks at t=1500 (x=356) and t=2000 (x=456), tail (legacy last 2214).
+SLIDER_LINE = "256,192,1000,2,0,L|506:192,1,250,0|0,0:0|0:0,0:0:0:0:\n"
+LEAD_CIRCLE = "256,192,500,1,0,0:0:0:0:\n"       # combo seed before the slider
+
+
+def _slider_map():
+    bm = _map(LEAD_CIRCLE + SLIDER_LINE)
+    circle, slider = bm.hit_objects
+    assert isinstance(slider, Slider)
+    return bm, circle, slider
+
+
+def _ball_frames(slider, t0, t1, step=10, keys=KEY_K1):
+    out = []
+    t = t0
+    while t <= t1:
+        x, y = slider.position_at(t)
+        out.append((t, x, y, keys))
+        t += step
+    return out
+
+
+def _lead_click():
+    return [(500, 256, 192, KEY_K1), (530, 256, 192, 0)]
+
+
+def test_slider_perfect_300():
+    bm, circle, slider = _slider_map()
+    fr = _frames(_lead_click()
+                 + [(1000, 256, 192, KEY_K1)]
+                 + _ball_frames(slider, 1010, 2250))
+    sim = StdRuleset(bm, fr).run()
+    v = sim.verdict_for(slider)
+    assert v.kind is JudgmentKind.HIT300
+    assert [p.kind for p in v.parts] == ["head", "tick", "tick", "tail"]
+    assert all(p.hit for p in v.parts)
+    rec = v.slider_record
+    assert rec.head_hit and rec.tail_hit and not rec.sliderbreaks
+    assert rec.head_delta == 0.0
+    assert len(rec.ticks) == 2
+    # tracking covers the slide; no breaks
+    assert v.tracked_at(1500) and v.tracked_at(2200)
+    assert not v.breaks
+    # combo: circle 1, head 2, ticks 3/4, tail 5
+    slider_ev = [e for e in sim.events if e.object_id == 1][0]
+    assert slider_ev.combo_after == 5
+    assert slider_ev.time_ms == 2250
+
+
+def test_slider_head_missed_only_is_break_no_misscount():
+    """Head missed, ticks+tail tracked: combo RESETS at the head's miss
+    moment (sliderbreak), result downgrades to 100 (3/4), miss count 0."""
+    bm, circle, slider = _slider_map()
+    # key held from t=900 far away (press edge routes to nothing), cursor
+    # arrives on the ball without a new click → head never hit
+    fr = _frames([(900, 0, 0, KEY_K1)] + _ball_frames(slider, 1005, 2250))
+    sim = StdRuleset(bm, fr).run()
+    v = sim.verdict_for(slider)
+    rec = v.slider_record
+    assert not rec.head_hit and rec.head_missed_at == 1000 + 129.5
+    assert rec.tail_hit and all(p.hit for p in rec.ticks)
+    assert rec.sliderbreaks == []            # head break tracked separately
+    assert v.kind is JudgmentKind.HIT100     # 3/4 parts
+    # miss count NOT incremented by the head (slider aggregate is the 100)
+    assert sim.sim_counts[3] == 1            # only the lead circle missed
+    # combo: lead circle missed (no click on it… it WAS clicked) —
+    slider_ev = [e for e in sim.events if e.object_id == 1][0]
+    # circle miss at 629.5 → 0; head miss resets (already 0); ticks 1/2, tail 3
+    assert slider_ev.combo_after == 3
+
+
+def test_slider_tick_missed_is_sliderbreak():
+    """Only tick #2 missed: combo resets AT the tick (sliderbreak), tail
+    still caught → 3/4 = 100; the break is in sliderbreaks."""
+    bm, circle, slider = _slider_map()
+    away = [(t, 0, 0, KEY_K1) for t in range(1600, 2100, 10)]
+    fr = _frames(_lead_click()
+                 + [(1000, 256, 192, KEY_K1)]
+                 + _ball_frames(slider, 1010, 1590)
+                 + away
+                 + _ball_frames(slider, 2100, 2250))
+    sim = StdRuleset(bm, fr).run()
+    v = sim.verdict_for(slider)
+    rec = v.slider_record
+    assert rec.head_hit and rec.tail_hit
+    assert [p.hit for p in rec.ticks] == [True, False]
+    assert rec.sliderbreaks == [2000.0]
+    assert v.breaks == [2000.0]
+    assert v.kind is JudgmentKind.HIT100     # 3/4
+    # combo: circle 1, head 2, tick1 3 — RESET at tick2 → 0 — tail 1
+    slider_ev = [e for e in sim.events if e.object_id == 1][0]
+    assert slider_ev.combo_after == 1
+    # ball detach visible: not tracking mid-gap, tracking again at the tail
+    assert not v.tracked_at(1900) and v.tracked_at(2230)
+
+
+def test_slider_tail_missed_is_lenient():
+    """Only the tail missed: NO combo reset, no sliderbreak — result
+    downgrades to 100 (3/4), combo keeps building through the slider."""
+    bm, circle, slider = _slider_map()
+    fr = _frames(_lead_click()
+                 + [(1000, 256, 192, KEY_K1)]
+                 + _ball_frames(slider, 1010, 2050)
+                 + [(2060, 0, 0, KEY_K1)])   # gone before the tail judge time
+    sim = StdRuleset(bm, fr).run()
+    v = sim.verdict_for(slider)
+    rec = v.slider_record
+    assert rec.head_hit and all(p.hit for p in rec.ticks)
+    assert not rec.tail_hit and rec.tail_missed_at == 2250
+    assert rec.sliderbreaks == [] and v.breaks == []
+    assert v.kind is JudgmentKind.HIT100     # 3/4
+    # combo: circle 1, head 2, tick1 3, tick2 4, tail missed → stays 4
+    slider_ev = [e for e in sim.events if e.object_id == 1][0]
+    assert slider_ev.combo_after == 4
+    # the three kinds produce distinct log lines
+    lines = "\n".join(sim.report_lines())
+    assert "tail_missed@2250ms" in lines and "sliderbreak" not in lines
+
+
+def test_slider_all_missed_is_miss():
+    bm, circle, slider = _slider_map()
+    fr = _frames([(3000, 0, 0, KEY_K1)])
+    sim = StdRuleset(bm, fr).run()
+    assert sim.verdict_for(slider).kind is JudgmentKind.MISS
+
+
+# --- lazer engine variants (auto-selected for lazer .osr, game_version ≥ 30M) -----------
+
+def test_lazer_notelock_force_misses_previous():
+    """StartTimeOrderedHitPolicy: hitting B after A's start time is allowed
+    and force-misses A at that moment (no stable shake-cascade)."""
+    bm = _map("100,100,1000,1,0,0:0:0:0:\n"
+              "300,300,1100,1,0,0:0:0:0:\n")
+    a, b = bm.hit_objects
+    fr = _frames([(1050, 300, 300, KEY_K1), (1090, 300, 300, 0)])
+    sim = StdRuleset(bm, fr, lazer=True).run()
+    va, vb = sim.verdict_for(a), sim.verdict_for(b)
+    assert vb.kind is JudgmentKind.HIT100 and vb.hit_time == 1050  # −50 → Ok
+    assert va.kind is JudgmentKind.MISS
+    assert va.deadline == 1050              # force-missed AT the B hit
+    assert sim.shakes == 0
+    # the same click under stable rules shakes instead
+    stable = StdRuleset(bm, fr, lazer=False).run()
+    assert stable.verdict_for(b).kind is JudgmentKind.MISS
+    assert stable.shakes == 1
+
+
+def test_lazer_blocks_before_previous_start():
+    """Before the previous object's start time the hit is still blocked."""
+    bm = _map("100,100,1000,1,0,0:0:0:0:\n"
+              "300,300,1100,1,0,0:0:0:0:\n")
+    fr = _frames([(990, 300, 300, KEY_K1), (1020, 300, 300, 0)])
+    sim = StdRuleset(bm, fr, lazer=True).run()
+    assert sim.verdict_for(bm.hit_objects[1]).kind is JudgmentKind.MISS
+    assert sim.shakes == 1
+
+
+def test_lazer_slider_head_is_timing_judged():
+    """lazer: the slider's counted judgment is the head's timing tier —
+    a +50ms head with perfect tracking is a 100 (stable would call the
+    aggregate 300); a missed head is a MISS count."""
+    bm, circle, slider = _slider_map()
+    fr = _frames(_lead_click()
+                 + [(1050, 256, 192, KEY_K1)]
+                 + _ball_frames(slider, 1060, 2250))
+    sim = StdRuleset(bm, fr, lazer=True).run()
+    v = sim.verdict_for(slider)
+    assert v.kind is JudgmentKind.HIT100 and v.delta == 50
+    assert all(p.hit for p in v.parts[1:])       # tracking still full
+    # popup at the head, at the click moment (lazer convention)
+    ev = [e for e in sim.events if e.object_id == 1][0]
+    assert ev.time_ms == 1050 and (ev.x, ev.y) == v.pos
+
+    missed = StdRuleset(bm, _frames([(900, 0, 0, KEY_K1)]
+                                    + _ball_frames(slider, 1005, 2250)),
+                        lazer=True).run()
+    assert missed.verdict_for(slider).kind is JudgmentKind.MISS
+
+
+# --- spinner (simplified model) --------------------------------------------------------
+
+def test_spinner_spin_vs_no_spin():
+    # OD7 → SpinnerRatio 6.0; 1s spinner needs 6 rotations
+    bm = _map("256,192,1000,12,0,2000,0:0:0:0:\n")
+    spins = []
+    for i in range(101):
+        ang = 2.0 * math.pi * 8.0 * i / 100.0
+        spins.append((1000 + i * 10, 256 + 100 * math.cos(ang),
+                      192 + 100 * math.sin(ang), KEY_K1))
+    sim = StdRuleset(bm, _frames(spins)).run()
+    assert sim.verdict_for(bm.hit_objects[0]).kind is JudgmentKind.HIT300
+
+    idle = StdRuleset(bm, _frames([(1500, 256, 100, KEY_K1)])).run()
+    assert idle.verdict_for(bm.hit_objects[0]).kind is JudgmentKind.MISS
+
+
+# --- reconcile snap ----------------------------------------------------------------------
+
+def test_reconcile_snaps_to_replay_counts():
+    """Sim says 3×300 but the replay recorded 2/1/0/0 → the least-confident
+    (largest-delta) hit is relabeled to 100; totals match exactly."""
+    bm = _map("100,100,1000,1,0,0:0:0:0:\n"
+              "100,100,2000,1,0,0:0:0:0:\n"
+              "100,100,3000,1,0,0:0:0:0:\n")
+    fr = _frames([
+        (1010, 100, 100, KEY_K1), (1040, 100, 100, 0),
+        (2020, 100, 100, KEY_K1), (2060, 100, 100, 0),
+        (3030, 100, 100, KEY_K1), (3070, 100, 100, 0),
+    ])
+    sim = StdRuleset(bm, fr, _meta(2, 1, 0, 0, max_combo=3)).run()
+    assert sim.sim_counts == (3, 0, 0, 0)          # the honesty metric
+    assert sim.final_counts == (2, 1, 0, 0)        # snapped to the replay
+    assert sim.relabeled == 1
+    kinds = [sim.verdict_for(o).kind for o in bm.hit_objects]
+    assert kinds == [JudgmentKind.HIT300, JudgmentKind.HIT300,
+                     JudgmentKind.HIT100]          # worst delta (30ms) flipped
+
+
+def test_reconcile_promotes_phantom_hit():
+    """Sim missed a circle the replay says was hit → phantom 300 on time."""
+    bm = _map("100,100,1000,1,0,0:0:0:0:\n")
+    sim = StdRuleset(bm, _frames([(2000, 400, 300, 0)]),
+                     _meta(1, 0, 0, 0, max_combo=1)).run()
+    assert sim.sim_counts == (0, 0, 0, 1)
+    assert sim.final_counts == (1, 0, 0, 0)
+    v = sim.verdict_for(bm.hit_objects[0])
+    assert v.kind is JudgmentKind.HIT300
+    assert v.hit_time == 1000 and v.delta == 0.0   # mania's 0ms-offset trick
+
+
+def test_reconcile_noop_when_counts_match():
+    bm = _map("100,100,1000,1,0,0:0:0:0:\n"
+              "100,100,2000,1,0,0:0:0:0:\n")
+    fr = _frames([
+        (1010, 100, 100, KEY_K1), (1040, 100, 100, 0),
+        (2100, 100, 100, KEY_K1), (2140, 100, 100, 0),
+    ])
+    sim = StdRuleset(bm, fr, _meta(1, 0, 1, 0, max_combo=2)).run()
+    assert sim.sim_counts == (1, 0, 1, 0)
+    assert sim.final_counts == (1, 0, 1, 0)
+    assert sim.relabeled == 0

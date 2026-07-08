@@ -18,11 +18,22 @@ RENDER_PLAN.md semantics implemented here:
                         (lazer SnakingSliderBody timing); the tail circle
                         rides the snake tip.
 
-PHASE-1 SIMPLIFICATIONS (each is a later-phase item):
-  * judgments: every object is assumed HIT exactly at startTime — the
-    ruleset sim (hit windows, notelock, sliderbreaks) is the next phase,
-    so explosions always fire on time and nothing ever "misses".
-  * spinners: no visuals; counted and logged once at the end of the run.
+JUDGMENT PHASE (ruleset/ruleset.py drives this; pass judgments=SimResult):
+  * explosions fire at the REAL hit time (click delta), not startTime;
+    a missed circle/slider-head never explodes — it quick-fades out at
+    its window close (stable's brief red-tint variant is SKIPPED — plain
+    fade; noted per the plan).
+  * judgment popups: procedural 300/100/50 numbers + red miss X at the
+    object's popup position, ResultFadeIn=120 / ResultFadeOut=600 (§2.4);
+    300 popups draw fainter so a clean run doesn't strobe.
+  * sliderbreaks read as the ball detaching: the follow ball dims while
+    the ruleset says tracking was lost (and there is no tail explosion —
+    the phase-1 body fade already has none).
+  * without a replay/judgments (--dump-frames debug, future --no-replay)
+    every object falls back to the Phase-1 "perfect hit at startTime".
+
+REMAINING SIMPLIFICATIONS (each is a later-phase item):
+  * spinners: no visuals (judgment popup only); counted and logged.
   * no reverse arrows / slider ticks / follow points / hit lighting yet.
   * slider bodies are rebuilt every frame (0.2 ms/body — fine at this
     phase; an FBO cache per static body is the known perf step).
@@ -35,14 +46,17 @@ from __future__ import annotations
 import math
 import sys
 
-from ..beatmap.difficulty import HIT_FADE_OUT
+from ..beatmap.difficulty import (HIT_FADE_OUT, RESULT_FADE_IN,
+                                  RESULT_FADE_OUT)
 from ..beatmap.objects import Slider, Spinner
 from ..replay.replay import cursor_at
+from ..ruleset import JudgmentKind
 from .gl import Sprite
 from .slider_body import DEFAULT_COMBO_COLORS, BodyStyle, sub_path
 
 EXPLODE_SCALE = 1.4            # §2.5 hit-explosion end scale (skin v2+)
 NUMBER_FADE_OUT = 60.0         # §3.2 v2+ combo-number quick fade (ms)
+MISS_FADE_OUT = 60.0           # missed circle: quick fade at window close
 APPROACH_START_SCALE = 4.0     # §2.5 approach circle 4→1
 APPROACH_MAX_ALPHA = 0.9       # stable caps the approach ring alpha
 SNAKE_IN_PORTION = 1.0 / 3.0   # lazer: snake-in completes after preempt/3
@@ -51,6 +65,15 @@ TRAIL_STEPS = 12
 CURSOR_RADIUS_OSU = 14.0       # cursor core sizing base, osu!px
 CURSOR_GLOW_COLOR = (1.0, 0.30, 0.35)   # R3D red
 DIGIT_SPACING = 0.06           # of digit height, between combo digits
+BALL_DETACHED_ALPHA = 0.35     # slider ball while tracking is lost
+POPUP_HEIGHT_FRAC = 0.62       # judgment number height / circle radius
+POPUP_COLORS = {
+    JudgmentKind.HIT300: (0.38, 0.72, 1.00),   # Argon-ish blue
+    JudgmentKind.HIT100: (0.42, 0.88, 0.47),   # green
+    JudgmentKind.HIT50: (0.95, 0.76, 0.36),    # orange
+    JudgmentKind.MISS: (0.95, 0.25, 0.30),     # red X
+}
+POPUP_300_ALPHA = 0.45         # 300s draw fainter (anti-strobe)
 
 
 def _clamp01(v: float) -> float:
@@ -106,6 +129,32 @@ def number_alpha(t: float, start_time: float, preempt: float,
     if t <= hit:
         return fade_in_alpha(t, start_time, preempt, time_fade_in)
     return _clamp01(1.0 - (t - hit) / NUMBER_FADE_OUT)
+
+
+def miss_fade_alpha(t: float, start_time: float, preempt: float,
+                    time_fade_in: float, deadline: float) -> float:
+    """Missed circle/slider-head: normal fade-in, full until the miss
+    window closes, then a quick fade out (NO explosion, no scale). Stable's
+    brief red tint is skipped (plain fade) — noted in the module docstring."""
+    if t <= deadline:
+        return fade_in_alpha(t, start_time, preempt, time_fade_in)
+    return _clamp01(1.0 - (t - deadline) / MISS_FADE_OUT)
+
+
+def popup_alpha_scale(t: float, popup_time: float) -> tuple[float, float] | None:
+    """(alpha, scale) of a judgment popup, or None outside its life.
+    §2.4 ResultFadeIn=120 / ResultFadeOut=600; a small 0.85→1 pop on the
+    way in."""
+    age = t - popup_time
+    if age < 0:
+        return None
+    if age <= RESULT_FADE_IN:
+        w = age / RESULT_FADE_IN
+        return w, 0.85 + 0.15 * w
+    p = (age - RESULT_FADE_IN) / RESULT_FADE_OUT
+    if p >= 1.0:
+        return None
+    return 1.0 - p, 1.0
 
 
 def snake_end_fraction(t: float, start_time: float, preempt: float,
@@ -174,7 +223,9 @@ class StdScene:
                  draw_combo_numbers: bool = True,
                  draw_cursor: bool = True,
                  cursor_scale: float = 1.0,
-                 background: tuple[float, float, float] = (0.043, 0.043, 0.055)):
+                 background: tuple[float, float, float] = (0.043, 0.043, 0.055),
+                 judgments=None,
+                 draw_judgment_popups: bool = True):
         self.beatmap = beatmap
         self.diff = beatmap.diff
         self.frames = frames
@@ -190,6 +241,9 @@ class StdScene:
         self.cursor_scale = cursor_scale
         self.background = background
 
+        self.judgments = judgments        # ruleset SimResult | None
+        self.draw_judgment_popups = draw_judgment_popups
+
         self.objects = sorted(beatmap.hit_objects,
                               key=lambda o: o.get_start_time())
         self.radius_px = camera.len_to_screen(self.diff.circle_radius)
@@ -199,6 +253,11 @@ class StdScene:
         self._slider_paths: dict[int, list[tuple[float, float]]] = {}
         self.skipped_spinners = 0
         self._spinner_ids: set[int] = set()
+        # judgment popups: time-sorted events, pointer + active window
+        self._popups = (sorted(judgments.events, key=lambda e: e.time_ms)
+                        if judgments is not None else [])
+        self._popup_idx = 0
+        self._popup_active: list = []
 
     # --- lifecycle management ---------------------------------------------------
 
@@ -244,6 +303,10 @@ class StdScene:
                 self._draw_circle(obj, t, approach)
         if approach:
             self.spr.draw(approach)
+        if self.draw_judgment_popups and self._popups:
+            popups = self._popup_sprites(t)
+            if popups:
+                self.spr.draw(popups)
         if self.draw_cursor and self.frames:
             self.spr.draw(self._cursor_sprites(t))
 
@@ -272,16 +335,30 @@ class StdScene:
                                       (1.0, 1.0, 1.0, num_alpha)))
         return sprites
 
+    def _verdict(self, obj):
+        return self.judgments.verdict_for(obj) if self.judgments else None
+
     def _head_sprites(self, obj, t: float, pos_osu, approach_out) -> list[Sprite]:
-        """Hit-circle lifecycle sprites (shared by circles and slider heads)."""
+        """Hit-circle lifecycle sprites (shared by circles and slider heads).
+        With judgments: the explosion anchors on the REAL click time; a
+        missed head quick-fades at its window close instead of exploding.
+        Without judgments: the Phase-1 perfect-hit-at-startTime fallback."""
         color = self._color(obj)
         preempt, fade_in = self.diff.preempt, self.diff.time_fade_in
         start = obj.get_start_time()
-        alpha, scale = circle_alpha_scale(t, start, preempt, fade_in)
+        v = self._verdict(obj)
         x, y = self.cam.to_screen(*pos_osu)
+        if v is not None and v.hit_time is None:      # head missed
+            alpha = miss_fade_alpha(t, start, preempt, fade_in, v.deadline)
+            scale = 1.0
+            na = alpha
+        else:
+            hit_time = v.hit_time if v is not None else None
+            alpha, scale = circle_alpha_scale(t, start, preempt, fade_in,
+                                              hit_time=hit_time)
+            na = number_alpha(t, start, preempt, fade_in, hit_time=hit_time)
         sprites: list[Sprite] = []
         if alpha > 0.0:
-            na = number_alpha(t, start, preempt, fade_in)
             sprites = self._circle_sprites(x, y, color, alpha, scale,
                                            obj.combo_number, na)
         if self.draw_approach_circles:
@@ -320,17 +397,59 @@ class StdScene:
             sprites.append(Sprite(tip[0], tip[1], d, d, "ring",
                                   (1.0, 1.0, 1.0, b_alpha)))
         # slider ball: plain disc following PositionAt(t) (repeats included
-        # — scorePath handles the back-and-forth)
+        # — scorePath handles the back-and-forth). While the ruleset says
+        # tracking was lost the ball dims — the visible sliderbreak cue
+        # (there is no tail explosion to lose in this phase).
         if start <= t <= end:
+            v = self._verdict(obj)
+            ball_alpha = (1.0 if v is None or v.tracked_at(t)
+                          else BALL_DETACHED_ALPHA)
             bx, by = self.cam.to_screen(
                 *obj.get_stacked_position_at(t, self.diff))
             d = 2.0 * self.radius_px
-            sprites.append(Sprite(bx, by, d, d, "disc", (*color, 1.0)))
+            sprites.append(Sprite(bx, by, d, d, "disc", (*color, ball_alpha)))
         # head circle (+ its approach ring) on top of body/ball
         sprites.extend(self._head_sprites(
             obj, t, obj.get_stacked_start_position(self.diff), approach_out))
         if sprites:
             self.spr.draw(sprites)
+
+    # --- judgment popups ---------------------------------------------------------------
+
+    def _popup_sprites(self, t: float) -> list[Sprite]:
+        """Procedural judgment indicators (the ruleset phase's sprites):
+        300/100/50 as tinted digit runs, miss as the red X — at the
+        object's popup position, ResultFadeIn/Out lifecycle."""
+        while (self._popup_idx < len(self._popups)
+               and self._popups[self._popup_idx].time_ms <= t):
+            self._popup_active.append(self._popups[self._popup_idx])
+            self._popup_idx += 1
+        out: list[Sprite] = []
+        keep: list = []
+        for ev in self._popup_active:
+            asa = popup_alpha_scale(t, ev.time_ms)
+            if asa is None:
+                if t >= ev.time_ms:      # expired
+                    continue
+                keep.append(ev)
+                continue
+            keep.append(ev)
+            alpha, scale = asa
+            color = POPUP_COLORS[ev.kind]
+            x, y = self.cam.to_screen(ev.x, ev.y)
+            if ev.kind is JudgmentKind.MISS:
+                d = 2.2 * self.radius_px * scale
+                out.append(Sprite(x, y, d, d, "miss_x", (*color, alpha)))
+                continue
+            if ev.kind is JudgmentKind.HIT300:
+                alpha *= POPUP_300_ALPHA
+            h = 2.0 * self.radius_px * POPUP_HEIGHT_FRAC * scale
+            for ch, dx, w in layout_digits(int(ev.kind.value),
+                                           self.bank.digit_aspect, h):
+                out.append(Sprite(x + dx, y, w, h, f"digit_{ch}",
+                                  (*color, alpha)))
+        self._popup_active = keep
+        return out
 
     # --- cursor -----------------------------------------------------------------------
 

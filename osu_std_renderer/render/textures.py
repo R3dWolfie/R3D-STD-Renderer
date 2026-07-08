@@ -16,11 +16,15 @@ Everything the Phase-1 scene draws is baked here at init:
   digit_0..9    combo-number glyphs, DejaVu Sans Bold (system font; the
                 repo bundles no fonts — same decision the taiko engine
                 took before Torus landed), baked white for tinting
+  miss_x        AA diagonal cross for the miss judgment popup (tinted red
+                by the scene — the ruleset phase's judgment sprites)
 
 All textures are white/greyscale so the sprite tint does the colouring —
 the §3.2 default ComboColors rotate per combo set at draw time.
 """
 from __future__ import annotations
+
+import math
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
@@ -89,6 +93,26 @@ def bake_glow(size: int = GLOW_SIZE, power: float = 2.2) -> np.ndarray:
     return rgba
 
 
+def bake_miss_x(size: int = 128, thickness: float = 0.16,
+                arm: float = 0.42) -> np.ndarray:
+    """White AA diagonal cross (the miss popup, tinted red at draw time).
+    thickness/arm are fractions of the texture size."""
+    c = (size - 1) / 2.0
+    yy, xx = np.mgrid[0:size, 0:size].astype(np.float64)
+    u, v = xx - c, yy - c
+    inv_sqrt2 = 1.0 / math.sqrt(2.0)
+    d1 = np.abs(u - v) * inv_sqrt2          # distance to the / diagonal
+    d2 = np.abs(u + v) * inv_sqrt2          # distance to the \ diagonal
+    half_t = size * thickness / 2.0
+    bar1 = np.clip((half_t - d1) / _AA_PX, 0.0, 1.0)
+    bar2 = np.clip((half_t - d2) / _AA_PX, 0.0, 1.0)
+    reach = np.clip((size * arm - np.hypot(u, v)) / _AA_PX, 0.0, 1.0)
+    alpha = np.maximum(bar1, bar2) * reach
+    rgba = np.full((size, size, 4), 255, dtype=np.uint8)
+    rgba[..., 3] = np.round(alpha * 255.0).astype(np.uint8)
+    return rgba
+
+
 def _load_font(px: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
     for cand in _FONT_CANDIDATES:
         try:
@@ -138,6 +162,7 @@ class TextureBank:
         renderer.upload_texture("approach",
                                 bake_ring(APPROACH_SIZE, APPROACH_THICKNESS))
         renderer.upload_texture("glow", bake_glow())
+        renderer.upload_texture("miss_x", bake_miss_x())
         self.digit_aspect: dict[str, float] = {}
         for ch, rgba in bake_digits().items():
             renderer.upload_texture(f"digit_{ch}", rgba)

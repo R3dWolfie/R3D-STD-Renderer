@@ -46,8 +46,13 @@ osu_std_renderer/
 ├── replay/replay.py             §5.5 — IMPLEMENTED (osrparse decode, garbage
 │                                first frame, 2D interpolation; per-ms walk
 │                                contract documented for the ruleset)
-├── ruleset/ruleset.py           §5.5 — STUB (hit windows/notelock/slider follow
-│                                semantics documented; reconcile-to-counts plan)
+├── ruleset/ruleset.py           §5.5 — IMPLEMENTED (judgment sim: ported
+│                                ppy/osu hit windows + notelock — stable
+│                                LegacyHitPolicy AND lazer StartTimeOrdered,
+│                                auto-picked by .osr game_version; slider
+│                                follow-area tracking w/ the 3 distinct
+│                                part-miss kinds; simplified spinners;
+│                                reconcile-to-counts snaps to the replay)
 ├── skin/
 │   ├── skin_ini.py              §3.2 — IMPLEMENTED (full field table + quirks)
 │   └── skin.py                  §3.1/3.3 — file resolution IMPLEMENTED
@@ -85,9 +90,11 @@ python3.12 -m venv .venv && .venv/bin/pip install numpy pillow osrparse moderngl
    depth-trick tube in moderngl; a Bezier snake + an overlapping aspire case.
    The only real unknown; technique documented in the stub.
 2. Golden harness: ~10 danser-rendered reference replays + frame diff.
-3. Phase 1 MVP: object lifecycle, judging sim (reconcile-to-counts), cursor
-   +trail, HUD reuse from mania v2, `std_renderer.py` adapter + mode-0
-   routing behind `_std_renderer_available()` with danser fallback.
+3. Phase 1 MVP: object lifecycle, cursor+trail — DONE; judging sim
+   (reconcile-to-counts) — DONE (judgment popups, real hit-time explosions,
+   miss fades, ball-detach sliderbreak cue). NEXT: HUD (combo/score/acc ride
+   in the JudgmentEvents already), then the `std_renderer.py` adapter +
+   mode-0 routing behind `_std_renderer_available()` with danser fallback.
 
 ## License
 

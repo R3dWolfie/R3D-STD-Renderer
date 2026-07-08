@@ -6,15 +6,19 @@ call this module identically):
     python -m osu_std_renderer REPLAY.osr BEATMAP_DIR -o out.mp4 \
         [--resolution 1920x1080] [--fps 60] [--encoder auto] [--skin DIR] …
 
-PHASE-1 STATE (the "first moving render" build): the full record path is
-live — procedural textures (render/textures.py), object lifecycle + scene
-(render/scene.py), slider bodies (render/slider_body.py), cursor+trail
-from the replay, fixed-timestep record loop (record/pipeline.py) into the
-single-process ffmpeg pipe (record/encode.py) with offline-mixed music
-(record/audio.py — music only; hitsounds are a later phase). Judgments are
-NOT simulated yet: objects are assumed hit at startTime, so there is no
-HUD/score/misses. Spinners render nothing (logged). Progress lines match
-catch's `rendering… NN%` shape.
+CURRENT STATE (Phase-1 record path + the judgment phase): procedural
+textures (render/textures.py), object lifecycle + scene (render/scene.py),
+slider bodies (render/slider_body.py), cursor+trail from the replay,
+fixed-timestep record loop (record/pipeline.py) into the single-process
+ffmpeg pipe (record/encode.py) with offline-mixed music (record/audio.py —
+music only; hitsounds are a later phase). Judgments ARE simulated
+(ruleset/ruleset.py — ported ppy/osu logic, stable notelock + classic
+sliders, reconciled to the .osr's authoritative counts; the pre-reconcile
+sim-vs-real delta is printed as the honesty metric). Explosions fire at
+real hit times, misses fade out, judgment popups show, sliderbreaks dim
+the ball. Still no HUD (combo/score/acc ride along in the events for the
+HUD phase). Spinners render nothing (logged; simplified judgment).
+Progress lines match catch's `rendering… NN%` shape.
 
 Debug extras:
     --parse-only            parse map+replay+skin, print a summary, exit 0
@@ -120,7 +124,7 @@ def find_osu_file(beatmap: Path, replay_md5: str) -> Path:
 
 
 def _render(args, settings: StdRenderSettings, beatmap, frames,
-            beatmap_dir: Path, skin_info) -> int:
+            beatmap_dir: Path, skin_info, judgments=None) -> int:
     """The Phase-1 record path: scene → record loop → ffmpeg."""
     # GL-touching imports live here so --parse-only works GL-less
     from .record.audio import AudioError, AudioMixer, decode_to_pcm
@@ -148,6 +152,7 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
         draw_combo_numbers=settings.draw_combo_numbers,
         draw_cursor=settings.draw_cursor,
         cursor_scale=settings.cursor_scale,
+        judgments=judgments,
     )
 
     last_end = max(o.get_end_time() for o in beatmap.hit_objects)
@@ -281,6 +286,15 @@ def main(argv: list[str] | None = None) -> int:
     print(f"skin:   \"{skin_info.name or 'default'}\" v{skin_info.version:g}",
           file=sys.stderr)
 
+    # judgment simulation (pure CPU — runs in --parse-only too, so the
+    # sim-vs-real honesty metric is checkable without GL)
+    judgments = None
+    if frames and meta.mode == 0:
+        from .ruleset import StdRuleset
+        judgments = StdRuleset(beatmap, frames, meta).run()
+        for line in judgments.report_lines():
+            print(line, file=sys.stderr)
+
     if args.parse_only:
         return 0
 
@@ -293,7 +307,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     beatmap_dir = args.beatmap if args.beatmap.is_dir() else args.beatmap.parent
-    return _render(args, settings, beatmap, frames, beatmap_dir, skin_info)
+    return _render(args, settings, beatmap, frames, beatmap_dir, skin_info,
+                   judgments=judgments)
 
 
 if __name__ == "__main__":

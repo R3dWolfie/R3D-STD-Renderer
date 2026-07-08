@@ -7,4 +7,9 @@ osu_std_renderer/curves/sliderpath.py contains a bit-exact port of
 MIT-licensed geometry from ppy/osu-framework (PathApproximator.cs,
 CircularArcProperties.cs) and ppy/osu (SliderPath.cs) — attribution in the
 file header. osu_std_renderer/curves/legacy_random.py ports ppy/osu
-LegacyRandom.cs (MIT).
+LegacyRandom.cs (MIT). osu_std_renderer/ruleset/ruleset.py ports judgment
+logic from ppy/osu (MIT): HitWindows.cs, OsuHitWindows.cs,
+LegacyHitPolicy.cs, StartTimeOrderedHitPolicy.cs, DrawableHitCircle.cs,
+DrawableSlider.cs, DrawableSliderBall.cs, SliderInputManager.cs,
+SliderEventGenerator.cs, DrawableSpinner.cs — attribution in the module
+docstring and per-function docstrings.
