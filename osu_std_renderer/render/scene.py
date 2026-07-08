@@ -225,7 +225,8 @@ class StdScene:
                  cursor_scale: float = 1.0,
                  background: tuple[float, float, float] = (0.043, 0.043, 0.055),
                  judgments=None,
-                 draw_judgment_popups: bool = True):
+                 draw_judgment_popups: bool = True,
+                 hud=None):
         self.beatmap = beatmap
         self.diff = beatmap.diff
         self.frames = frames
@@ -243,6 +244,7 @@ class StdScene:
 
         self.judgments = judgments        # ruleset SimResult | None
         self.draw_judgment_popups = draw_judgment_popups
+        self.hud = hud                    # hud.StdHud | None (§5.3: topmost)
 
         self.objects = sorted(beatmap.hit_objects,
                               key=lambda o: o.get_start_time())
@@ -309,6 +311,8 @@ class StdScene:
                 self.spr.draw(popups)
         if self.draw_cursor and self.frames:
             self.spr.draw(self._cursor_sprites(t))
+        if self.hud is not None:
+            self.hud.draw(t)          # §5.3 draw order: … → cursors → HUD
 
     def frame_rgb(self, t: float):
         self.render_frame(t)

@@ -16,9 +16,11 @@ music only; hitsounds are a later phase). Judgments ARE simulated
 sliders, reconciled to the .osr's authoritative counts; the pre-reconcile
 sim-vs-real delta is printed as the honesty metric). Explosions fire at
 real hit times, misses fade out, judgment popups show, sliderbreaks dim
-the ball. Still no HUD (combo/score/acc ride along in the events for the
-HUD phase). Spinners render nothing (logged; simplified judgment).
-Progress lines match catch's `rendering… NN%` shape.
+the ball. The §4.6 gameplay HUD is live (render/hud.py — score/acc/grade/
+progress/combo/hit-error+UR/key-overlay/break-flash in the §5.3 virtual
+1080p UI space; a `hud:` final-values line prints after each render).
+Spinners render nothing (logged; simplified judgment). Progress lines
+match catch's `rendering… NN%` shape.
 
 Debug extras:
     --parse-only            parse map+replay+skin, print a summary, exit 0
@@ -81,11 +83,18 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--pp-counter", action=BA, default=True)
     ap.add_argument("--hit-counter", action=BA, default=False)
     ap.add_argument("--hit-error-meter", action=BA, default=True)
+    ap.add_argument("--unstable-rate", action=BA, default=True)
     ap.add_argument("--show-combo", action=BA, default=True)
     ap.add_argument("--show-score", action=BA, default=True)
     ap.add_argument("--show-hp", action=BA, default=True)
     ap.add_argument("--show-grade", action=BA, default=True)
     ap.add_argument("--show-mods", action=BA, default=True)
+    ap.add_argument("--show-progress", action=BA, default=True)
+    ap.add_argument("--progress-style", choices=("pie", "bar"), default="pie")
+    ap.add_argument("--hud-scale", type=float, default=1.0)
+    ap.add_argument("--hud-opacity", type=float, default=1.0)
+    ap.add_argument("--break-flash", action=BA, default=True,
+                    help="red edge-vignette pulse on combo breaks")
     ap.add_argument("--watermark", default="")
     ap.add_argument("--music-volume", type=int, default=100)
     ap.add_argument("--hitsound-volume", type=int, default=100)
@@ -131,6 +140,7 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
     from .record.encode import FfmpegPipe, build_ffmpeg_cmd, probe_encoder
     from .record.pipeline import RecordPipeline
     from .render.gl import SpriteRenderer
+    from .render.hud import StdHud
     from .render.playfield import PlayfieldCamera
     from .render.scene import ScenePlayer, StdScene, log_skips
     from .render.slider_body import SliderBodyRenderer
@@ -141,6 +151,12 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
     bank = TextureBank(spr)
     bodies = SliderBodyRenderer(spr.ctx, w, h)
     cam = PlayfieldCamera(w, h)
+
+    # the §4.6 HUD needs the judgment stream; --dump-frames without a
+    # replay sim just renders HUD-less (the Phase-1 fallback)
+    hud = None
+    if judgments is not None:
+        hud = StdHud(spr, bank, settings, judgments, frames, beatmap)
 
     combo_colors = [(r / 255.0, g / 255.0, b / 255.0)
                     for r, g, b in skin_info.combo_colors]
@@ -153,6 +169,7 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
         draw_cursor=settings.draw_cursor,
         cursor_scale=settings.cursor_scale,
         judgments=judgments,
+        hud=hud,
     )
 
     last_end = max(o.get_end_time() for o in beatmap.hit_objects)
@@ -173,6 +190,7 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
             Image.fromarray(rgb).save(p)
             print(f"wrote {p}", file=sys.stderr)
         log_skips(scene)
+        _print_hud_final_values(hud, judgments)
         spr.release()
         return 0
 
@@ -232,11 +250,31 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
                 pass
     wall = time.monotonic() - t0
     log_skips(scene)
+    _print_hud_final_values(hud, judgments)
     print(f"done: {n_frames} frames in {wall:.1f}s "
           f"({n_frames / wall:.1f} fps render, encoder {encoder}) → {output}",
           file=sys.stderr)
     spr.release()
     return 0
+
+
+def _print_hud_final_values(hud, judgments) -> None:
+    """The HUD phase's honesty line: the numbers the LAST frame displays,
+    with the sim-vs-replay accuracy check spelled out."""
+    if hud is None:
+        return
+    fv = hud.final_values()
+    acc_line = f"acc {fv['acc'] * 100.0:.2f}%"
+    if judgments is not None and judgments.real_counts is not None:
+        c3, c1, c5, cm = judgments.real_counts
+        total = c3 + c1 + c5 + cm
+        real_acc = ((300 * c3 + 100 * c1 + 50 * c5) / (300.0 * total)
+                    if total else 1.0)
+        ok = "==" if abs(real_acc - fv["acc"]) < 5e-5 else "!= MISMATCH"
+        acc_line += f" (replay {real_acc * 100.0:.2f}% {ok})"
+    print(f"hud: final score {fv['score']} | {acc_line} | "
+          f"combo {fv['combo']}x (max {fv['max_combo']}x) | "
+          f"UR {fv['ur']:.1f} | grade {fv['grade']}", file=sys.stderr)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -254,9 +292,13 @@ def main(argv: list[str] | None = None) -> int:
         draw_cursor=args.cursor, use_skin_cursor=args.skin_cursor,
         cursor_scale=args.cursor_scale, show_key_overlay=args.key_overlay,
         show_pp_counter=args.pp_counter, show_hit_counter=args.hit_counter,
-        show_hit_error_meter=args.hit_error_meter, show_combo=args.show_combo,
+        show_hit_error_meter=args.hit_error_meter,
+        show_unstable_rate=args.unstable_rate, show_combo=args.show_combo,
         show_score=args.show_score, show_hp_bar=args.show_hp,
         show_grade=args.show_grade, show_mods=args.show_mods,
+        show_progress=args.show_progress, progress_style=args.progress_style,
+        hud_scale=args.hud_scale, hud_opacity=args.hud_opacity,
+        combo_break_flash=args.break_flash,
         watermark_text=args.watermark, music_volume=args.music_volume,
         hitsound_volume=args.hitsound_volume,
         general_volume=args.general_volume, audio_offset=args.audio_offset,

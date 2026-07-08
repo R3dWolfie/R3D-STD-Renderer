@@ -17,6 +17,7 @@ MODULES = [
     "tests.test_slider_body",
     "tests.test_playfield_pipeline",
     "tests.test_scene",
+    "tests.test_hud",
 ]
 
 

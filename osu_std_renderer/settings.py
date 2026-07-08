@@ -131,13 +131,17 @@ class StdRenderSettings:
     slider_snaking_out: bool = True
     stack_enabled: bool = True            # Objects.StackEnabled
 
-    # HUD (§4.6)
+    # HUD (§4.6) — the HUD phase implements score/acc/grade/progress/
+    # combo/hit-error+UR/key-overlay/break-flash (render/hud.py). show_hp_bar,
+    # show_pp_counter, show_hit_counter, show_mods and show_aim_error_meter
+    # are accepted but their elements are later phases (hud.py docstring).
     show_score: bool = True
     show_combo: bool = True
     show_hp_bar: bool = True
     show_grade: bool = True
     show_hit_error_meter: bool = True
     show_unstable_rate: bool = True
+    show_aim_error_meter: bool = False    # plan default: off
     show_hit_counter: bool = False
     show_pp_counter: bool = True
     show_key_overlay: bool = True
@@ -145,6 +149,11 @@ class StdRenderSettings:
     show_boundaries: bool = False
     show_warning_arrows: bool = True
     show_hit_lighting: bool = False
+    show_progress: bool = True            # §4.6 Score.ProgressBar
+    progress_style: str = "pie"           # "pie" (plan default) | "bar"
+    hud_scale: float = 1.0                # §4.6 shared Scale (global)
+    hud_opacity: float = 1.0              # §4.6 shared Opacity (global)
+    combo_break_flash: bool = True        # red edge-vignette pulse on breaks
 
     # R3D service extras
     watermark_text: str = ""

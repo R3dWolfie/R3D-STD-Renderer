@@ -306,6 +306,11 @@ class SimResult:
     spinner_count: int
     lazer: bool = False
     detail_lines: list[str] = field(default_factory=list)
+    # part-level combo CHANGES (time, combo) — every increment (circles,
+    # spinner ends, slider heads/ticks/repeats/tails) and every reset, so
+    # the HUD combo counter steps mid-slider and breaks at the REAL break
+    # moment (not the next object judgment). Built alongside events.
+    combo_timeline: list[tuple[float, int]] = field(default_factory=list)
 
     def verdict_for(self, obj) -> ObjectVerdict | None:
         return self.verdicts.get(id(obj))
@@ -384,7 +389,7 @@ class StdRuleset:
     def run(self) -> SimResult:
         sims = self.simulate()
         sim_counts = self._tally(sims)
-        sim_events, sim_max_combo = self._build_events(sims)
+        sim_events, sim_max_combo, sim_timeline = self._build_events(sims)
         relabeled = 0
         real_counts = None
         real_max_combo = None
@@ -394,8 +399,9 @@ class StdRuleset:
             real_max_combo = self.meta.max_combo
             relabeled = self.reconcile_to_counts(sims, real_counts)
         final_counts = self._tally(sims)
-        events, final_max_combo = (self._build_events(sims) if relabeled
-                                   else (sim_events, sim_max_combo))
+        events, final_max_combo, timeline = (
+            self._build_events(sims) if relabeled
+            else (sim_events, sim_max_combo, sim_timeline))
         verdicts = {id(s.obj): self._verdict(s) for s in sims}
         return SimResult(
             verdicts=verdicts, events=events,
@@ -406,6 +412,7 @@ class StdRuleset:
             spinner_count=sum(1 for s in sims if s.kind == "spinner"),
             lazer=self.lazer,
             detail_lines=self._detail_lines(sims),
+            combo_timeline=timeline,
         )
 
     def _detail_lines(self, sims: list[_ObjSim]) -> list[str]:
@@ -891,12 +898,15 @@ class StdRuleset:
         ev.sort(key=lambda e: e[0])
         return ev
 
-    def _build_events(self, sims: list[_ObjSim]) -> tuple[list[JudgmentEvent], int]:
+    def _build_events(
+            self, sims: list[_ObjSim],
+    ) -> tuple[list[JudgmentEvent], int, list[tuple[float, int]]]:
         """Combo (stable semantics), accuracy (standard std formula over
         object judgments) and lazer-standardised score over the full event
         lattice; emits one JudgmentEvent per OBJECT judgment (the popups).
-        Returns (events, max_combo) — max combo is tracked on the lattice
-        so peaks inside a broken slider still count."""
+        Returns (events, max_combo, combo_timeline) — max combo is tracked
+        on the lattice so peaks inside a broken slider still count, and the
+        timeline records every part-level combo CHANGE (the HUD's counter)."""
         lattice = self._lattice(sims)
 
         # perfect-run combo portion (denominator of the combo term)
@@ -911,6 +921,7 @@ class StdRuleset:
             max_combo_portion += bmax * (c ** COMBO_EXPONENT)
 
         events: list[JudgmentEvent] = []
+        timeline: list[tuple[float, int]] = []
         combo = 0
         max_combo = 0
         combo_portion = 0.0
@@ -925,7 +936,10 @@ class StdRuleset:
                     combo += 1
                     max_combo = max(max_combo, combo)
                     combo_portion += bmax * (combo ** COMBO_EXPONENT)
+                    timeline.append((t, combo))
                 elif mode == "inc":
+                    if combo:
+                        timeline.append((t, 0))
                     combo = 0
             if not is_obj:
                 continue
@@ -942,7 +956,7 @@ class StdRuleset:
                 time_ms=t, kind=kind, object_id=s.idx, x=px, y=py,
                 combo_after=combo, score_after=int(round(score)),
                 acc_after=acc))
-        return events, max_combo
+        return events, max_combo, timeline
 
     def _popup_pos(self, s: _ObjSim) -> tuple[float, float]:
         if s.kind == "slider":
