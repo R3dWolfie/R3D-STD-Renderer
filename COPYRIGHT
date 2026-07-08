@@ -1,0 +1,10 @@
+R3D STD Renderer (osu-std)
+Copyright (C) 2026 Cool Adults
+
+Licensed under the GNU Affero General Public License v3.0 (see LICENSE).
+
+osu_std_renderer/curves/sliderpath.py contains a bit-exact port of
+MIT-licensed geometry from ppy/osu-framework (PathApproximator.cs,
+CircularArcProperties.cs) and ppy/osu (SliderPath.cs) — attribution in the
+file header. osu_std_renderer/curves/legacy_random.py ports ppy/osu
+LegacyRandom.cs (MIT).

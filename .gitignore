@@ -1,0 +1,28 @@
+# venv / python
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+
+# test data — never commit maps/replays/skins/audio
+*.osu
+*.osr
+*.osk
+*.osz
+*.mp3
+*.ogg
+*.wav
+*.mp4
+*-skin/
+test-data/
+
+# scratch
+*.png
+!docs/*.png
+.tmp/
+.ruff_cache/
+*.bak*
+*backup*
