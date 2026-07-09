@@ -43,6 +43,9 @@ MODULES = [
     # osu!(lazer) Difficulty Adjust mod (DA): AR/CS/OD/HP override + extended
     # limits (2026-07)
     "tests.test_difficulty_adjust",
+    # osu!(lazer) custom-rate mods (DT/NC/HT/DC speed_change): effective rate
+    # over the bitmask + NC/DC pitch vs DT/HT tempo audio (2026-07)
+    "tests.test_rate_mods",
     # Relax auto-tap synthesis (RX) + Autopilot path (2026-07)
     "tests.test_relax",
     # FAIL/DEATH handling: detection + animation transforms + F grade (2026-07)
