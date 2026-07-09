@@ -35,18 +35,53 @@ class AudioError(RuntimeError):
     pass
 
 
-def decode_to_pcm(path: Path, *, rate: float = 1.0) -> np.ndarray:
+def rate_audio_filter(rate: float, pitch: bool = False) -> str:
+    """The ffmpeg ``-af`` filter string for a clock-rate change → "" at rate 1.
+
+    Two modes, matching lazer's rate-mod audio (ModRateAdjust vs
+    ModNightcore/ModDaycore):
+
+      * ``pitch=False`` — DT/HT (ModRateAdjust, AdjustableProperty.Tempo):
+        ``atempo={rate}`` — tempo change, pitch PRESERVED. Identical to the
+        pre-custom-rate path, so a fixed 1.5/0.75 render is byte-identical.
+      * ``pitch=True`` — NC/DC (ModNightcore/ModDaycore): the pitch is pinned
+        to the mod's DEFAULT rate (the classic 1.5× nightcore / 0.75× daycore
+        Frequency = ``freqAdjust = SpeedChange.Default``) via ``asetrate`` +
+        resample, and ``atempo = rate / default`` (= lazer's ``tempoAdjust``)
+        carries the remainder. Net speed = rate; the audio pitches. (NB: this
+        matches CURRENT lazer, where NC pitch is FIXED at 1.5× regardless of
+        the custom rate — not "pitch == rate".)
+
+    atempo's stable range is 0.5–2.0; every custom-rate ``atempo`` here
+    (DT/HT 0.5–2.0, NC tempo 0.673–1.333, DC tempo 0.667–1.32) stays inside
+    it, so a single stage suffices."""
+    if rate == 1.0:
+        return ""
+    if not pitch:
+        return f"atempo={rate}"
+    default = 1.5 if rate > 1.0 else 0.75          # NC vs DC classic pitch
+    new_sr = int(round(SAMPLE_RATE * default))
+    tempo = rate / default
+    af = f"asetrate={new_sr},aresample={SAMPLE_RATE}"
+    if abs(tempo - 1.0) > 1e-9:
+        af += f",atempo={tempo}"
+    return af
+
+
+def decode_to_pcm(path: Path, *, rate: float = 1.0,
+                  pitch: bool = False) -> np.ndarray:
     """Decode any audio file → float32 stereo 48 kHz, shape (N, 2).
 
-    `rate` != 1 applies the DT/HT tempo change via atempo (pitch-preserving;
-    NC pitch shift is a later concern — mania's mods.py has the recipe)."""
+    `rate` != 1 applies the clock-rate change. `pitch=False` (DT/HT) is a
+    pitch-preserving tempo change; `pitch=True` (NC/DC) shifts the pitch with
+    the rate (nightcore/daycore). See :func:`rate_audio_filter`."""
     ffmpeg = shutil.which("ffmpeg")
     if ffmpeg is None:
         raise AudioError("ffmpeg not found on PATH")
     cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-i", str(path)]
-    if rate != 1.0:
-        # atempo is valid 0.5–100; chain if ever outside (HT 0.75/DT 1.5 fit)
-        cmd += ["-af", f"atempo={rate}"]
+    af = rate_audio_filter(rate, pitch)
+    if af:
+        cmd += ["-af", af]
     cmd += ["-f", "f32le", "-acodec", "pcm_f32le",
             "-ar", str(SAMPLE_RATE), "-ac", str(CHANNELS), "pipe:1"]
     proc = subprocess.run(cmd, capture_output=True, check=False)

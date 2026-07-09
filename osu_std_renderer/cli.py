@@ -801,7 +801,10 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
     afile = beatmap.get_audio_file(beatmap_dir)
     if afile is not None:
         try:
-            pcm = decode_to_pcm(afile, rate=speed)
+            # NC/DC pitch the music with the rate; DT/HT (and every standard/
+            # bitmask rate, where rate_pitch is False) change tempo only.
+            pcm = decode_to_pcm(afile, rate=speed,
+                                pitch=(meta is not None and meta.rate_pitch))
             vol = ((settings.music_volume / 100.0)
                    * (settings.general_volume / 100.0))
             # the map-time render start lands at wall t=0: the (already
@@ -1072,7 +1075,8 @@ def main(argv: list[str] | None = None) -> int:
         frames, meta = parse_replay(args.osr)
         osu_path = find_osu_file(args.beatmap, meta.beatmap_md5)
         beatmap = load_full(osu_path, mods=meta.mods,
-                            difficulty_adjust=meta.difficulty_adjust)
+                            difficulty_adjust=meta.difficulty_adjust,
+                            speed_override=meta.rate_override)
         # Relax (RX): the .osr has cursor motion but NO key presses (the
         # mod auto-taps). Synthesize the presses OsuModRelax injects so the
         # judgment sim, combo, popups, key overlay, slider-follow tracking
@@ -1108,6 +1112,15 @@ def main(argv: list[str] | None = None) -> int:
                   f"{' [extended-limits]' if _da['extended'] else ''} "
                   f"-> CS{beatmap.diff.cs:g} AR{beatmap.diff.ar:g} "
                   f"OD{beatmap.diff.od:g} HP{beatmap.diff.hp:g}", file=sys.stderr)
+        if meta.rate_override is not None:
+            _audio = ("pitch-shifted" if meta.rate_pitch
+                      else "tempo-only (pitch preserved)")
+            print(f"rate:   custom {meta.rate_override:g}x "
+                  f"(bitmask default was {beatmap.diff.base_mod_speed:g}x) "
+                  f"-> speed {beatmap.diff.speed:g}x, "
+                  f"AR{beatmap.diff.ar:g}->ar_real {beatmap.diff.ar_real:.2f}, "
+                  f"OD{beatmap.diff.od:g}->od_real {beatmap.diff.od_real:.2f}; "
+                  f"audio {_audio}", file=sys.stderr)
     else:
         print("replay: (none — --no-replay perfect play)", file=sys.stderr)
     print(f"skin:   \"{skin_info.name or 'default'}\" v{skin_info.version:g}",

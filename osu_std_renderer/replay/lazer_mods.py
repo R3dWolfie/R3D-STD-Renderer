@@ -234,3 +234,88 @@ def has_classic_mod(osr_path: Path) -> bool:
     """True iff the .osr's lazer mod list contains the Classic mod (CL)."""
     acs = read_lazer_mod_acronyms(osr_path)
     return bool(acs) and any(a.upper() == "CL" for a in acs)
+
+
+# --- Rate-adjust mods: custom-rate DT/NC/HT/DC (speed_change) -----------------
+# osu.Game/Rulesets/Mods/ModRateAdjust.cs — the abstract base every rate mod
+# derives from. It exposes a configurable ``SpeedChange`` BindableNumber and
+# ``ApplyToRate(time, rate) => rate * SpeedChange.Value`` — the ONE clock rate
+# that scales the whole play (gameplay clock + AR/OD windows + audio).
+#
+#   * ModDoubleTime.cs — SpeedChange ``new BindableDouble(1.5){MinValue=1.01,
+#     MaxValue=2, Precision=0.01}``. ApplyToTrack via RateAdjustModHelper =
+#     AdjustableProperty.Tempo → tempo change, pitch PRESERVED.
+#   * ModHalfTime.cs  — SpeedChange ``new BindableDouble(0.75){MinValue=0.5,
+#     MaxValue=0.99, Precision=0.01}``. Tempo-only, pitch preserved.
+#   * ModNightcore.cs / ModDaycore.cs — subclass DT/HT (same SpeedChange
+#     default+range) but override ApplyToTrack to add BOTH a Frequency and a
+#     Tempo adjustment: ``freqAdjust = SpeedChange.Default`` (pitch pinned to
+#     the CLASSIC 1.5×/0.75× nightcore/daycore frequency), ``tempoAdjust =
+#     value / SpeedChange.Default`` (tempo carries the remainder). Net rate =
+#     freq×tempo = value, but the audio PITCHES (whereas DT/HT do not).
+#
+# The legacy 32-bit `mods` bitmask can encode DT/HT/NC as fixed 1.5×/0.75×
+# ONLY — a per-play custom rate lives solely in the ScoreInfo blob settings
+# under the snake_case key ``speed_change`` (SettingSource "Speed increase"/
+# "Speed decrease"). Absent = the mod's default.
+_SPEED_CHANGE_KEY = "speed_change"
+
+# acronym -> default SpeedChange (== the fixed legacy bitmask rate)
+RATE_ADJUST_DEFAULTS = {"DT": 1.5, "NC": 1.5, "HT": 0.75, "DC": 0.75}
+# acronym -> (MinValue, MaxValue) the SettingSource clamps SpeedChange to
+RATE_ADJUST_RANGE = {"DT": (1.01, 2.0), "NC": (1.01, 2.0),
+                     "HT": (0.5, 0.99), "DC": (0.5, 0.99)}
+# NC/DC change PITCH (Frequency); DT/HT are tempo-only (pitch preserved)
+PITCH_RATE_MODS = frozenset({"NC", "DC"})
+RATE_ADJUST_MODS = frozenset(RATE_ADJUST_DEFAULTS)
+
+
+@dataclass(frozen=True)
+class RateAdjust:
+    """A rate-adjust mod (DT/NC/HT/DC) read from a .osr.
+
+    ``speed`` is the effective clock rate (the mod's default when the play
+    carries no custom ``speed_change``, else the setting clamped to the mod's
+    [Min,Max]). ``pitch`` is True for NC/DC (their audio shifts pitch) and
+    False for DT/HT (tempo-only). ``is_default`` is True when ``speed`` equals
+    the mod's default — i.e. the play is a plain fixed-rate DT/NC/HT/DC that
+    the legacy bitmask already renders, so no override is needed."""
+    acronym: str
+    speed: float
+    pitch: bool
+    is_default: bool
+
+
+def rate_adjust_from_mods(mods: list[dict]) -> "RateAdjust | None":
+    """The rate-adjust mod from an already-parsed :func:`read_lazer_mods`
+    list, or None when no DT/NC/HT/DC mod is present. Only one rate mod can be
+    active in a play, so the first match wins. ``speed_change`` is clamped to
+    the mod's SettingSource range; a non-numeric value (or an absent key) falls
+    back to the default."""
+    for m in mods:
+        if not isinstance(m, dict):
+            continue
+        ac = str(m.get("acronym", "")).upper()
+        if ac in RATE_ADJUST_MODS:
+            s = m.get("settings") or {}
+            default = RATE_ADJUST_DEFAULTS[ac]
+            raw = _da_num(s, _SPEED_CHANGE_KEY)  # numeric-or-None (bools -> None)
+            if raw is None:
+                speed = default
+            else:
+                lo, hi = RATE_ADJUST_RANGE[ac]
+                speed = min(hi, max(lo, raw))
+            return RateAdjust(acronym=ac, speed=speed,
+                              pitch=ac in PITCH_RATE_MODS,
+                              is_default=(speed == default))
+    return None
+
+
+def read_rate_adjust(osr_path: Path) -> "RateAdjust | None":
+    """The rate-adjust mod (DT/NC/HT/DC + effective speed_change) from a .osr,
+    or None when the replay carries no rate mod (or no ScoreInfo blob). Never
+    raises."""
+    mods = read_lazer_mods(osr_path)
+    if not mods:
+        return None
+    return rate_adjust_from_mods(mods)

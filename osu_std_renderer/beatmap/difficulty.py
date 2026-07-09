@@ -189,6 +189,18 @@ class Difficulty:
         self.mods = mods
         self.calculate()
 
+    def set_custom_speed(self, speed: float | None) -> None:
+        """OsuModRateAdjust: a lazer DT/NC/HT/DC play may carry a custom
+        ``speed_change`` (SpeedChange SettingSource) that differs from the
+        fixed legacy bitmask rate (DT 1.5 / HT 0.75). Override the clock rate
+        with it — ``calculate()`` then drives Speed (and so ar_real / od_real /
+        get_modified_time) off this value instead of base_mod_speed. ``None``/0
+        restores the bitmask rate (the byte-identical legacy path). ApplyToRate
+        is a single multiplier, so DA (base stats) still composes cleanly under
+        it exactly as under the bitmask rate."""
+        self.custom_speed = float(speed) if speed else None
+        self.calculate()
+
     def add_mod(self, mod: int) -> None:
         self.set_mods(self.mods | mod)
 

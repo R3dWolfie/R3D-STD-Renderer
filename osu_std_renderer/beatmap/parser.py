@@ -308,7 +308,8 @@ def parse_objects(path: Path, beatmap: Beatmap, *,
 
 # --- one-call convenience for tools/tests ----------------------------------------
 
-def load_full(path: Path, mods: int = 0, difficulty_adjust=None) -> Beatmap:
+def load_full(path: Path, mods: int = 0, difficulty_adjust=None,
+              speed_override: float | None = None) -> Beatmap:
     """parse_beatmap + parse_objects with mods applied (the render entry).
 
     ``difficulty_adjust`` (a mapping with keys ar/cs/od/hp/extended, e.g.
@@ -316,7 +317,13 @@ def load_full(path: Path, mods: int = 0, difficulty_adjust=None) -> Beatmap:
     Difficulty Adjust (DA) mod. Applied AFTER set_mods so DA is the base and
     DT/HT scale on top, and BEFORE parse_objects so CS-derived stacking uses
     the DA circle size. None/absent = plain beatmap difficulty (non-DA path is
-    byte-identical)."""
+    byte-identical).
+
+    ``speed_override`` (e.g. ReplayMeta.rate_override) is a lazer custom clock
+    rate from a DT/NC/HT/DC speed_change. Applied AFTER set_mods so it replaces
+    the bitmask's fixed 1.5/0.75 — the whole timeline + ar_real/od_real +
+    GetModifiedTime then follow the real rate. None = the bitmask rate
+    (byte-identical legacy path)."""
     path = Path(path)
     beatmap = parse_beatmap_file(path)
     if mods:
@@ -329,6 +336,8 @@ def load_full(path: Path, mods: int = 0, difficulty_adjust=None) -> Beatmap:
             hp=difficulty_adjust.get("hp"),
             extended=bool(difficulty_adjust.get("extended", False)),
         )
+    if speed_override is not None:
+        beatmap.diff.set_custom_speed(speed_override)
     parse_objects(path, beatmap)
     return beatmap
 

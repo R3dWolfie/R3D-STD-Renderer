@@ -28,6 +28,7 @@ from osrparse import Replay
 
 from .lazer_mods import (LAZER_GAME_VERSION,
                          difficulty_adjust_from_mods,
+                         rate_adjust_from_mods,
                          read_lazer_mods)
 
 # osrparse seeds the last frame with this sentinel time_delta (RNG seed).
@@ -144,6 +145,14 @@ class ReplayMeta:
     da_od: float | None = None
     da_hp: float | None = None
     da_extended_limits: bool = False
+    # Custom-rate mods (lazer DT/NC/HT/DC with a per-play ``speed_change`` that
+    # differs from the fixed legacy bitmask rate). rate_override is the
+    # effective clock rate (None = plain bitmask rate — DT 1.5 / HT 0.75 /
+    # nomod 1.0 — so legacy replays are byte-identical). rate_pitch mirrors
+    # ModNightcore/ModDaycore: NC/DC shift the audio pitch with the rate,
+    # DT/HT change tempo only. See lazer_mods.rate_adjust_from_mods.
+    rate_override: float | None = None
+    rate_pitch: bool = False
 
     @property
     def fail_time(self) -> float | None:
@@ -165,6 +174,13 @@ class ReplayMeta:
             return None
         return {"ar": self.da_ar, "cs": self.da_cs, "od": self.da_od,
                 "hp": self.da_hp, "extended": self.da_extended_limits}
+
+    @property
+    def has_rate_override(self) -> bool:
+        """True when the replay carries a custom clock rate (a lazer
+        DT/NC/HT/DC whose speed_change differs from the fixed bitmask rate).
+        The gate that keeps plain bitmask/nomod renders on the legacy path."""
+        return self.rate_override is not None
 
 
 def parse_replay(path: Path) -> tuple[list[StdFrame], ReplayMeta]:
@@ -233,6 +249,8 @@ def parse_replay(path: Path) -> tuple[list[StdFrame], ReplayMeta]:
     has_classic = False
     da_ar = da_cs = da_od = da_hp = None
     da_ext = False
+    rate_override: float | None = None
+    rate_pitch = False
     if gv >= LAZER_GAME_VERSION:
         mlist = read_lazer_mods(path)
         if mlist is not None:
@@ -244,6 +262,14 @@ def parse_replay(path: Path) -> tuple[list[StdFrame], ReplayMeta]:
             if da is not None:
                 da_ar, da_cs, da_od, da_hp = da.ar, da.cs, da.od, da.hp
                 da_ext = da.extended_limits
+            # Custom-rate DT/NC/HT/DC: surface an override ONLY when the
+            # speed_change differs from the fixed bitmask rate. A default-rate
+            # DT/NC/HT/DC (is_default) leaves rate_override None so it renders
+            # exactly like the legacy bitmask path (byte-identical).
+            ra = rate_adjust_from_mods(mlist)
+            if ra is not None and not ra.is_default:
+                rate_override = ra.speed
+                rate_pitch = ra.pitch
 
     meta = ReplayMeta(
         mode=int(r.mode.value if hasattr(r.mode, "value") else r.mode),
@@ -270,6 +296,8 @@ def parse_replay(path: Path) -> tuple[list[StdFrame], ReplayMeta]:
         da_od=da_od,
         da_hp=da_hp,
         da_extended_limits=da_ext,
+        rate_override=rate_override,
+        rate_pitch=rate_pitch,
     )
     return frames, meta
 
