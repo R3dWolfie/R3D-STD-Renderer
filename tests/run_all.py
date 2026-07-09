@@ -54,6 +54,9 @@ MODULES = [
     # RAMPS over the map — ramp parse + the wall<->map time warp + audio warp
     # + byte-identical non-ramp path (2026-07)
     "tests.test_wind_mods",
+    # position mods: Mirror (MR) + Random (RD), with the .NET Random port
+    # verified vs dotnet/runtime vectors (2026-07)
+    "tests.test_pos_mods",
 ]
 
 
