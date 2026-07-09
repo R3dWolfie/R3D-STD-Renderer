@@ -439,3 +439,32 @@ def test_reconcile_noop_when_counts_match():
     assert sim.sim_counts == (1, 0, 1, 0)
     assert sim.final_counts == (1, 0, 1, 0)
     assert sim.relabeled == 0
+
+
+# --- engine auto-selection from the .osr game_version (LegacyHitPolicy gate) -----------
+
+def test_engine_autoselected_from_game_version():
+    """The stable LegacyHitPolicy path vs lazer StartTimeOrderedHitPolicy is
+    picked from the replay's game_version (< LAZER_GAME_VERSION == stable).
+    Guards the version gate so an old .osr never silently runs the lazer
+    engine (and vice-versa)."""
+    from types import SimpleNamespace
+    bm = _map("256,192,1000,1,0,0:0:0:0:\n")
+    assert StdRuleset.LAZER_GAME_VERSION == 30_000_000
+    # a real stable .osr (e.g. 20191107) → stable
+    stable = StdRuleset(bm, [], SimpleNamespace(game_version=20191107))
+    assert stable.lazer is False
+    # just under the threshold → still stable
+    assert StdRuleset(bm, [], SimpleNamespace(game_version=29999999)).lazer is False
+    # a lazer .osr (30000016) → lazer
+    lazer = StdRuleset(bm, [], SimpleNamespace(game_version=30000016))
+    assert lazer.lazer is True
+    # at the threshold → lazer
+    assert StdRuleset(bm, [], SimpleNamespace(game_version=30_000_000)).lazer is True
+    # no meta at all → default stable
+    assert StdRuleset(bm, []).lazer is False
+    # explicit override always wins over the version heuristic
+    assert StdRuleset(bm, [], SimpleNamespace(game_version=20191107),
+                      lazer=True).lazer is True
+    assert StdRuleset(bm, [], SimpleNamespace(game_version=30000016),
+                      lazer=False).lazer is False
