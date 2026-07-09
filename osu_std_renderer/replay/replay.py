@@ -26,6 +26,8 @@ from pathlib import Path
 
 from osrparse import Replay
 
+from .lazer_mods import LAZER_GAME_VERSION, read_lazer_mod_acronyms
+
 # osrparse seeds the last frame with this sentinel time_delta (RNG seed).
 _SEED_DELTA = -12345
 
@@ -126,6 +128,11 @@ class ReplayMeta:
     game_version: int = 0    # <30000000 = osu!stable, else lazer
     death_ms: int | None = None
     played_at: str = ""      # .osr timestamp → "Played on <date>" (results)
+    # lazer mod acronyms read from the .osr's appended ScoreInfo blob
+    # (empty for stable replays / when the blob is absent);
+    # has_classic_mod = the Classic mod ("CL") is in that list.
+    lazer_mods: tuple[str, ...] = ()
+    has_classic_mod: bool = False
 
     @property
     def fail_time(self) -> float | None:
@@ -191,6 +198,18 @@ def parse_replay(path: Path) -> tuple[list[StdFrame], ReplayMeta]:
         except Exception:  # noqa: BLE001 — odd/naive datetime → skip
             played_at = str(ts)[:10]
 
+    # lazer Classic-mod detection: read the mod-acronym list from the
+    # .osr's appended ScoreInfo blob (lazer replays only — see
+    # lazer_mods.py; the legacy `mods` bitmask can't encode CL).
+    gv = int(getattr(r, "game_version", 0) or 0)
+    lazer_mods: tuple[str, ...] = ()
+    has_classic = False
+    if gv >= LAZER_GAME_VERSION:
+        acs = read_lazer_mod_acronyms(path)
+        if acs is not None:
+            lazer_mods = tuple(acs)
+            has_classic = any(a.upper() == "CL" for a in acs)
+
     meta = ReplayMeta(
         mode=int(r.mode.value if hasattr(r.mode, "value") else r.mode),
         beatmap_md5=str(getattr(r, "beatmap_hash", "") or ""),
@@ -206,9 +225,11 @@ def parse_replay(path: Path) -> tuple[list[StdFrame], ReplayMeta]:
         count_miss=int(r.count_miss),
         accuracy=round(acc * 100, 2),
         grade=_grade(r),
-        game_version=int(getattr(r, "game_version", 0) or 0),
+        game_version=gv,
         death_ms=death_ms,
         played_at=played_at,
+        lazer_mods=lazer_mods,
+        has_classic_mod=has_classic,
     )
     return frames, meta
 

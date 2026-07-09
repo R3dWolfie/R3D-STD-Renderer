@@ -139,6 +139,10 @@ def collect_hitsound_events(beatmap, sim, *, layered: bool = True,
     timings = beatmap.timings
     oneshots: list[OneShot] = []
     loops: list[Loop] = []
+    # OsuModClassic.AlwaysPlayTailSample (Classic mod): a slider's tail
+    # sample plays even when the tail wasn't tracked/hit
+    # (DrawableSliderTail.SamplePlaysOnlyOnHit = false).
+    always_play_tail = getattr(sim, "classic", False)
 
     def emit_hit(t: float, bits: int, extras, edge_set) -> None:
         point = timings.get_point_at(t)
@@ -193,13 +197,17 @@ def collect_hitsound_events(beatmap, sim, *, layered: bool = True,
             for p in v.parts[1:]:
                 if p.kind == "repeat":
                     rep_i += 1
+                if p.kind == "tail":
+                    # AlwaysPlayTailSample: emit even on a missed tail
+                    # under the Classic mod; otherwise only on a hit.
+                    if p.hit or always_play_tail:
+                        bits, eset = edge(n_edges - 1)
+                        emit_hit(p.time, bits, extras, eset)
+                    continue
                 if not p.hit:
-                    continue                         # NO sound on miss
+                    continue                         # NO sound on a missed tick/repeat
                 if p.kind == "repeat":
                     bits, eset = edge(rep_i)
-                    emit_hit(p.time, bits, extras, eset)
-                elif p.kind == "tail":
-                    bits, eset = edge(n_edges - 1)
                     emit_hit(p.time, bits, extras, eset)
                 elif p.kind == "tick":
                     point = timings.get_point_at(p.time)

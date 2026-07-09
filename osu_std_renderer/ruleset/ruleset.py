@@ -305,6 +305,7 @@ class SimResult:
     shakes: int
     spinner_count: int
     lazer: bool = False
+    classic: bool = False           # OsuModClassic (CL) forced the stable path
     detail_lines: list[str] = field(default_factory=list)
     # part-level combo CHANGES (time, combo) — every increment (circles,
     # spinner ends, slider heads/ticks/repeats/tails) and every reset, so
@@ -318,6 +319,8 @@ class SimResult:
     def report_lines(self) -> list[str]:
         c = "/".join(str(v) for v in self.sim_counts)
         engine = "lazer" if self.lazer else "stable"
+        if self.classic:
+            engine += " (Classic mod)"
         lines = []
         if self.real_counts is not None:
             r = "/".join(str(v) for v in self.real_counts)
@@ -385,10 +388,21 @@ class StdRuleset:
         self.hw = OsuHitWindows(self.diff.od)
         self.radius = self.diff.get_radius()
         self.shake_times: list[float] = []
+        # Classic mod (CL): a lazer replay explicitly played with the
+        # Classic mod must be judged with STABLE semantics. OsuModClassic
+        # (osu.Game.Rulesets.Osu/Mods/OsuModClassic.cs) toggles
+        # ClassicNoteLock (LegacyHitPolicy) + NoSliderHeadAccuracy
+        # (classic aggregate slider judging) on by default — both of
+        # which this engine selects via its stable (not-lazer) path.
+        # Detected from the .osr ScoreInfo mod list (meta.has_classic_mod).
+        self.classic = bool(meta is not None
+                            and getattr(meta, "has_classic_mod", False))
         if lazer is None:
             lazer = bool(meta is not None
                          and getattr(meta, "game_version", 0)
                          >= self.LAZER_GAME_VERSION)
+            if self.classic:
+                lazer = False   # CL overrides the game_version auto-detect
         self.lazer = lazer
 
     # ---- public API ---------------------------------------------------------------
@@ -419,6 +433,7 @@ class StdRuleset:
             real_max_combo=real_max_combo, shakes=len(self.shake_times),
             spinner_count=sum(1 for s in sims if s.kind == "spinner"),
             lazer=self.lazer,
+            classic=self.classic,
             detail_lines=self._detail_lines(sims),
             combo_timeline=timeline,
         )

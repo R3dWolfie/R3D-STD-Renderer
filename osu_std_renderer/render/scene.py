@@ -454,10 +454,23 @@ def number_alpha(t: float, start_time: float, preempt: float,
 
 
 def miss_fade_alpha(t: float, start_time: float, preempt: float,
-                    time_fade_in: float, deadline: float) -> float:
+                    time_fade_in: float, deadline: float,
+                    classic: bool = False, ok: float | None = None) -> float:
     """Missed circle/slider-head: normal fade-in, full until the miss
     window closes, then a quick fade out (NO explosion, no scale). Stable's
-    brief red tint is skipped (plain fade) — noted in the module docstring."""
+    brief red tint is skipped (plain fade) — noted in the module docstring.
+
+    OsuModClassic.FadeHitCircleEarly (Classic mod): the circle instead
+    fades out INTO the miss — starting at start+ok (the 100 window) and
+    reaching zero at start+meh (= deadline) — rather than holding full
+    until the window close and quick-fading after it. Ports
+    applyEarlyFading's Delay(okWindow).FadeOut(mehWindow - okWindow)."""
+    if classic and ok is not None:
+        fade_start = start_time + ok
+        if t <= fade_start:
+            return fade_in_alpha(t, start_time, preempt, time_fade_in)
+        span = max(deadline - fade_start, 1e-6)
+        return _clamp01(1.0 - (t - fade_start) / span)
     if t <= deadline:
         return fade_in_alpha(t, start_time, preempt, time_fade_in)
     return _clamp01(1.0 - (t - deadline) / MISS_FADE_OUT)
@@ -1717,7 +1730,10 @@ class StdScene:
         x, y = self.cam.to_screen(*pos_osu)
         hit_for_flash = None
         if v is not None and v.hit_time is None:      # head missed
-            alpha = miss_fade_alpha(t, start, preempt, fade_in, v.deadline)
+            classic = bool(getattr(self.judgments, "classic", False))
+            alpha = miss_fade_alpha(t, start, preempt, fade_in, v.deadline,
+                                    classic=classic,
+                                    ok=(self.diff.hit100 if classic else None))
             scale = 1.0
             na = alpha
         else:
