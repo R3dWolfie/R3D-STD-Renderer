@@ -169,6 +169,30 @@ class _Sim:
         self.verdicts = {i: v for i, v in enumerate(verdicts)}
 
 
+def test_timing_histogram_defers_slider_tick_tint():
+    # Fix 2 — documented + enforced deferral. Our slider PartOutcome carries
+    # NO timing-delta field (std slider ticks/ends have no timing window), so
+    # per-tick/per-end offsets simply do not exist to bin. This matches
+    # lazer's HitEventTimingDistributionGraph, which filters
+    #   HitObject.HitWindows != HitWindows.Empty
+    #     && Result.IsBasic() && Result.IsHit()
+    # and thus EXCLUDES slider ticks/repeats/tails from the histogram
+    # entirely (and OsuColour.ForHitResult paints them Blue, not green, where
+    # shown elsewhere). Deferring the tint is the faithful port, not a hidden
+    # data gap.
+    from dataclasses import fields
+    from osu_std_renderer.ruleset.ruleset import PartOutcome
+    part_fields = {f.name for f in fields(PartOutcome)}
+    assert part_fields == {"time", "kind", "pos", "hit"}
+    assert "delta" not in part_fields and "offset" not in part_fields
+    # slider_stats yields only aggregate hit/total counts — no deltas
+    sim = _Sim([_Verdict([_Part("head", True), _Part("tick", True),
+                          _Part("tail", True)])])
+    result = slider_stats(sim)
+    assert result == (1, 1, 1, 1)          # (tick_hit,tick_total,end_hit,end_total)
+    assert all(isinstance(v, int) for v in result)
+
+
 def test_slider_stats_counts_ticks_and_ends():
     sim = _Sim([
         _Verdict([_Part("head", True), _Part("tick", True),

@@ -39,10 +39,23 @@ and the ring base are baked once; the accuracy arc and the rolling score
 re-bake only while they change (the HUD hp-bar re-upload pattern).
 
 HONEST DEVIATIONS (documented, owner-visible):
-  * no avatar source (osu!API is off-limits) → a procedural initial chip;
-  * the timing distribution tints by hit-error window (300/100/50); we
-    hold no per-tick slider deltas, so slider-tick/end events are not
-    separately tinted (lazer's green accents) — noted, not faked;
+  * no avatar source (osu!API is off-limits) → a procedural avatar keyed on
+    the username (hash→hue + centred initials + ring);
+  * the timing distribution tints by hit-error window (300/100/50), matching
+    lazer's HitEventTimingDistributionGraph — which stacks each bin's basic
+    judgments coloured via OsuColour.ForHitResult (Great→Blue 66ccff,
+    Ok→Green 88b300, Meh→Yellow ffcc22). It does NOT separately tint slider
+    ticks/ends: that graph FILTERS its events with
+        HitObject.HitWindows != HitWindows.Empty
+        && Result.IsBasic() && Result.IsHit()
+    which excludes slider ticks/repeats/tails (empty hit windows, non-basic
+    results) outright — and where those results DO appear elsewhere
+    ForHitResult paints them Blue (66ccff, same as Great), not green. In the
+    std ruleset slider ticks/ends carry no timing window, so our PartOutcome
+    holds no per-tick/per-end delta to bin. The slider-tick/end tint is thus
+    DEFERRED as the faithful choice (adding it would be both un-portable and
+    un-lazer) — not a data gap we papered over. (osu.Game/Screens/Ranking/
+    Statistics/HitEventTimingDistributionGraph.cs; OsuColour.ForHitResult.)
   * the accuracy % / max-combo / hit-result cells appear with the panel
     (only the score rolls) — the prominent RollingCounter, kept cheap.
 """
