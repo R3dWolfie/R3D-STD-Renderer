@@ -158,6 +158,11 @@ def build_parser() -> argparse.ArgumentParser:
                     help="§4.10 FadeOutTime: video+audio fade to black "
                          "after the last object (wall seconds; default 1.5)")
     ap.add_argument("--results", action=BA, default=True)
+    ap.add_argument("--no-fail-animation", dest="no_fail_animation",
+                    action="store_true", default=False,
+                    help="debug escape hatch: ignore the .osr's death point "
+                         "and render a FAILED replay as a pass (no fall/red "
+                         "sequence, the replay's own grade instead of F)")
     ap.add_argument("--results-style", choices=("lazer", "r3d"),
                     default="lazer",
                     help="outro: 'lazer' = the ported osu!(lazer) ranking "
@@ -955,12 +960,26 @@ def main(argv: list[str] | None = None) -> int:
 
     # judgment simulation (pure CPU — runs in --parse-only too, so the
     # sim-vs-real honesty metric is checkable without GL)
+    # a FAILED replay (life-bar hit 0, no fail-immune mod) renders osu's fail
+    # sequence and its counts are the partial tally AT death — so the ruleset
+    # must NOT reconcile the whole-map sim to the .osr's (partial) totals.
+    failing = (meta is not None and meta.fail_time is not None
+               and not args.no_fail_animation)
     judgments = None
     if frames and meta is not None and meta.mode == 0:
         from .ruleset import StdRuleset
-        judgments = StdRuleset(beatmap, frames, meta).run()
+        judgments = StdRuleset(beatmap, frames, meta,
+                               reconcile=not failing).run()
         for line in judgments.report_lines():
             print(line, file=sys.stderr)
+    if meta is not None and meta.fail_time is not None:
+        if failing:
+            print(f"fail:   life-bar hit 0 at {meta.fail_time / 1000.0:.2f}s "
+                  f"— rendering osu fail sequence (grade F)", file=sys.stderr)
+        else:
+            print(f"fail:   life-bar hit 0 at {meta.fail_time / 1000.0:.2f}s "
+                  f"but --no-fail-animation set — rendering as a pass",
+                  file=sys.stderr)
 
     if args.parse_only:
         return 0
