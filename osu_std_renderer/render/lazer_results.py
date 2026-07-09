@@ -9,16 +9,18 @@ every texture is procedurally baked in-repo, fonts = the repo's DejaVu):
   osu.Game/Screens/Ranking/Expanded/ExpandedPanelMiddleContent.cs
   osu.Game/Screens/Ranking/Expanded/Accuracy/AccuracyCircle.cs
   osu.Game/Screens/Ranking/Expanded/Accuracy/GradedCircles.cs
-      — the graded ring: OsuColour.ForRank bands (D ff5a5a, C ff8e5d,
-        B e3b130, A 88da20, S 02b5c3, X/SS de31ae) at the score-processor
-        accuracy thresholds, with the GRADE_SPACING_PERCENTAGE (2/360)
-        boundary notches; the achieved-accuracy arc SWEEPS in over
-        ACCURACY_TRANSFORM_DURATION painted THROUGH those rank colours
-        (each band's slice takes its ForRank stop); the virtual-SS notch
-        (a non-SS play caps its arc at 1 − VIRTUAL_SS_PERCENTAGE so only a
-        true SS closes the ring, and the SS/X band owns the 0.99→1.0
-        slice); and the rank badge (grade letter) punching in at the end of
-        the sweep.
+  osu.Game/Screens/Ranking/Expanded/Accuracy/RankBadge.cs
+      — ported 1:1 to the reference: the achieved-accuracy arc is the thick
+        outer "Accuracy circle", a FIXED vertical CYAN→GREEN gradient
+        (#7CF6FF→#BAFFA9, NOT rank-coloured), sweeping 0→acc over
+        ACCURACY_TRANSFORM_DURATION with a light tip dash; behind/inside it
+        the THIN GradedCircles rank ring shows the OsuColour.ForRank bands
+        (D ff5a5a, C ff8e5d, B e3b130, A 88da20, S 02b5c3, X/SS de31ae) with
+        the GRADE_SPACING_PERCENTAGE (2/360) notches and the SS/X band owning
+        the 0.99→1.0 virtual-SS slice; six RankBadge pills sit OUTSIDE at
+        their Interpolation.Lerp visual positions (rank_badge_positions), so
+        they spread D→C→B→A→S→SS around the ring without piling up; the white
+        centre rank letter punches in at the end of the sweep.
   osu.Game/Screens/Ranking/Expanded/StarRatingDisplay + AccuracyStatistic
   osu.Game/Screens/Ranking/Statistics/PerformanceBreakdown.cs   (bars)
   osu.Game.Rulesets.Osu/Statistics/{HitEventTimingDistribution,
@@ -138,6 +140,31 @@ FOR_RANK["SH"] = FOR_RANK["S"]
 # each band by half of this on each side, opening the boundary notches.
 GRADE_SPACING_PERCENTAGE = 2.0 / 360.0
 
+# AccuracyCircle "Accuracy circle": the achieved-accuracy arc is a FIXED
+# vertical gradient (NOT rank-coloured) — Color4Extensions.FromHex #7CF6FF
+# (top) → #BAFFA9 (bottom). The rank colours live on the thin inner
+# GradedCircles ring behind it.
+ARC_GRAD_TOP = _hex("7CF6FF")
+ARC_GRAD_BOT = _hex("BAFFA9")
+
+# accuracy-circle geometry as a fraction of the (square) bake canvas S.
+# Outer thick achieved arc, thin inner graded rank ring, badge pills outside.
+ACC_ARC_R = 0.350         # achieved-arc centreline radius
+ACC_ARC_W = 0.066         # achieved-arc thickness
+ACC_GRAD_R = 0.293        # inner graded-ring centreline (≈0.8× → sits inside)
+ACC_GRAD_W = 0.020        # inner graded-ring thickness (thin)
+ACC_BADGE_R = 0.435       # badge-pill centre radius (outside the arc)
+ACC_BADGE_W = 0.088       # badge-pill width
+ACC_BADGE_H = 0.050       # badge-pill height
+
+# OsuColour.ForStarDifficulty gradient stops (star, hex) — the star-rating
+# pill background colour. (osu.Game/Graphics/OsuColour.cs ForStarDifficulty.)
+STAR_SPECTRUM = [
+    (0.1, "aaaaaa"), (0.1, "4290fb"), (1.25, "4fc0ff"), (2.0, "4fffd5"),
+    (2.5, "7cff4f"), (3.3, "f6f05c"), (4.2, "ff8068"), (4.9, "ff3c71"),
+    (5.8, "6563de"), (6.7, "18158e"), (7.7, "000000"), (9.0, "000000"),
+]
+
 
 # --- pure helpers (unit-tested) -----------------------------------------------------
 
@@ -196,6 +223,48 @@ def arc_color_at(acc: float) -> tuple[float, float, float]:
         if lo <= acc < hi:
             return FOR_RANK[g]
     return FOR_RANK["SS"]
+
+
+def rank_badge_positions() -> list[tuple[float, str]]:
+    """[(visual_acc, grade)] — the badge placement from lazer AccuracyCircle.cs.
+    Each RankBadge sits at its band's Interpolation.Lerp VISUAL position (NOT
+    the band boundary), so the six badges spread cleanly around the ring
+    instead of piling up at the thresholds:
+
+        RankBadge(accuracyD, Lerp(accuracyD, accuracyC, 0.5),  D)
+        RankBadge(accuracyC, Lerp(accuracyC, accuracyB, 0.5),  C)
+        RankBadge(accuracyB, Lerp(accuracyB, accuracyA, 0.5),  B)
+        RankBadge(accuracyA, Lerp(accuracyA, accuracyS, 0.25), A)
+        RankBadge(accuracyS, Lerp(accuracyS, accuracyX−VSS, 0.25), S)
+        RankBadge(accuracyX, accuracyX, X/SS)
+
+    (accuracyD 0.0, C 0.70, B 0.80, A 0.90, S 0.95, X 1.0.)"""
+    ss_lo = 1.0 - VIRTUAL_SS_PERCENTAGE            # accuracyX − VIRTUAL_SS
+    return [
+        (_lerp(0.00, 0.70, 0.5), "D"),             # 0.35
+        (_lerp(0.70, 0.80, 0.5), "C"),             # 0.75
+        (_lerp(0.80, 0.90, 0.5), "B"),             # 0.85
+        (_lerp(0.90, 0.95, 0.25), "A"),            # 0.9125
+        (_lerp(0.95, ss_lo, 0.25), "S"),           # 0.96
+        (1.00, "SS"),                              # accuracyX
+    ]
+
+
+def for_star_difficulty(stars: float) -> tuple[float, float, float]:
+    """The star-rating pill colour — a linear sample of OsuColour's
+    ForStarDifficulty gradient (STAR_SPECTRUM)."""
+    s = max(float(stars), 0.0)
+    if s <= STAR_SPECTRUM[0][0]:
+        return _hex(STAR_SPECTRUM[0][1])
+    for i in range(1, len(STAR_SPECTRUM)):
+        s0, h0 = STAR_SPECTRUM[i - 1]
+        s1, h1 = STAR_SPECTRUM[i]
+        if s <= s1:
+            t = 0.0 if s1 == s0 else (s - s0) / (s1 - s0)
+            c0, c1 = _hex(h0), _hex(h1)
+            return (_lerp(c0[0], c1[0], t), _lerp(c0[1], c1[1], t),
+                    _lerp(c0[2], c1[2], t))
+    return _hex(STAR_SPECTRUM[-1][1])
 
 
 def target_arc_value(acc_frac: float, grade: str) -> float:
@@ -402,102 +471,140 @@ def _hsv(h: float, s: float, v: float) -> tuple[float, float, float]:
     return colorsys.hsv_to_rgb(h, s, v)
 
 
+def bake_star(px: int, color):
+    """A filled 5-point star sprite (the repo font has no ★ glyph, so the
+    star-rating icon is drawn, not typed). Supersampled for clean edges."""
+    S = max(int(px), 8)
+    ss = 4
+    big = Image.new("RGBA", (S * ss, S * ss), (0, 0, 0, 0))
+    d = ImageDraw.Draw(big)
+    cx = cy = S * ss / 2.0
+    r_out = S * ss * 0.5
+    r_in = r_out * 0.42
+    pts = []
+    for i in range(10):
+        r = r_out if i % 2 == 0 else r_in
+        ang = math.radians(-90 + i * 36)          # first point straight up
+        pts.append((cx + r * math.cos(ang), cy + r * math.sin(ang)))
+    col = tuple(int(round(c * 255)) for c in color)
+    d.polygon(pts, fill=(*col, 255))
+    big = big.resize((S, S), Image.LANCZOS)
+    return _to_rgba(big)
+
+
 def bake_accuracy_base(px: int):
-    """The AccuracyCircle background: dark track ring, the ForRank graded
-    bands (dimmed — GradedCircles), the boundary notches (GRADE_SPACING),
-    and a rank-letter badge at each band. Baked once (accuracy-independent).
-    Canvas is padded so the badges fit outside the ring."""
-    import numpy as np
+    """The AccuracyCircle background, ported 1:1 (osu.Game/Screens/Ranking/
+    Expanded/Accuracy/{AccuracyCircle,GradedCircles,RankBadge}.cs):
+
+      * a dim gray "Background circle" (full ring) behind the achieved arc;
+      * the THIN inner GradedCircles rank ring — the ForRank bands
+        (D→C→B→A→S→X) with the GRADE_SPACING notches, sitting INSIDE the
+        achieved arc (≈0.8× radius);
+      * the six RankBadge pills OUTSIDE the ring, each at its band's
+        Interpolation.Lerp visual position (rank_badge_positions) so they
+        spread cleanly (D lower-right … S/SS top).
+
+    Baked once (accuracy-independent). The bright cyan→green achieved arc is
+    a separate sprite (bake_accuracy_arc) drawn over this."""
     S = max(int(px), 64)
     img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
     cx = cy = S / 2.0
-    outer_r = S * 0.40
-    ring_w = int(round(S * 0.085))
-    bbox = [cx - outer_r, cy - outer_r, cx + outer_r, cy + outer_r]
     half_gap = GRADE_SPACING_PERCENTAGE / 2.0
-    # dark track
-    d.arc(bbox, 0, 360, fill=(30, 32, 40, 255), width=ring_w)
-    # graded bands (dimmed — the bright achieved arc paints over them). Each
-    # band is inset by half the grade spacing on each end → the notch gaps.
+    # dim gray "Background circle" (OsuColour.Gray(47), alpha 0.5), full ring
+    R = ACC_ARC_R * S
+    W = max(int(round(ACC_ARC_W * S)), 2)
+    d.arc([cx - R, cy - R, cx + R, cy + R], 0, 360, fill=(47, 47, 47, 128),
+          width=W)
+    # thin inner GradedCircles rank ring (ForRank bands + boundary notches)
+    Rg = ACC_GRAD_R * S
+    Wg = max(int(round(ACC_GRAD_W * S)), 2)
+    gbox = [cx - Rg, cy - Rg, cx + Rg, cy + Rg]
     for lo, hi, g in rank_ring_bands():
-        col = tuple(int(round(c * 200)) for c in FOR_RANK[g])
+        col = tuple(int(round(c * 255)) for c in FOR_RANK[g])
         a0 = acc_to_angle_deg(lo + half_gap)
         a1 = acc_to_angle_deg(hi - half_gap)
         if a1 > a0:
-            d.arc(bbox, a0, a1, fill=(*col, 150), width=ring_w)
-    # rank badges at each band's lower bound (ForRank-coloured)
-    badge_r = S * 0.465
-    for lo, _hi, g in rank_ring_bands():
-        ang = math.radians(acc_to_angle_deg(lo))
-        bx = cx + badge_r * math.cos(ang)
-        by = cy + badge_r * math.sin(ang)
-        _badge(img, bx, by, S * 0.052, g)
+            d.arc(gbox, a0, a1, fill=(*col, 255), width=Wg)
+    # RankBadge pills at their Lerp visual positions, outside the ring
+    for vis, g in rank_badge_positions():
+        ang = math.radians(acc_to_angle_deg(vis))
+        bx = cx + ACC_BADGE_R * S * math.cos(ang)
+        by = cy + ACC_BADGE_R * S * math.sin(ang)
+        _badge_pill(img, bx, by, S, g)
     return _to_rgba(img)
 
 
-def _notch(d, cx, cy, outer_r, ring_w, ang_deg, color) -> None:
-    ang = math.radians(ang_deg)
-    r0 = outer_r - ring_w
-    r1 = outer_r + 1
-    d.line([(cx + r0 * math.cos(ang), cy + r0 * math.sin(ang)),
-            (cx + r1 * math.cos(ang), cy + r1 * math.sin(ang))],
-           fill=color, width=max(int(ring_w * 0.10), 2))
-
-
-def _badge(img, bx, by, r, grade) -> None:
+def _badge_pill(img, cx, cy, S, grade) -> None:
+    """One RankBadge: a small rounded pill in the rank's ForRank colour with
+    the rank letter, plus a soft drop shadow (the DrawableRank look)."""
     d = ImageDraw.Draw(img)
+    w = ACC_BADGE_W * S
+    h = ACC_BADGE_H * S
     col = tuple(int(round(c * 255)) for c in FOR_RANK.get(grade,
                                                           (0.8, 0.8, 0.85)))
-    d.ellipse([bx - r, by - r, bx + r, by + r], fill=(*col, 235))
-    label = "SS" if grade == "SS" else grade
-    font = _load_font(int(r * (1.0 if len(label) == 1 else 0.72)))
+    sh = max(h * 0.10, 1.0)
+    d.rounded_rectangle([cx - w / 2, cy - h / 2 + sh, cx + w / 2,
+                         cy + h / 2 + sh], radius=h / 2, fill=(0, 0, 0, 70))
+    d.rounded_rectangle([cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2],
+                        radius=h / 2, fill=(*col, 255))
+    label = "SS" if grade in ("SS", "X", "XH") else grade
+    font = _load_font(max(int(h * (0.72 if len(label) == 1 else 0.56)), 6))
     try:
         x0, y0, x1, y1 = font.getbbox(label)
     except AttributeError:
         x1, y1 = font.getsize(label); x0 = y0 = 0    # type: ignore
-    d.text((bx - (x1 - x0) / 2 - x0, by - (y1 - y0) / 2 - y0), label,
-           font=font, fill=(20, 20, 26, 255))
+    d.text((cx - (x1 - x0) / 2 - x0, cy - (y1 - y0) / 2 - y0), label,
+           font=font, fill=(255, 255, 255, 245))
+
+
+_ARC_GRAD_CACHE: dict = {}
+
+
+def _arc_gradient_rgb(S: int):
+    """Cached S×S vertical cyan→green gradient RGB (progress-independent) so
+    the per-frame arc re-bake only re-masks."""
+    g = _ARC_GRAD_CACHE.get(S)
+    if g is None:
+        import numpy as np
+        ys = np.linspace(0.0, 1.0, S).reshape(S, 1)
+        top = np.array(ARC_GRAD_TOP)
+        bot = np.array(ARC_GRAD_BOT)
+        col = top + (bot - top) * ys                 # (S,3) per row
+        rgb = np.repeat(col[:, None, :], S, axis=1)  # (S,S,3)
+        g = np.clip(np.round(rgb * 255), 0, 255).astype("u1")
+        _ARC_GRAD_CACHE[S] = g
+    return g
 
 
 def bake_accuracy_arc(px: int, progress_acc: float, color=None):
-    """The bright achieved-accuracy arc (0 → progress_acc), painted through
-    lazer's rank colours: each band's slice takes its ForRank stop
-    (AccuracyCircle / GradedCircles), with the GRADE_SPACING boundary notches
-    between fully-filled bands and a rounded white cap dot at the sweeping
-    tip. `color` is ignored (kept for signature compat). Re-baked only while
-    sweeping."""
+    """The achieved-accuracy arc (0 → progress_acc) — lazer's "Accuracy
+    circle": a FIXED vertical cyan→green gradient (#7CF6FF→#BAFFA9), NOT rank
+    colours. A thin light dash marks the sweeping tip. `color` ignored
+    (signature compat). Re-baked per progress bucket while sweeping."""
     import numpy as np
     S = max(int(px), 64)
-    img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
     cx = cy = S / 2.0
-    outer_r = S * 0.40
-    ring_w = int(round(S * 0.085))
-    bbox = [cx - outer_r, cy - outer_r, cx + outer_r, cy + outer_r]
-    half_gap = GRADE_SPACING_PERCENTAGE / 2.0
+    R = ACC_ARC_R * S
+    W = max(int(round(ACC_ARC_W * S)), 2)
+    mask = Image.new("L", (S, S), 0)
     if progress_acc > 0.0005:
-        for lo, hi, g in rank_ring_bands():
-            if progress_acc <= lo:
-                break
-            filled_hi = min(hi, progress_acc)
-            seg_lo = lo + (half_gap if lo > 0.0 else 0.0)
-            # notch before the NEXT band only where this band is fully filled;
-            # the growing tip keeps no gap
-            seg_hi = filled_hi - (half_gap if filled_hi >= hi - 1e-9 else 0.0)
-            if seg_hi <= seg_lo:
-                continue
-            col = tuple(int(round(c * 255)) for c in FOR_RANK[g])
-            d.arc(bbox, acc_to_angle_deg(seg_lo), acc_to_angle_deg(seg_hi),
-                  fill=(*col, 255), width=ring_w)
-        # bright cap dot at the sweeping tip
+        ImageDraw.Draw(mask).arc(
+            [cx - R, cy - R, cx + R, cy + R], acc_to_angle_deg(0.0),
+            acc_to_angle_deg(progress_acc), fill=255, width=W)
+    rgb = _arc_gradient_rgb(S)
+    out = np.dstack([rgb, np.asarray(mask, dtype="u1")]).copy()
+    if progress_acc > 0.0005:
+        img = Image.fromarray(out, "RGBA")
+        d = ImageDraw.Draw(img)
         ang = math.radians(acc_to_angle_deg(progress_acc))
-        tx = cx + outer_r * math.cos(ang)
-        ty = cy + outer_r * math.sin(ang)
-        cap = ring_w * 0.62
-        d.ellipse([tx - cap, ty - cap, tx + cap, ty + cap],
-                  fill=(255, 255, 255, 255))
-    return _to_rgba(img)
+        r0 = R - W / 2.0 - 1
+        r1 = R + W / 2.0 + 1
+        d.line([(cx + r0 * math.cos(ang), cy + r0 * math.sin(ang)),
+                (cx + r1 * math.cos(ang), cy + r1 * math.sin(ang))],
+               fill=(255, 255, 255, 235), width=max(int(W * 0.16), 2))
+        out = _to_rgba(img)
+    return out
 
 
 def bake_heatmap(px: int, points, ring_frac: float = 0.62):
@@ -600,6 +707,41 @@ class LazerResultsScreen:
                                self._font_loader)
         return (self._put(rgba), float(w), float(h))
 
+    def _bake_star_pill(self):
+        """The StarRatingDisplay pill: a rounded ForStarDifficulty-coloured
+        pill with the procedural star icon + the star number. Text/star flip
+        to dark on light backgrounds. Returns (key, w, h)."""
+        stars = self.d.stars
+        txt = f"{stars:.2f}" if stars is not None else "--"
+        bg = for_star_difficulty(stars if stars is not None else 0.0)
+        lum = 0.299 * bg[0] + 0.587 * bg[1] + 0.114 * bg[2]
+        fg = (0.06, 0.06, 0.09) if lum > 0.6 else (1.0, 1.0, 1.0)
+        fpx = max(int(22 * self.k), 8)
+        font = self._font_loader(fpx)
+        try:
+            x0, y0, x1, y1 = font.getbbox(txt)
+        except AttributeError:
+            x1, y1 = font.getsize(txt); x0 = y0 = 0     # type: ignore
+        tw, th = x1 - x0, y1 - y0
+        star_sz = int(fpx * 0.92)
+        padx = int(fpx * 0.5)
+        pady = int(fpx * 0.32)
+        gap = int(fpx * 0.26)
+        H = max(th, star_sz) + 2 * pady
+        W = padx + star_sz + gap + tw + padx
+        img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        dd = ImageDraw.Draw(img)
+        bgc = tuple(int(round(c * 255)) for c in bg)
+        dd.rounded_rectangle([0, 0, W - 1, H - 1], radius=H // 2,
+                             fill=(*bgc, 255))
+        star_rgba = bake_star(star_sz, fg)
+        img.alpha_composite(Image.fromarray(star_rgba, "RGBA"),
+                            (padx, (H - star_sz) // 2))
+        fgc = tuple(int(round(c * 255)) for c in fg)
+        dd.text((padx + star_sz + gap - x0, (H - th) // 2 - y0), txt,
+                font=font, fill=(*fgc, 255))
+        return (self._put(_to_rgba(img)), float(W), float(H))
+
     def _bake_static(self) -> None:
         k = self.k
         d = self.d
@@ -624,14 +766,14 @@ class LazerResultsScreen:
         self.ACC_DISP = 380.0                 # canvas display size (virtual)
         cbake = int(self.ACC_DISP * k)
         self.acc_base_key = self._put(bake_accuracy_base(cbake))
-        self.grade_letter = self._text(d.grade, 150, self.grade_rgb)
+        # centre rank letter: white, like lazer's DrawableRank on the circle
+        self.grade_letter = self._text(d.grade, 150, (0.98, 0.99, 1.0))
         self.target_arc = target_arc_value(self.acc_frac, d.grade)
         # score baked lazily (rolls)
         self.score_row = self._score_text(0)
-        # star / diff / creator row
-        star_txt = (f"★ {d.stars:.2f}" if d.stars is not None
-                    else "★ --")
-        self.star_row = self._text(star_txt, 26, (1.0, 0.82, 0.35))
+        # star-rating pill (procedural star icon — the font has no ★ glyph),
+        # then diff name + creator
+        self.star_pill = self._bake_star_pill()
         self.diff_row = self._text(_clip(d.diff_name, 28), 26, (0.9, 0.92, 1.0))
         self.creator_row = self._text(f"mapped by {_clip(d.creator, 22)}", 22,
                                       (0.65, 0.68, 0.78))
@@ -838,14 +980,14 @@ class LazerResultsScreen:
 
     def _draw_star_row(self, out, cx, top_y, a) -> float:
         k = self.k
-        sk, sw, sh = self.star_row
+        sk, sw, sh = self.star_pill
         dk, dw, dh = self.diff_row
         ck, cw, ch = self.creator_row
         gap = 14 * k
         total = sw + gap + dw + gap + cw
         h = max(sh, dh, ch)
         x = cx - total / 2.0
-        for key, w, hh in (self.star_row, self.diff_row, self.creator_row):
+        for key, w, hh in (self.star_pill, self.diff_row, self.creator_row):
             out.append(Sprite(x + w / 2.0, top_y + h / 2.0, w, hh, key,
                               (1, 1, 1, a)))
             x += w + gap

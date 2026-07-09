@@ -14,9 +14,9 @@ import tempfile
 from osu_std_renderer.render.lazer_results import (
     FOR_RANK, GRADE_SPACING_PERCENTAGE, LazerResultsScreen, RANK_THRESHOLDS,
     ResultsData, VIRTUAL_SS_PERCENTAGE, acc_to_angle_deg, arc_color_at,
-    avatar_hue, avatar_initials, bake_accuracy_arc, bake_avatar,
-    ease_out_quint, grade_bands, rank_ring_bands, query_pb, slider_stats,
-    target_arc_value,
+    avatar_hue, avatar_initials, bake_accuracy_arc, bake_avatar, bake_star,
+    ease_out_quint, for_star_difficulty, grade_bands, rank_badge_positions,
+    rank_ring_bands, query_pb, slider_stats, target_arc_value,
 )
 from osu_std_renderer.render.pp import component_pct
 from osu_std_renderer.settings import StdRenderSettings
@@ -123,23 +123,64 @@ def test_arc_color_at_maps_accuracy_to_forrank_stop():
     assert arc_color_at(0.95) == FOR_RANK["S"]
 
 
-def test_bake_accuracy_arc_paints_rank_colours_not_flat():
-    # a 97% (S) arc must contain BOTH a D-band pixel (near the start of the
-    # sweep) and an S-band pixel (near the tip) — i.e. it is a rank GRADIENT,
-    # not one flat colour. Scan the ring band for the two ForRank hues.
+def test_rank_badge_positions_lazer_lerp():
+    # lazer AccuracyCircle RankBadge visual positions (Interpolation.Lerp) —
+    # NOT the band boundaries, so the six spread cleanly and D (0.35) sits
+    # far from SS (1.0) instead of both piling at the top.
+    pos = rank_badge_positions()
+    assert [g for _p, g in pos] == ["D", "C", "B", "A", "S", "SS"]
+    dv = {g: p for p, g in pos}
+    assert abs(dv["D"] - 0.35) < 1e-9
+    assert abs(dv["C"] - 0.75) < 1e-9
+    assert abs(dv["B"] - 0.85) < 1e-9
+    assert abs(dv["A"] - 0.9125) < 1e-9
+    assert abs(dv["S"] - 0.96) < 1e-9
+    assert dv["SS"] == 1.0
+    ps = [p for p, _g in pos]
+    assert ps == sorted(ps) and len(set(ps)) == 6      # distinct, ordered
+    assert dv["SS"] - dv["D"] > 0.6                     # spread, no top pile-up
+
+
+def test_bake_accuracy_arc_is_cyan_green_gradient():
+    # lazer's achieved arc is the FIXED cyan(#7CF6FF top)→green(#BAFFA9
+    # bottom) vertical gradient — NOT rank colours. Opaque arc pixels: top is
+    # bluer (cyan), bottom is redder (green); no rank-red on the arc.
     import numpy as np
-    S = 300
+    S = 400
     rgba = bake_accuracy_arc(S, 0.97)
-    px = rgba[..., :3].astype(int)
+    rgb = rgba[..., :3].astype(float)
+    alpha = rgba[..., 3]
+    ys, xs = np.where(alpha > 200)
+    assert len(ys) > 100
+    top = ys < S * 0.35
+    bot = ys > S * 0.65
+    top_pix = rgb[ys[top], xs[top]]
+    bot_pix = rgb[ys[bot], xs[bot]]
+    assert top_pix[:, 2].mean() > bot_pix[:, 2].mean() + 30   # cyan: more blue
+    assert bot_pix[:, 0].mean() > top_pix[:, 0].mean() + 30   # green: more red
+    red = np.array([round(c * 255) for c in FOR_RANK["D"]])
+    assert not bool((np.abs(rgb - red).sum(axis=2) <= 12).any())  # not rank-red
 
-    def _has(colour):
-        c = np.array([round(v * 255) for v in colour])
-        return bool((np.abs(px - c).sum(axis=2) <= 6).any())
 
-    assert _has(FOR_RANK["D"]), "no D-band colour on the arc"
-    assert _has(FOR_RANK["S"]), "no S-band colour on the arc"
-    # the old flat grade colour (legacy purple C) must NOT dominate the arc
-    assert not _has((0.78, 0.51, 0.86))
+def test_bake_star_is_a_star_sprite():
+    # a real filled 5-point star (the font has no ★ glyph): centre opaque,
+    # square corners transparent.
+    star = bake_star(64, (1.0, 0.85, 0.30))
+    assert star.shape == (64, 64, 4)
+    assert star[32, 32, 3] > 200
+    assert (star[2, 2, 3] < 40 and star[2, -3, 3] < 40
+            and star[-3, 2, 3] < 40 and star[-3, -3, 3] < 40)
+
+
+def test_for_star_difficulty_samples_spectrum():
+    import osu_std_renderer.render.lazer_results as LR
+    assert for_star_difficulty(2.0) == LR._hex("4fffd5")   # exact stop
+    mid = for_star_difficulty(6.25)                        # 5.8..6.7 blend
+    c0, c1 = LR._hex("6563de"), LR._hex("18158e")
+    for j in range(3):
+        assert min(c0[j], c1[j]) - 1e-9 <= mid[j] <= max(c0[j], c1[j]) + 1e-9
+    assert for_star_difficulty(-1.0) == LR._hex("aaaaaa")  # clamp low
+    assert for_star_difficulty(99.0) == LR._hex("000000")  # clamp high
 
 
 # --- pp-component percentages -------------------------------------------------------
