@@ -308,11 +308,15 @@ def test_grade_boundary_table_and_miss_cap():
     assert grade_for(99, 0, 0, 1) != "SS"          # any miss is never SS
 
 
-# --- item 4: circle target bands (pushed contrast) ----------------------------
+# --- item 4 (pass 3): circle bands = lazer-EXACT ArgonMainCirclePiece stack ----
 
-def test_argon_circle_band_contrast_reads_as_target():
-    """The concentric bands must read as distinct target rings: a bright
-    outer band, a clearly DARKER mid ring, a dark centre."""
+def test_argon_circle_bands_are_lazer_exact_darken_stack():
+    """Fidelity pass 3 REVERT of the pass-2 exaggeration: the concentric
+    bands are the EXACT ArgonMainCirclePiece darken stack — outerGradient ≈
+    full white, innerGradient = GradientVertical(Darken(0.5), Darken(0.6)) ≈
+    0.646 grey mid-row, innerFill = Darken(4) = 0.20 dark centre. A bright
+    outer band, a distinct dark-amber mid ring, a dark centre — NOT the
+    pass-2 pushed 0.50→0.46 mid step."""
     grey = T.bake_argon_circle(320)[..., 0].astype(float)
     R = 320 / 2.0 - 2.0
     c = 160
@@ -320,9 +324,28 @@ def test_argon_circle_band_contrast_reads_as_target():
     mid = grey[c, int(c + 0.60 * R)]       # innerGradient mid band
     centre = grey[c, c]                    # innerFill dark centre
     assert outer > 220                     # saturated outer band
-    assert centre < 60                     # dark centre
-    assert mid < 0.62 * outer              # mid pushed below the outer step
-    assert mid > centre + 18               # ...but still a distinct mid ring
+    assert centre < 60                     # Darken(4) dark centre
+    # innerGradient mid-row value = (Darken(0.5)+Darken(0.6))/2 =
+    # (0.6667+0.625)/2 = 0.646 → ~165/255. Locks the EXACT reverted value
+    # (the pass-2 push put this at ~0.48 → ~122).
+    assert 155 < mid < 175
+    assert mid > centre + 80               # a distinct mid ring
+    assert mid < outer - 40                # ...clearly below the outer band
+
+
+def test_argon_approach_is_thin_hairline():
+    """Fidelity pass 3 REVERT: the Argon approach circle is a THIN hairline
+    ring (~0.06 R, base DrawableHitCircle default approachcircle), NOT the
+    pass-2 0.115 bold ring. Ground truth frame_26 (real lazer) confirms."""
+    assert abs(T.ARGON_APPROACH_THICKNESS - 0.06) < 1e-9
+    a = T.bake_argon_approach(512)[..., 3].astype(float)
+    R = 512 / 2.0 - 2.0
+    c = 256
+    right = np.where(a[c] > 128)[0]
+    right = right[right > c]               # ring band on the right half
+    assert right.size > 0
+    band = (right.max() - right.min()) / R
+    assert 0.03 < band < 0.09              # thin (~0.06), not 0.115 bold
 
 
 # --- item 3: ArgonFollowPoint (pink chevrons) ---------------------------------

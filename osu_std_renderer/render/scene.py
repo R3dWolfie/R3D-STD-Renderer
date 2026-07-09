@@ -257,14 +257,21 @@ ARGON_SLIDER_BODY_ALPHA = 0.98        # ArgonSliderBody BodyAlpha (non-pro)
 ARGON_FOLLOW_AREA = 2.4               # DrawableSliderBall.FOLLOW_AREA
 ARGON_TICK_FRAC = 12.0 / 118.0        # ArgonSliderScorePoint SIZE / OBJECT_DIMENSIONS
 ARGON_SPIN_GLOW = (0xFC / 255.0, 0x61 / 255.0, 0x8F / 255.0)   # spinner fill glow
-ARGON_CURSOR_TRAIL = (1.0, 0.55, 0.72)     # trail tint (ArgonCursor palette)
+ARGON_CURSOR_TRAIL = (1.0, 1.0, 1.0)       # ArgonCursorTrail sets NO Colour
+                                           # override → drawn WHITE (osu.Game.
+                                           # Rulesets.Osu/Skinning/Argon/
+                                           # ArgonCursorTrail.cs). NOT pink.
 ARGON_CURSOR_CGLOW = (171 / 255.0, 1.0, 1.0)   # centre EdgeEffect (cyan)
 ARGON_FP_LOGICAL_PX = 30.0        # ArgonFollowPoint chevron box (logical px)
 # ArgonCursorTrail: additive WHITE, IntervalMultiplier 0.4 (tight), FadeExponent
 # 4 (fast fade → a thin, wire-thin bright line, NOT a wide soft comet).
 ARGON_TRAIL_WINDOW_MS = 120.0     # short tail (FadeExponent 4 kills it fast)
 ARGON_TRAIL_SPACING_OSU = 3.0     # dense distance-resample → continuous line
-ARGON_TRAIL_WIDTH_OSU = 7.0       # thin line (~1/4 the cursor diameter)
+ARGON_TRAIL_WIDTH_OSU = 14.0      # ArgonCursorTrail Scale 0.8 of the soft
+                                  # cursortrail blob ≈ the cursor RADIUS — a
+                                  # soft trail, not a 7px hairline (fidelity
+                                  # pass 3: pass 2's wire-thin line read wrong;
+                                  # FadeExponent 4 still keeps the tail short)
 ARGON_TRAIL_FADE_EXP = 4.0        # ArgonCursorTrail.FadeExponent
 ARGON_TRAIL_ALPHA = 0.8           # ArgonCursorTrail Alpha
 # ArgonJudgementPiece.RingExplosion (kiai "bubbles"): additive RingPiece bits,
@@ -2069,16 +2076,18 @@ class StdScene:
 
     def _argon_cursor_sprites(self, t: float) -> list[Sprite]:
         """ArgonCursor (skinless): the pink→dark-red ring body + white centre
-        dot with the cyan EdgeEffect glow, over the ArgonCursorTrail — a
-        thin, wire-thin WHITE additive line (IntervalMultiplier 0.4 →
-        tight; FadeExponent 4 → short bright tail), NOT a wide cyan comet.
-        Rainbow hue-cycles the ring tint when enabled."""
+        dot with the cyan EdgeEffect glow, over the ArgonCursorTrail — soft
+        WHITE additive blobs (Scale 0.8 of the cursortrail texture ≈ the
+        cursor radius; IntervalMultiplier 0.4 → dense continuous trail;
+        FadeExponent 4 → short bright tail). NO Colour override in
+        ArgonCursorTrail.cs → the trail is WHITE, never pink/cyan. Rainbow
+        hue-cycles the ring tint when enabled."""
         out: list[Sprite] = []
         d = 2.0 * self.cam.len_to_screen(CURSOR_RADIUS_OSU) * self.cursor_scale
         tint = rainbow_rgb(t) if self.cursor_rainbow else (1.0, 1.0, 1.0)
         # thin white trail: dense distance-resampled dots, alpha^4 fade
         tw = self.cam.len_to_screen(ARGON_TRAIL_WIDTH_OSU) * self.trail_scale
-        trail_tint = tint if self.cursor_rainbow else (1.0, 1.0, 1.0)
+        trail_tint = tint if self.cursor_rainbow else ARGON_CURSOR_TRAIL
         for x, y, strength in long_trail_points(
                 self._argon_trail_pts, self._argon_trail_times, t,
                 window_ms=ARGON_TRAIL_WINDOW_MS):

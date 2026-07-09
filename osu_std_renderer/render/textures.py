@@ -721,11 +721,13 @@ def bake_argon_circle(size: int = ARGON_CIRCLE_SIZE) -> np.ndarray:
     R = size / 2.0 - 2.0
     yn = np.mgrid[0:size, 0:size][0].astype(np.float64) / (size - 1)
     inner_fill = 0.20                                   # Darken(4)
-    # fidelity pass 2: the mid ring is pushed DARKER than lazer's exact
-    # Darken(0.5→0.6) (0.667/0.625) so the outer→mid→centre steps read as
-    # distinct concentric target bands (owner: "push the stepped contrast so
-    # it reads as concentric targets, not a smooth gradient").
-    inner_grad = 0.50 + (0.46 - 0.50) * yn              # was 0.6667→0.625
+    # fidelity pass 3 (owner: EXACT lazer — REVERT the pass-2 "make it pop"
+    # push). ArgonMainCirclePiece.innerGradient =
+    # ColourInfo.GradientVertical(AccentColour.Darken(0.5), Darken(0.6))
+    # = 0.6667 (top) → 0.625 (bottom). Color4.Darken(a)=channel/(1+a).
+    # Ground truth frame_26 (real lazer) reads a smooth dark-amber mid band,
+    # NOT the exaggerated 0.50→0.46 step pass 2 used.
+    inner_grad = 0.6667 + (0.625 - 0.6667) * yn         # Darken(0.5)→Darken(0.6)
     outer_grad = 1.0 + (0.90909 - 1.0) * yn             # 1.0→Darken(0.1)
     outer_fill = 0.20                                   # Darken(4)
     w_out = _ss_inside(d, ARGON_OUTER_GRAD_R, R)
@@ -746,15 +748,19 @@ def bake_argon_border(size: int = ARGON_CIRCLE_SIZE,
     return bake_ring(size, thickness_frac)
 
 
-ARGON_APPROACH_THICKNESS = 0.115   # bolder ring (fidelity pass 2: refs read a
-                                   # noticeably bolder approach circle than the
-                                   # old 0.06 hairline)
+ARGON_APPROACH_THICKNESS = 0.06    # fidelity pass 3 (owner: EXACT lazer —
+                                   # REVERT the pass-2 0.115 push). The base
+                                   # DrawableHitCircle ApproachCircle uses the
+                                   # default approachcircle texture (Argon ships
+                                   # no bespoke one): a THIN hairline ring.
+                                   # Ground truth frame_26 (real lazer) confirms
+                                   # a hairline, not a bold ring.
 
 
 def bake_argon_approach(size: int = APPROACH_SIZE,
                         thickness_frac: float = ARGON_APPROACH_THICKNESS
                         ) -> np.ndarray:
-    """Argon approach circle — a BOLD combo-tinted ring (base
+    """Argon approach circle — the default THIN combo-tinted ring (base
     DrawableHitCircle ApproachCircle; Argon ships no bespoke texture)."""
     return bake_ring(size, thickness_frac)
 

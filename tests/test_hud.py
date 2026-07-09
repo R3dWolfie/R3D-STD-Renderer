@@ -456,3 +456,98 @@ def test_endpoint_pin_scales_display():
     assert int(round(d.score_at(1e9) * pin)) == 423_154
     mid = d.score_at(2500.0)
     assert 0 < mid * pin < 423_154
+
+
+# --- Argon counter growth (fidelity pass 3: overflow-proof, sourced minimum) ---
+# The Argon score/combo counters draw a MINIMUM wireframe (RequiredDisplay-
+# Digits) and GROW past it — one wireframe cell per lit digit. A >999,999
+# pinned classic score (str(), never :06d) and a >999x combo must render every
+# digit backed by its own cell, never clipped to a fixed 6-cell width.
+# Source: ppy/osu ArgonScoreCounter / ArgonComboCounter
+# getDigitsRequiredForDisplayCount() (score min = GameplayScoreCounter
+# Standardised RequiredDisplayDigits 6; combo min = DisplayXSymbol ? 2 : 1).
+from osu_std_renderer.render.hud import StdHud  # noqa: E402
+
+
+class _CounterBank:
+    argon_seg_advance = 132.0 / 240.0
+    glyph_aspect = {ch: 0.6 for ch in "COMBOACURYXP0123456789.%"}
+    glyph_mono_advance = 0.6
+
+
+class _CounterData:
+    def __init__(self, score, combo):
+        self._s, self._c = score, combo
+        self.combo_changes = [(0.0, 0, combo)]
+
+    def score_at(self, t, roll_ms=ARGON_ROLL_MS):
+        return float(self._s)
+
+    def combo_displayed_at(self, t, roll_ms=ARGON_ROLL_MS):
+        return self._c
+
+
+def _counter_hud(score, combo):
+    h = object.__new__(StdHud)
+    h.s = type("S", (), {"show_score": True, "show_combo": True,
+                         "show_grade": False})()
+    h.es = h.lk = h.k = h.op = 1.0
+    h.bank = _CounterBank()
+    h._pin = 1.0
+    h.data = _CounterData(score, combo)
+    h.ui_w_l = 1366.0
+    return h
+
+
+def _counter_cells(out):
+    wire = [s for s in out if s.texture_key in ("argon_wireframe",
+                                                "argon_wireframe_dot")]
+    lit = [s for s in out if s.texture_key.startswith("aseg_")]
+    return wire, lit
+
+
+def _all_lit_backed(wire, lit):
+    return all(any(abs(s.x - w.x) < 1e-6 for w in wire) for s in lit)
+
+
+def test_argon_score_counter_grows_past_minimum_wireframe():
+    # 5-digit score → the 6-cell RequiredDisplayDigits minimum, every lit backed
+    h = _counter_hud(52_289, 0)
+    out = []
+    h._argon_score_block(out, 0.0)
+    wire, lit = _counter_cells(out)
+    assert len(lit) == 5 and len(wire) == 6
+    assert _all_lit_backed(wire, lit)
+    # 7-digit pinned classic total → 7 lit + 7 wire (grew past 6, NO overflow)
+    h = _counter_hud(1_234_567, 0)
+    out = []
+    h._argon_score_block(out, 0.0)
+    wire, lit = _counter_cells(out)
+    assert len(lit) == 7 and len(wire) == 7
+    assert _all_lit_backed(wire, lit)
+    # 8-digit classic total still grows (never capped)
+    h = _counter_hud(12_345_678, 0)
+    out = []
+    h._argon_score_block(out, 0.0)
+    wire, lit = _counter_cells(out)
+    assert len(lit) == 8 and len(wire) == 8
+    assert _all_lit_backed(wire, lit)
+
+
+def test_argon_combo_counter_grows_and_holds_minimum():
+    # single-digit combo → 2 cells (DisplayXSymbol ? 2 : 1): 1 digit + the x
+    h = _counter_hud(0, 7)
+    out = []
+    h._argon_combo(out, 0.0)
+    wire, lit = _counter_cells(out)
+    n_num = sum(1 for s in lit if s.texture_key != "aseg_x")
+    assert n_num == 1 and len(wire) == 2
+    assert _all_lit_backed(wire, lit)
+    # 4-digit combo → 5 cells (4 digits + x), grown past the 2-cell floor
+    h = _counter_hud(0, 1234)
+    out = []
+    h._argon_combo(out, 0.0)
+    wire, lit = _counter_cells(out)
+    n_num = sum(1 for s in lit if s.texture_key != "aseg_x")
+    assert n_num == 4 and len(wire) == 5
+    assert _all_lit_backed(wire, lit)

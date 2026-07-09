@@ -233,7 +233,9 @@ ARGON_LABEL_H = 12.0           # OsuFont.Torus 12 bold labels
 ARGON_LABEL_GAP = 12.0         # NumberContainer.Y with a label
 ARGON_SCORE_RIGHT_X = 250.0    # score right edge (components_x_offset+200)
 ARGON_SCORE_TOP_Y = 50.0       # wedge2.y(20) + 30
-ARGON_SCORE_DIGITS = 6         # standardised RequiredDisplayDigits
+ARGON_SCORE_DIGITS = 6         # GameplayScoreCounter Standardised RequiredDisplay-
+                               # Digits (Classic=8); a wireframe MINIMUM — the
+                               # counter GROWS past it (getDigitsRequiredForDisplayCount)
 ARGON_ACC_POS = (-20.0, 20.0)  # TopRight
 ARGON_COMBO_POS = (36.0, -66.0)          # BottomLeft (ruleset layout)
 ARGON_COMBO_SCALE = 1.3
@@ -1357,6 +1359,12 @@ class StdHud:
             out.append(Sprite(cx * lk, cy * lk, cw * lk, ch * lk,
                               "argon_wedge", (1, 1, 1, self.op)))
         score = int(round(self.data.score_at(t) * self._pin))
+        # ArgonScoreCounter/GameplayScoreCounter: the wireframe count is
+        # max(RequiredDisplayDigits, getDigitsRequiredForDisplayCount()) and
+        # GROWS with the score (no fixed cap) — Standardised RequiredDisplay-
+        # Digits = 6 (Classic = 8). str() (never :06d) so a >999,999 pinned
+        # classic total shows all 7–8 digits, each backed by its own
+        # wireframe cell; the run right-aligns at x=250 growing LEFTWARD.
         text = str(max(score, 0))
         self._argon_seg_run(
             out, text, ARGON_SCORE_RIGHT_X * es, ARGON_SCORE_TOP_Y * es,
@@ -1430,9 +1438,17 @@ class StdHud:
         # NumberContainer scales from its TopLeft (component anchor)
         pivot = (x, num_top)
         cw = self.bank.argon_seg_advance * h
-        right_x = x + len(text) * cw       # left edge lands at x
+        # ArgonComboCounter.getDigitsRequiredForDisplayCount():
+        #   digitsRequired = (DisplayXSymbol ? 2 : 1); while (c /= 10) > 0: ++
+        # → max(2, num_digits + 1) cells (the trailing 'x' occupies one of
+        # them) and GROWS with the combo (no cap). text = "<n>x" so
+        # len(text) = num_digits + 1 already meets the 2-cell floor; pass it
+        # explicitly so the sourced minimum is visible + regression-tested.
+        n_cells = max(2, len(text))
+        right_x = x + n_cells * cw         # left edge lands at x
         self._argon_seg_run(out, text, right_x, num_top, h, 0.95 * self.op,
-                            color=color, scale=scale, pivot=pivot)
+                            color=color, scale=scale, pivot=pivot,
+                            wire_n=n_cells)
         self._lrun(out, "COMBO", x, top, label_h, BLUE0, 0.95 * self.op)
 
     def _argon_health(self, out, t: float) -> None:
