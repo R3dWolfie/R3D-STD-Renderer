@@ -551,3 +551,52 @@ def test_argon_combo_counter_grows_and_holds_minimum():
     n_num = sum(1 for s in lit if s.texture_key != "aseg_x")
     assert n_num == 4 and len(wire) == 5
     assert _all_lit_backed(wire, lit)
+
+
+# --- fidelity pass 3: ArgonAccuracyCounter whole/fraction/percent ratios -------
+# ppy/osu master ArgonAccuracyCounter.cs — the accuracy text is a horizontal
+# FillFlow of three ArgonCounterTextComponents: the whole part (full digit
+# height, with the ACCURACY label), the '.dd' fractionPart at Scale = 0.5
+# (bottom-aligned), and the percentText with NO Scale override → FULL digit
+# height, top-aligned with the whole part (Margin.Top == wholePart
+# NumberContainer.Y == 12). The previous code mis-sized the '%' at 0.6·h.
+class _AccData:
+    def __init__(self, acc):
+        self._a = acc
+
+    def acc_at(self, t, roll_ms=ARGON_ROLL_MS):
+        return self._a
+
+
+def _acc_hud(acc):
+    h = _counter_hud(0, 0)          # reuse the counter harness (bank/es/lk/op)
+    h.data = _AccData(acc)
+    return h
+
+
+def test_argon_accuracy_percent_full_height_fraction_half():
+    from osu_std_renderer.render.hud import ARGON_DIGIT_H
+    h = _acc_hud(1.0)                                   # displays 100.00%
+    out = []
+    h._argon_accuracy(out, 0.0)
+    lit = [s for s in out if s.texture_key
+           and s.texture_key.startswith("aseg_")]
+    whole_h = ARGON_DIGIT_H * h.es
+    pct = [s for s in lit if s.texture_key == "aseg_pct"]
+    assert len(pct) == 1                               # exactly one '%'
+    # '%' is FULL digit height (not the old 0.6·h)
+    assert abs(pct[0].h - whole_h) < 1e-6
+    # the whole part "100" runs at full height
+    whole = [s for s in lit if s.texture_key != "aseg_pct"
+             and abs(s.h - whole_h) < 1e-6]
+    assert len(whole) == 3                             # 1, 0, 0
+    # the ".00" fraction runs at HALF height (Scale 0.5)
+    frac = [s for s in lit if abs(s.h - whole_h * 0.5) < 1e-6]
+    assert len(frac) == 3                              # '.', 0, 0
+    assert not [s for s in lit if s not in whole + frac + pct]
+    # '%' top-aligns with the whole digits (shared top edge)
+    whole_top = min(s.y - s.h / 2.0 for s in whole)
+    assert abs((pct[0].y - pct[0].h / 2.0) - whole_top) < 1e-6
+    # the fraction sits BELOW (bottom-aligned): its top edge is lower
+    frac_top = min(s.y - s.h / 2.0 for s in frac)
+    assert frac_top > whole_top + 1e-6

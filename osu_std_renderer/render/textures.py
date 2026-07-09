@@ -358,23 +358,27 @@ def _argon_seg_char_alpha(char: str, xx, yy, seg,
         d = np.hypot(xx - cx, yy - cy)
         return np.clip((r - d) / _AA_PX, 0.0, 1.0)
     if char in ("%", "percent"):
-        rr = height * 0.13                 # small ring radius
-        th = t * 0.62
-        cxu, cyu = width * 0.30, height * 0.24
-        cxl, cyl = width * 0.70, height * 0.76
+        # A clean percent: two OPEN rings (upper-left + lower-right) joined by
+        # a bold diagonal slash. Tuned to read as a percent (not a crossed box
+        # or a "Z") even at HUD scale — a wider ring band keeps a clear centre
+        # hole so the rings don't collapse to dots when the counter is small.
+        rr = height * 0.135                # ring radius
+        band = t * 0.5                     # ring HALF-thickness → open centre
+        cxu, cyu = width * 0.31, height * 0.205
+        cxl, cyl = width * 0.69, height * 0.795
         du = np.abs(np.hypot(xx - cxu, yy - cyu) - rr)
         dl = np.abs(np.hypot(xx - cxl, yy - cyl) - rr)
-        ring = np.maximum(np.clip((th - du) / _AA_PX, 0.0, 1.0),
-                          np.clip((th - dl) / _AA_PX, 0.0, 1.0))
+        ring = np.maximum(np.clip((band - du) / _AA_PX, 0.0, 1.0),
+                          np.clip((band - dl) / _AA_PX, 0.0, 1.0))
         # diagonal slash from bottom-left to top-right
-        m = t * 0.75
+        m = t * 0.95
         dirx, diry = (width - 2 * m), -(height - 2 * m)
         L = math.hypot(dirx, diry)
         nx, ny = -diry / L, dirx / L
         px, py = xx - width / 2.0, yy - height / 2.0
         dperp = np.abs(px * nx + py * ny)
         dalong = np.abs(px * (dirx / L) + py * (diry / L))
-        slash = (np.clip((th - dperp) / _AA_PX, 0.0, 1.0)
+        slash = (np.clip((t * 0.42 - dperp) / _AA_PX, 0.0, 1.0)
                  * np.clip((L / 2.0 - dalong) / _AA_PX, 0.0, 1.0))
         return np.maximum(ring, slash)
     if char in ("x",):

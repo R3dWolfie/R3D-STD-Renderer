@@ -301,8 +301,16 @@ ARGON_JUDGE_COLOR = {                             # OsuColour hex → linear-ish
     JudgmentKind.HIT50: (0xFF / 255.0, 0xCC / 255.0, 0x22 / 255.0),    # Yellow
     JudgmentKind.MISS: (0xED / 255.0, 0x11 / 255.0, 0x21 / 255.0),     # Red
 }
-ARGON_JUDGE_FONT_OSU = 25.0     # OsuSpriteText size 20 (a touch up for legibility)
-ARGON_JUDGE_SPACING_OSU = 7.0   # Spacing (5,0) at size 20 → ~0.27 of the font
+# ArgonJudgementPiece.CreateJudgementText (ppy/osu master,
+# osu.Game.Rulesets.Osu/Skinning/Argon/ArgonJudgementPiece.cs):
+#   Font = OsuFont.Default.With(size: 20, weight: FontWeight.Bold)
+#   Spacing = new Vector2(5, 0)
+# Our DejaVu caps fill ~0.73 of the glyph sprite (measured), so a size-20
+# cell renders a ~14.6-osu!px visible cap — matching lazer's Torus size-20
+# cap (~0.72·20 = 14.4). (Both were previously inflated — 25/7 "for
+# legibility" — which read ~27% too big vs lazer.)
+ARGON_JUDGE_FONT_OSU = 20.0     # OsuSpriteText size 20
+ARGON_JUDGE_SPACING_OSU = 5.0   # Spacing (5, 0) at size 20
 ARGON_JUDGE_LIFE_MS = 800.0     # FadeOutFromOne(800)
 
 

@@ -1373,7 +1373,11 @@ class StdHud:
 
     def _argon_accuracy(self, out, t: float) -> None:
         """ArgonAccuracyCounter: TopRight (-20, 20) — whole part + '.dd'
-        at ×0.5 + '%', 'ACCURACY' label in Blue0, wireframes ###/.##."""
+        at ×0.5 (bottom-aligned) + a FULL-height '%', 'ACCURACY' label in
+        Blue0, wireframes ###/.##/#. Only the fractionPart carries a
+        Scale 0.5; percentText has no Scale (full digit height) and its
+        Margin.Top == the whole part's NumberContainer.Y == 12, so the '%'
+        top-aligns with the whole digits (ArgonAccuracyCounter.cs)."""
         s = self.s
         if not s.show_score:
             return
@@ -1385,13 +1389,15 @@ class StdHud:
         whole_txt, frac_txt = str(whole), f".{frac:02d}"
         h = ARGON_DIGIT_H * es
         hh = h * 0.5                       # fractionPart Scale = 0.5
-        hpct = hh * 1.2
+        hpct = h                           # percentText: no Scale → FULL
+                                           # digit height (was 0.6·h)
         right = self.ui_w_l + ARGON_ACC_POS[0] * es
         top = ARGON_ACC_POS[1] * es
         num_top = top + ARGON_LABEL_GAP * es
-        # right-to-left: '%', the '.dd' fraction (×0.5), then the whole part
+        # right-to-left: '%' (full height, TOP-aligned with the whole part),
+        # the '.dd' fraction (×0.5, BOTTOM-aligned), then the whole part
         w_pct = self._argon_seg_width(1, hpct)
-        self._argon_seg_run(out, "%", right, num_top + (h - hpct), hpct,
+        self._argon_seg_run(out, "%", right, num_top, hpct,
                             0.95 * self.op)
         frac_right = right - w_pct - 2.0 * es
         w_frac = self._argon_seg_width(len(frac_txt), hh)

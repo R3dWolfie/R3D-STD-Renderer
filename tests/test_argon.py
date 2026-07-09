@@ -483,3 +483,44 @@ def test_argon_segment_digits_and_wireframe_align():
     ref = T.bake_argon_segment("5").shape
     for ch in "0123456789.%x":
         assert T.bake_argon_segment(ch).shape == ref
+
+
+# --- fidelity pass 3: judgment text size + the '%' glyph ----------------------
+
+def test_judgment_font_and_spacing_match_argon_source():
+    """ppy/osu master ArgonJudgementPiece.CreateJudgementText (osu.Game.
+    Rulesets.Osu/Skinning/Argon/ArgonJudgementPiece.cs):
+        Font = OsuFont.Default.With(size: 20, weight: FontWeight.Bold)
+        Spacing = new Vector2(5, 0)
+    (Was 25/7 — a legibility fudge that read ~27 % too big; our DejaVu caps
+    fill ~0.73 of the sprite so size-20 gives a ~14.6-osu!px visible cap,
+    matching lazer's Torus size-20.)"""
+    from osu_std_renderer.render.scene import (
+        ARGON_JUDGE_FONT_OSU, ARGON_JUDGE_SPACING_OSU)
+    assert ARGON_JUDGE_FONT_OSU == 20.0
+    assert ARGON_JUDGE_SPACING_OSU == 5.0
+
+
+def test_argon_percent_glyph_reads_as_percent():
+    """The Argon counter '%' is two OPEN rings (upper-left + lower-right)
+    joined by a bottom-left→top-right slash — NOT a filled box / crossed 'Z'.
+    Each ring has a lit band around a HOLLOW centre so it survives HUD scale
+    (the old glyph collapsed to two dots + a box and read as a 'Z')."""
+    pct = T.bake_argon_segment("%")[..., 3].astype(float) / 255.0
+    h, w = pct.shape
+    assert pct.max() > 0.9                                  # glyph present
+    rr = h * 0.135                                          # ring radius
+    for cx, cy in ((0.31 * w, 0.205 * h), (0.69 * w, 0.795 * h)):
+        # hollow centre + a lit band all the way round (the ring is OPEN)
+        assert pct[int(cy), int(cx)] < 0.35
+        band = [pct[int(cy + dy), int(cx + dx)]
+                for dx, dy in ((rr, 0), (-rr, 0), (0, rr), (0, -rr))]
+        assert min(band) > 0.5
+    # the diagonal slash crosses the cell centre
+    assert pct[int(0.5 * h), int(0.5 * w)] > 0.6
+    # NOT a box: the vertical side edges (a box's walls) are empty
+    assert pct[h // 3:2 * h // 3, :w // 12].mean() < 0.15
+    assert pct[h // 3:2 * h // 3, -(w // 12):].mean() < 0.15
+    # distinct from a full '8' cell (rings + slash, not all segments)
+    eight = T.bake_argon_segment("8")[..., 3].astype(float) / 255.0
+    assert (eight[pct > 0.5] > 0.5).mean() < 0.6
