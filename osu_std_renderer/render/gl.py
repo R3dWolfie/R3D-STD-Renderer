@@ -104,6 +104,10 @@ class SpriteRenderer:
         self.fbo = self.ctx.framebuffer(color_attachments=[self.color_tex])
         self._textures: dict[str, "moderngl.Texture"] = {}
         self._white = self._make_texture_rgba(np.full((1, 1, 4), 255, dtype="u1"))
+        # optional per-sprite post-transform (Sprite -> Sprite), applied to
+        # every sprite in draw(). The fail animation installs this to drop
+        # the frozen playfield's objects off-screen; None = identity.
+        self.post_xform = None
 
     # --- texture management ---------------------------------------------------
 
@@ -148,6 +152,8 @@ class SpriteRenderer:
         self.ctx.clear(*clear)
 
     def draw(self, sprites: list[Sprite]) -> None:
+        if self.post_xform is not None:
+            sprites = [self.post_xform(sp) for sp in sprites]
         add = []
         for sp in sprites:
             if sp.additive:

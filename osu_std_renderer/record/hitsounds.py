@@ -400,6 +400,30 @@ def _stereo(x: np.ndarray) -> np.ndarray:
     return np.repeat(x.astype(np.float32)[:, None], 2, axis=1)
 
 
+def synth_failsound() -> np.ndarray:
+    """The osu! fail sample ("Gameplay/failsound") — synthesized, no BASS/
+    ppy assets. osu's failsound is a descending pitch sweep with a drum
+    thud (the "wheee-oomph" you hear the instant you die). We build an
+    exponential glide 420→55 Hz over ~1.7 s under an exp decay, plus a
+    detuned sub octave for body and a short noise thud at the impact.
+    Played ONCE at the death point (FailAnimationContainer.failSample.Play).
+    """
+    dur = 1.7
+    t = _t(dur)
+    p = t / dur                                   # 0..1
+    f0, f1 = 420.0, 55.0
+    freq = (f0 * (f1 / f0) ** p).astype(np.float32)      # exponential sweep
+    phase = 2.0 * math.pi * np.cumsum(freq) / SAMPLE_RATE
+    tone = np.sin(phase) + 0.5 * np.sin(0.5 * phase)     # + sub octave
+    env = np.exp(-2.2 * p).astype(np.float32)            # long decay
+    thud = 0.4 * _noise(dur, "failsound") * np.exp(-9.0 * p)
+    x = 0.55 * tone * env + thud
+    x = _edge_fade(x, 6.0)
+    peak = float(np.max(np.abs(x))) or 1.0
+    x = (x / peak) * 0.85
+    return _stereo(x.astype(np.float32))
+
+
 def synth_sample(name: str, style: str = "argon") -> np.ndarray:
     """Deterministic placeholder samples for the full §3.4 surface —
     used when neither the beatmap nor any skin in the chain provides the
