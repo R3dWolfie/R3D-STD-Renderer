@@ -99,7 +99,8 @@ from pathlib import Path
 from .beatmap import load_full
 from .beatmap.difficulty import HIT_FADE_OUT
 from .beatmap.objects import Slider, Spinner
-from .replay import parse_replay
+from .replay import (is_relax_meta, parse_replay,
+                     synthesize_relax_frames)
 from .settings import StdRenderSettings
 from .skin.skin_ini import load as load_skin_ini
 
@@ -1071,6 +1072,17 @@ def main(argv: list[str] | None = None) -> int:
         frames, meta = parse_replay(args.osr)
         osu_path = find_osu_file(args.beatmap, meta.beatmap_md5)
         beatmap = load_full(osu_path, mods=meta.mods)
+        # Relax (RX): the .osr has cursor motion but NO key presses (the
+        # mod auto-taps). Synthesize the presses OsuModRelax injects so the
+        # judgment sim, combo, popups, key overlay, slider-follow tracking
+        # and spinner spin-up all resolve exactly as for a normal replay
+        # (reconcile still keeps the counts exact). RX-only — Autopilot
+        # keeps its real presses and renders through the untouched path.
+        if is_relax_meta(meta):
+            frames = synthesize_relax_frames(frames, beatmap)
+            _held = sum(1 for f in frames if f.keys)
+            print(f"relax:  RX detected — synthesized OsuModRelax auto-taps "
+                  f"({_held}/{len(frames)} frames key-held)", file=sys.stderr)
     skin_info = load_skin_ini(settings.skin_dir)
 
     print(f"map:    {beatmap.artist} - {beatmap.name} [{beatmap.difficulty_name}] "
