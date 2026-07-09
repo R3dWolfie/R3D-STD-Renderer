@@ -101,6 +101,24 @@ def test_argon_cursor_is_pink_ring():
     assert int(px[0]) > int(px[1]) and int(px[0]) > int(px[2])   # pinkish (R>G,B)
 
 
+def test_argon_cursor_trail_matches_lazer_fade():
+    """ArgonCursorTrail over the base CursorTrail (UI/Cursor/CursorTrail.cs):
+    additive WHITE, Alpha 0.8, FadeExponent 4, and the trail window must equal
+    the base FadeDuration (300 ms) so the ribbon length + (1-age/dur)^exp
+    falloff match. Pass-3's 120 ms truncated it into a stubby blob."""
+    from osu_std_renderer.render import scene as S
+    assert S.ARGON_TRAIL_WINDOW_MS == 300.0        # == base CursorTrail FadeDuration
+    assert S.ARGON_TRAIL_FADE_EXP == 4.0           # ArgonCursorTrail.FadeExponent
+    assert S.ARGON_TRAIL_ALPHA == 0.8              # ArgonCursorTrail Alpha
+    assert tuple(S.ARGON_CURSOR_TRAIL) == (1.0, 1.0, 1.0)   # no Colour → white
+    # strength fades 1→0 across the full 300 ms window (age-linear, ^exp at draw)
+    trail = [(0.0, 0.0, 0.0), (10.0, 0.0, 150.0), (20.0, 0.0, 300.0)]
+    pts = S.long_trail_points(trail, [0.0, 150.0, 300.0], 300.0,
+                              window_ms=S.ARGON_TRAIL_WINDOW_MS)
+    strengths = [round(s, 3) for _, _, s in pts]
+    assert strengths == [0.0, 0.5, 1.0]            # oldest→newest, 0 at window edge
+
+
 def test_argon_tick_is_hollow_ring():
     rgba = T.bake_argon_tick(96)
     c = 48

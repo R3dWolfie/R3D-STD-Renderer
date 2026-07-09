@@ -265,8 +265,15 @@ ARGON_CURSOR_TRAIL = (1.0, 1.0, 1.0)       # ArgonCursorTrail sets NO Colour
 ARGON_CURSOR_CGLOW = (171 / 255.0, 1.0, 1.0)   # centre EdgeEffect (cyan)
 ARGON_FP_LOGICAL_PX = 30.0        # ArgonFollowPoint chevron box (logical px)
 # ArgonCursorTrail: additive WHITE, IntervalMultiplier 0.4 (tight), FadeExponent
-# 4 (fast fade → a thin, wire-thin bright line, NOT a wide soft comet).
-ARGON_TRAIL_WINDOW_MS = 120.0     # short tail (FadeExponent 4 kills it fast)
+# 4 (non-linear fade along the ribbon). The base CursorTrail (UI/Cursor/
+# CursorTrail.cs) fades each part over FadeDuration=300 ms as
+# alpha = baseAlpha * (1 - age/FadeDuration)^FadeExponent — our long_trail_points
+# strength = 1 - age/window, then the scene raises it to ARGON_TRAIL_FADE_EXP and
+# scales by ARGON_TRAIL_ALPHA, so the WINDOW must be the full 300 ms FadeDuration
+# for the falloff shape to match. Pass-4: owner flagged the trail as "off" — it
+# was 120 ms, which truncated the ribbon at ~52 ms of path (vs lazer's ~131 ms
+# visible), a stubby blob. 300 ms restores the smooth continuous ribbon.
+ARGON_TRAIL_WINDOW_MS = 300.0     # == base CursorTrail FadeDuration
 ARGON_TRAIL_SPACING_OSU = 3.0     # dense distance-resample → continuous line
 ARGON_TRAIL_WIDTH_OSU = 14.0      # ArgonCursorTrail Scale 0.8 of the soft
                                   # cursortrail blob ≈ the cursor RADIUS — a
@@ -2135,7 +2142,7 @@ class StdScene:
         out.append(Sprite(sx, sy, d * 1.5, d * 1.5, "glow",
                           (*ARGON_CURSOR_CGLOW, 0.45), additive=True))
         out.append(Sprite(sx, sy, d, d, "argon_cursor", (*tint, 1.0)))
-        dot = d * 0.22
+        dot = d * 0.20                    # ArgonCursor centre Circle Scale(0.2)
         out.append(Sprite(sx, sy, dot, dot, "disc", (1.0, 1.0, 1.0, 1.0)))
         return out
 
