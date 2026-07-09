@@ -199,8 +199,11 @@ def _bare_scene():
     sc.radius_px = 30.0
     sc.circle_k = 1.0
     sc.cam = _FakeCam()
-    sc.bank = type("B", (), {"glyph_aspect": {ch: 0.6 for ch in
-                                              "GREATOKMEHMISS"}})()
+    _asp = {ch: 0.6 for ch in "GREATOKMEHMISS0123456789"}
+    sc.bank = type("B", (), {"glyph_aspect": _asp, "argon_glyph_aspect": _asp,
+                             "argon_digit_aspect": _asp, "digit_aspect": _asp,
+                             "glyph_mono_advance": 0.6,
+                             "argon_glyph_mono_advance": 0.6})()
     return sc
 
 
@@ -260,7 +263,7 @@ def test_argon_judgment_run_glyphs_additive_coloured():
     out = []
     col = ARGON_JUDGE_COLOR[JudgmentKind.HIT300]
     sc._argon_judgment_run(out, "GREAT", 200.0, 200.0, 1.0, col, 0.8, 0.0)
-    assert [s.texture_key for s in out] == [f"glyph_{c}" for c in "GREAT"]
+    assert [s.texture_key for s in out] == [f"aglyph_{c}" for c in "GREAT"]
     assert all(s.additive for s in out)
     assert all(s.color[:3] == col and abs(s.color[3] - 0.8) < 1e-9
                for s in out)
@@ -492,13 +495,55 @@ def test_judgment_font_and_spacing_match_argon_source():
     Rulesets.Osu/Skinning/Argon/ArgonJudgementPiece.cs):
         Font = OsuFont.Default.With(size: 20, weight: FontWeight.Bold)
         Spacing = new Vector2(5, 0)
-    (Was 25/7 — a legibility fudge that read ~27 % too big; our DejaVu caps
-    fill ~0.73 of the sprite so size-20 gives a ~14.6-osu!px visible cap,
-    matching lazer's Torus size-20.)"""
+    (Was 25/7 — a legibility fudge that read ~27 % too big. Text now renders
+    in the bundled Argon font (Nunito, caps fill ~0.7025 of the sprite); the
+    run scales its height by ARGON_GLYPH_CAP_SCALE so size-20 keeps the same
+    ~14.4-osu!px visible cap, matching lazer's Torus size-20.)"""
     from osu_std_renderer.render.scene import (
         ARGON_JUDGE_FONT_OSU, ARGON_JUDGE_SPACING_OSU)
     assert ARGON_JUDGE_FONT_OSU == 20.0
     assert ARGON_JUDGE_SPACING_OSU == 5.0
+
+
+def test_bundled_argon_font_loads_and_is_not_dejavu():
+    """The Argon-league font is a real bundled OFL asset (not the DejaVu
+    fallback / PIL default bitmap) with its OFL licence alongside."""
+    import os
+    from PIL import ImageFont
+    from osu_std_renderer.render import textures as T
+    assert os.path.exists(T.ARGON_FONT_PATH)
+    assert os.path.exists(os.path.join(os.path.dirname(T.ARGON_FONT_PATH),
+                                       "OFL.txt"))
+    f = T._load_argon_font(64)
+    assert isinstance(f, ImageFont.FreeTypeFont)     # not load_default() bitmap
+    fam = (f.getname()[0] or "").lower()
+    assert "nunito" in fam and "dejavu" not in fam
+    # renders visible glyphs
+    glyphs = T.bake_argon_glyphs("GREAT")
+    assert set(glyphs) == set("GREAT")
+    assert all(g[..., 3].max() > 0 for g in glyphs.values())
+
+
+def test_argon_cap_scale_holds_visible_size():
+    """The glyph/digit cap-fill scales re-derive the size so the font swap
+    does NOT change the visible cap size (measured cap-fill drives them)."""
+    from osu_std_renderer.render import textures as T
+    # DejaVu fills MORE of the glyph-bank sprite than Nunito → scale up >1;
+    # for the digit bank Nunito fills slightly more → scale down <1.
+    assert 1.0 < T.ARGON_GLYPH_CAP_SCALE < 1.05
+    assert 0.97 < T.ARGON_DIGIT_CAP_SCALE < 1.0
+    # the constants match the actual bakes within tolerance (guards drift if
+    # the bundled font / weight changes).
+    def fill(chars, loader):
+        px = int(T.DIGIT_HEIGHT * 0.95)
+        font = loader(px)
+        boxes = [font.getbbox(c) for c in chars]
+        top, bot = min(b[1] for b in boxes), max(b[3] for b in boxes)
+        capE = font.getbbox("E")
+        return (capE[3] - capE[1]) / ((bot - top) + 8)
+    gd = fill(T.HUD_CHARSET, T._load_font)
+    ga = fill(T.HUD_CHARSET, T._load_argon_font)
+    assert abs((gd / ga) - T.ARGON_GLYPH_CAP_SCALE) < 0.02
 
 
 def test_argon_percent_glyph_reads_as_percent():

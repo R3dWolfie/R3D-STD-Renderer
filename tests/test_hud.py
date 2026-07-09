@@ -473,6 +473,8 @@ class _CounterBank:
     argon_seg_advance = 132.0 / 240.0
     glyph_aspect = {ch: 0.6 for ch in "COMBOACURYXP0123456789.%"}
     glyph_mono_advance = 0.6
+    argon_glyph_aspect = {ch: 0.6 for ch in "COMBOACURYXP0123456789.%"}
+    argon_glyph_mono_advance = 0.6
 
 
 class _CounterData:
@@ -493,6 +495,7 @@ def _counter_hud(score, combo):
                          "show_grade": False})()
     h.es = h.lk = h.k = h.op = 1.0
     h.bank = _CounterBank()
+    h.argon_league = True          # these exercise the Argon counters
     h._pin = 1.0
     h.data = _CounterData(score, combo)
     h.ui_w_l = 1366.0

@@ -52,7 +52,7 @@ from PIL import Image, ImageDraw
 from .gl import Sprite
 from .hud import BAND_50, BAND_100, BAND_300, GRADE_COLORS
 from .results import histogram_bins, mods_string
-from .textures import _load_font
+from .textures import _load_argon_font, _load_font
 
 UH = 1080.0                    # virtual design height (HUD convention)
 
@@ -201,12 +201,12 @@ def _to_rgba(img: "Image.Image"):
     return np.asarray(img.convert("RGBA"), dtype="u1").copy()
 
 
-def bake_text(text: str, px: int, color) -> tuple:
+def bake_text(text: str, px: int, color, loader=_load_font) -> tuple:
     """One baked text line → (rgba, w, h). Blank text → 1×1 stub."""
     import numpy as np
     if not text:
         return np.zeros((1, 1, 4), dtype="u1"), 1, 1
-    font = _load_font(max(int(px), 6))
+    font = loader(max(int(px), 6))
     try:
         x0, y0, x1, y1 = font.getbbox(text)
     except AttributeError:
@@ -431,10 +431,12 @@ class LazerResultsScreen:
     """Bakes the panel once, animates the two-stage reveal per frame."""
 
     def __init__(self, spr, data: ResultsData, total_ms: float,
-                 speed: float = 1.0):
+                 speed: float = 1.0, argon_font: bool = False):
         self.spr = spr
         self.d = data
         self.w, self.h = float(spr.width), float(spr.height)
+        # skinless (Argon league) → bundled OFL font; custom skin → DejaVu.
+        self._font_loader = _load_argon_font if argon_font else _load_font
         self.k = self.h / UH
         self.uw = self.w / self.k              # virtual width
         # the scene feeds age in MAP ms; the timeline is WALL ms → divide by
@@ -458,7 +460,8 @@ class LazerResultsScreen:
         return key
 
     def _text(self, text: str, px_virtual: float, color):
-        rgba, w, h = bake_text(text, int(px_virtual * self.k), color)
+        rgba, w, h = bake_text(text, int(px_virtual * self.k), color,
+                               self._font_loader)
         return (self._put(rgba), float(w), float(h))
 
     def _bake_static(self) -> None:

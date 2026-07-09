@@ -32,7 +32,7 @@ from PIL import Image, ImageDraw
 
 from .gl import Sprite
 from .hud import BAND_50, BAND_100, BAND_300, GRADE_COLORS
-from .textures import _load_font
+from .textures import _load_argon_font, _load_font
 
 UI_H = 1080.0                 # the card's design space (mania sizes)
 RESULTS_FADE_IN_MS = 400.0    # mania: opacity ramps over 400 ms
@@ -99,11 +99,11 @@ def histogram_bins(deltas, n_bins: int, rng_ms: float) -> list[int]:
 
 
 def _bake_text(text: str, px: int,
-               color: tuple[int, int, int]):
+               color: tuple[int, int, int], loader=_load_font):
     """One PIL-baked text line (the mania _cached_text pattern) →
     (rgba HxWx4, w, h). Empty/blank text bakes a 1×1 transparent stub."""
     import numpy as np
-    font = _load_font(max(int(px * 0.95), 8))
+    font = loader(max(int(px * 0.95), 8))
     try:
         x0, y0, x1, y1 = font.getbbox(text)
     except AttributeError:                 # ancient PIL bitmap font
@@ -129,10 +129,14 @@ class ResultsScreen:
                  score: int, max_combo: int, grade: str, ur: float,
                  avg_ms: float, err_deltas, meh_ms: float,
                  player: str = "", map_line: str = "", diff_name: str = "",
-                 mods: int = 0, use_skin_ranks: bool = True):
+                 mods: int = 0, use_skin_ranks: bool = True,
+                 argon_font: bool = False):
         self.spr = spr
         self.w, self.h = float(spr.width), float(spr.height)
         self.k = self.h / UI_H
+        # skinless (Argon league) → bundled OFL font; custom skin → DejaVu
+        # (keeps custom-skin results byte-identical).
+        self._font_loader = _load_argon_font if argon_font else _load_font
         k = self.k
         self.grade = grade
 
@@ -191,7 +195,8 @@ class ResultsScreen:
     def _bake(self, text: str, px: int, color, gap: int):
         if not text:
             return None
-        rgba, w, h = _bake_text(text, int(px * self.k), color)
+        rgba, w, h = _bake_text(text, int(px * self.k), color,
+                                self._font_loader)
         key = f"res_{self._n}"
         self._n += 1
         self.spr.upload_texture(key, rgba)

@@ -370,7 +370,8 @@ def _build_lazer_results(spr, settings, beatmap, meta, judgments, hud, fv,
         aim_points=aim_points, perf=perf, pb=pb)
     dur_wall_ms = max(settings.results_screen_time,
                       LAZER_RESULTS_MIN_SECONDS) * 1000.0
-    screen = LazerResultsScreen(spr, data, dur_wall_ms, speed=speed)
+    screen = LazerResultsScreen(spr, data, dur_wall_ms, speed=speed,
+                                argon_font=settings.skin_dir is None)
     return screen, dur_wall_ms
 
 
@@ -540,7 +541,8 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
                 player=meta.player_name,
                 map_line=f"{beatmap.artist} - {beatmap.name}",
                 diff_name=beatmap.difficulty_name, mods=meta.mods,
-                use_skin_ranks=not settings.renderer_default_font_and_ranks)
+                use_skin_ranks=not settings.renderer_default_font_and_ranks,
+                argon_font=settings.skin_dir is None)
             results.set_windows(hud.hw.great, hud.hw.ok)
             results_dur_wall_ms = settings.results_screen_time * 1000.0
         results_start_ms = gameplay_end_ms

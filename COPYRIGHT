@@ -36,3 +36,15 @@ PerformanceBreakdown.cs, and osu.Game.Rulesets.Osu/Statistics/
 {HitEventTimingDistribution,AccuracyHeatmap}.cs — attribution in the module
 docstring. All default textures remain procedurally baked in-repo (no ppy
 asset files).
+
+BUNDLED FONT — osu_std_renderer/assets/fonts/Nunito[wght].ttf is the Nunito
+variable font by Vernon Adams, Cyreal, Jacques Le Bailly and the Nunito
+Project Authors, redistributed under the SIL Open Font License, Version 1.1.
+The full licence is bundled alongside it at osu_std_renderer/assets/fonts/
+OFL.txt (redistribution requires the licence to travel with the font).
+"Nunito" is a Reserved Font Name under the OFL. Nunito renders the skinless
+"Argon league" text — the judgment popups (GREAT/OK/MEH/MISS), HUD labels,
+hit-circle combo numbers and results-screen text — as a free, commercial-use
+stand-in for lazer's non-commercial Torus; the custom-skin/legacy path keeps
+DejaVu (a system font, not bundled). The procedural Argon 7-segment counter
+digits are not a font.

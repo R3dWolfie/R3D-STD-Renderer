@@ -46,6 +46,7 @@ the §3.2 default ComboColors rotate per combo set at draw time.
 from __future__ import annotations
 
 import math
+import os
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
@@ -66,6 +67,36 @@ _FONT_CANDIDATES = (
     "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
     "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans-Bold.ttf",
 )
+
+# --- Argon-league text font (bundled, OFL) -----------------------------------
+# lazer draws the skinless/Argon text (judgment GREAT/OK/MEH/MISS, HUD labels,
+# hit-circle numbers, results) in Torus — a thin geometric-rounded sans. Torus
+# is non-commercial, so we bundle Nunito instead: the closest OFL / free-for-
+# commercial geometric-rounded stand-in (SIL OFL 1.1; see assets/fonts/OFL.txt).
+# Shipped as the variable font, weight pinned to Medium at load — Torus reads
+# Regular/SemiBold, NOT the DejaVu-Bold weight this replaces. The custom-skin /
+# legacy path keeps DejaVu (_load_font / bake_glyphs / bake_digits) untouched,
+# so those renders stay byte-identical.
+ARGON_FONT_PATH = os.path.normpath(os.path.join(
+    os.path.dirname(__file__), "..", "assets", "fonts", "Nunito[wght].ttf"))
+ARGON_FONT_WEIGHT = 500          # Nunito Medium (variable-font `wght` axis)
+
+# Cap-fill = cap('E') height / baked sprite vertical extent, MEASURED at the
+# real bake (font px = int(DIGIT_HEIGHT*0.95), union bbox over the charset,
+# pad=4). Nunito fills slightly less of the sprite than DejaVu, so an Argon run
+# at the SAME requested (DejaVu-tuned) height would render a slightly smaller
+# visible cap. Each Argon run multiplies its requested height by DejaVu/Argon
+# so the VISIBLE text size is unchanged by the font swap (re-derive sizing):
+#   glyph bank (HUD_CHARSET): DejaVu 0.7154, Nunito Medium 0.7025 → ×1.0184
+#   digit bank ("0123456789"): DejaVu 0.8800, Nunito Medium 0.8854 → ×0.9939
+# Judgment: requested size-20 × ~0.72 cap-fill ≈ 14.4 osu!px cap, matching
+# lazer's Torus size-20 — preserved across the swap by ARGON_GLYPH_CAP_SCALE.
+DEJAVU_GLYPH_CAP_FILL = 0.7154
+ARGON_GLYPH_CAP_FILL = 0.7025
+ARGON_GLYPH_CAP_SCALE = DEJAVU_GLYPH_CAP_FILL / ARGON_GLYPH_CAP_FILL
+DEJAVU_DIGIT_CAP_FILL = 0.8800
+ARGON_DIGIT_CAP_FILL = 0.8854
+ARGON_DIGIT_CAP_SCALE = DEJAVU_DIGIT_CAP_FILL / ARGON_DIGIT_CAP_FILL
 
 
 def _dist_grid(size: int) -> np.ndarray:
@@ -167,10 +198,26 @@ def _load_font(px: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
     return ImageFont.load_default()  # bitmap fallback; blurry but functional
 
 
-def bake_glyphs(chars: str, height: int = DIGIT_HEIGHT) -> dict[str, np.ndarray]:
+def _load_argon_font(px: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    """The bundled OFL Argon-league font (Nunito). Variable font: pin the
+    `wght` axis to ARGON_FONT_WEIGHT. Falls back to DejaVu (_load_font) if the
+    bundled asset is missing, so a stripped checkout still renders."""
+    try:
+        font = ImageFont.truetype(ARGON_FONT_PATH, px)
+    except OSError:
+        return _load_font(px)
+    try:
+        font.set_variation_by_axes([ARGON_FONT_WEIGHT])
+    except Exception:
+        pass       # non-variable FreeType build → keep the default instance
+    return font
+
+
+def bake_glyphs(chars: str, height: int = DIGIT_HEIGHT,
+                loader=_load_font) -> dict[str, np.ndarray]:
     """Each char as a white RGBA glyph, all sharing one vertical extent
     (union of the glyph bboxes) so runs baseline-align when centred."""
-    font = _load_font(int(height * 0.95))
+    font = loader(int(height * 0.95))
     boxes = {}
     for ch in chars:
         try:
@@ -197,6 +244,18 @@ def bake_digits(height: int = DIGIT_HEIGHT) -> dict[str, np.ndarray]:
     """0-9 as white RGBA glyphs (the combo-number set; bake_glyphs with the
     original digit-only vertical extent)."""
     return bake_glyphs("0123456789", height)
+
+
+def bake_argon_glyphs(chars: str,
+                      height: int = DIGIT_HEIGHT) -> dict[str, np.ndarray]:
+    """bake_glyphs in the bundled Argon-league font (Nunito) — the skinless
+    judgment text + HUD labels. Same union-extent layout as bake_glyphs."""
+    return bake_glyphs(chars, height, loader=_load_argon_font)
+
+
+def bake_argon_digits(height: int = DIGIT_HEIGHT) -> dict[str, np.ndarray]:
+    """0-9 hit-circle/combo numbers in the bundled Argon-league font."""
+    return bake_glyphs("0123456789", height, loader=_load_argon_font)
 
 
 # --- HUD textures (render/hud.py) ------------------------------------------------
@@ -981,6 +1040,21 @@ class TextureBank:
             self.glyph_aspect[ch] = rgba.shape[1] / rgba.shape[0]
         self.glyph_mono_advance = max(
             self.glyph_aspect[ch] for ch in "0123456789")
+
+        # --- Argon-league text set (bundled OFL font; drawn only when the
+        # scene is skinless — judgment text, HUD labels, hit-circle numbers).
+        # Separate keys (aglyph_/adigit_) so the DejaVu glyph_/digit_ set the
+        # legacy/custom-skin path draws stays byte-identical.
+        self.argon_digit_aspect: dict[str, float] = {}
+        for ch, rgba in bake_argon_digits().items():
+            renderer.upload_texture(f"adigit_{ch}", rgba)
+            self.argon_digit_aspect[ch] = rgba.shape[1] / rgba.shape[0]
+        self.argon_glyph_aspect: dict[str, float] = {}
+        for ch, rgba in bake_argon_glyphs(HUD_CHARSET).items():
+            renderer.upload_texture(f"aglyph_{ch}", rgba)
+            self.argon_glyph_aspect[ch] = rgba.shape[1] / rgba.shape[0]
+        self.argon_glyph_mono_advance = max(
+            self.argon_glyph_aspect[ch] for ch in "0123456789")
         renderer.upload_texture("key_square", bake_key_square())
         renderer.upload_texture("vignette", bake_vignette())
         renderer.upload_texture("pie_ring", bake_ring(PIE_SIZE, 0.10))

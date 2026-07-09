@@ -174,6 +174,7 @@ import numpy as np
 from ..replay.replay import KEY_K1, KEY_K2, KEY_M1, KEY_M2
 from ..ruleset import JudgmentKind, OsuHitWindows
 from .gl import Sprite
+from .textures import ARGON_GLYPH_CAP_SCALE
 
 UI_HEIGHT = 1080.0             # our virtual UI space (previous phases)
 LAZER_UI_HEIGHT = 768.0        # lazer's HUD space (DrawSizePreserving 768)
@@ -1139,20 +1140,34 @@ class StdHud:
 
     def _run(self, out: list[Sprite], text: str, x_left: float, y_top: float,
              h: float, color, alpha: float, mono: bool = False) -> float:
-        """Procedural-glyph run in UI px; returns the run width (UI px)."""
-        mono_adv = self.bank.glyph_mono_advance if mono else None
-        entries, total = layout_run(text, self.bank.glyph_aspect, h,
-                                    mono_advance=mono_adv)
+        """Procedural-glyph run in UI px; returns the run width (UI px). Argon
+        league → bundled font (aglyph_, height cap-scaled so the visible size
+        is unchanged by the swap); legacy/custom-skin → DejaVu glyph_."""
+        if self.argon_league:
+            aspects = self.bank.argon_glyph_aspect
+            mono_adv = self.bank.argon_glyph_mono_advance if mono else None
+            prefix, hd = "aglyph_", h * ARGON_GLYPH_CAP_SCALE
+        else:
+            aspects = self.bank.glyph_aspect
+            mono_adv = self.bank.glyph_mono_advance if mono else None
+            prefix, hd = "glyph_", h
+        entries, total = layout_run(text, aspects, hd, mono_advance=mono_adv)
         k = self.k
         for ch, cx, w in entries:
             out.append(Sprite((x_left + cx) * k, (y_top + h / 2.0) * k,
-                              w * k, h * k, f"glyph_{ch}", (*color, alpha)))
+                              w * k, hd * k, f"{prefix}{ch}", (*color, alpha)))
         return total
 
     def _run_width(self, text: str, h: float, mono: bool = False) -> float:
-        mono_adv = self.bank.glyph_mono_advance if mono else None
-        _, total = layout_run(text, self.bank.glyph_aspect, h,
-                              mono_advance=mono_adv)
+        if self.argon_league:
+            aspects = self.bank.argon_glyph_aspect
+            mono_adv = self.bank.argon_glyph_mono_advance if mono else None
+            hd = h * ARGON_GLYPH_CAP_SCALE
+        else:
+            aspects = self.bank.glyph_aspect
+            mono_adv = self.bank.glyph_mono_advance if mono else None
+            hd = h
+        _, total = layout_run(text, aspects, hd, mono_advance=mono_adv)
         return total
 
     def _lrun(self, out, text, x_l, y_l, h_l, color, alpha,

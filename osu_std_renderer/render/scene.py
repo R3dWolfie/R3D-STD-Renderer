@@ -164,6 +164,7 @@ from .markers import (arrow_alpha_scale, arrow_pulse, arrow_rotation,
 from .skin_elements import (FOLLOW_CIRCLE_SCALE, CURSOR_UI_HEIGHT,
                             circle_pixel_scale, layout_skin_digits)
 from .slider_body import DEFAULT_COMBO_COLORS, BodyStyle, sub_path
+from .textures import ARGON_DIGIT_CAP_SCALE, ARGON_GLYPH_CAP_SCALE
 from .spinner import (CLEAR_OFFSET_OSU, GLOW_BLUE, SPIN_OFFSET_OSU,
                       SPINNER_CENTRE, SPRITE_SCALE, SpinnerTrack,
                       clear_alpha_scale, detect_spinner_style,
@@ -305,10 +306,12 @@ ARGON_JUDGE_COLOR = {                             # OsuColour hex → linear-ish
 # osu.Game.Rulesets.Osu/Skinning/Argon/ArgonJudgementPiece.cs):
 #   Font = OsuFont.Default.With(size: 20, weight: FontWeight.Bold)
 #   Spacing = new Vector2(5, 0)
-# Our DejaVu caps fill ~0.73 of the glyph sprite (measured), so a size-20
-# cell renders a ~14.6-osu!px visible cap — matching lazer's Torus size-20
-# cap (~0.72·20 = 14.4). (Both were previously inflated — 25/7 "for
-# legibility" — which read ~27% too big vs lazer.)
+# Text now renders in the bundled Argon font (Nunito) whose caps fill ~0.7025
+# of the glyph sprite. The run scales its height by ARGON_GLYPH_CAP_SCALE
+# (DejaVu 0.7154 / Nunito 0.7025) so a size-20 cell keeps the SAME ~14.4-osu!px
+# visible cap the DejaVu tuning had — matching lazer's Torus size-20 cap
+# (~0.72·20 = 14.4). (Both were once inflated — 25/7 "for legibility" — which
+# read ~27% too big vs lazer.)
 ARGON_JUDGE_FONT_OSU = 20.0     # OsuSpriteText size 20
 ARGON_JUDGE_SPACING_OSU = 5.0   # Spacing (5, 0) at size 20
 ARGON_JUDGE_LIFE_MS = 800.0     # FadeOutFromOne(800)
@@ -1311,6 +1314,13 @@ class StdScene:
                                   f"sk_digit_{ch}",
                                   (1.0, 1.0, 1.0, num_alpha)))
             return out
+        if self.skin is None:               # Argon league → bundled font
+            h = self.radius_px * ARGON_DIGIT_CAP_SCALE
+            for ch, dx, w in layout_digits(number, self.bank.argon_digit_aspect,
+                                           h):
+                out.append(Sprite(x + dx, y, w, h, f"adigit_{ch}",
+                                  (1.0, 1.0, 1.0, num_alpha)))
+            return out
         h = self.radius_px  # digit height = half the circle diameter
         for ch, dx, w in layout_digits(number, self.bank.digit_aspect, h):
             out.append(Sprite(x + dx, y, w, h, f"digit_{ch}",
@@ -1635,11 +1645,17 @@ class StdScene:
 
     def _glyph_run(self, out: list[Sprite], text: str, center_x: float,
                    center_y: float, h_px: float, color, alpha: float) -> None:
-        """Centred HUD-glyph text (the procedural spinner prompts/RPM)."""
-        entries, total = layout_run(text, self.bank.glyph_aspect, h_px)
+        """Centred HUD-glyph text (the procedural spinner prompts/RPM). Argon
+        league → bundled font (aglyph_, cap-scaled); legacy → DejaVu glyph_."""
+        if self.skin is None:
+            aspects, prefix = self.bank.argon_glyph_aspect, "aglyph_"
+            h_px = h_px * ARGON_GLYPH_CAP_SCALE
+        else:
+            aspects, prefix = self.bank.glyph_aspect, "glyph_"
+        entries, total = layout_run(text, aspects, h_px)
         x0 = center_x - total / 2.0
         for ch, cxo, w in entries:
-            out.append(Sprite(x0 + cxo, center_y, w, h_px, f"glyph_{ch}",
+            out.append(Sprite(x0 + cxo, center_y, w, h_px, f"{prefix}{ch}",
                               (*color, alpha)))
 
     def _draw_spinner(self, obj, t: float) -> None:
@@ -1866,13 +1882,19 @@ class StdScene:
                 out.append(Sprite(x0 + dx * m, center_y, w * m, h * m,
                                   f"sk_score_{ch}", (1.0, 1.0, 1.0, alpha)))
             return
-        entries, total = layout_run(str(value), self.bank.glyph_aspect,
-                                    target_h_px,
-                                    mono_advance=self.bank.glyph_mono_advance)
+        if self.skin is None:               # Argon league → bundled font
+            aspects, prefix = self.bank.argon_glyph_aspect, "aglyph_"
+            mono = self.bank.argon_glyph_mono_advance
+            target_h_px = target_h_px * ARGON_GLYPH_CAP_SCALE
+        else:
+            aspects, prefix = self.bank.glyph_aspect, "glyph_"
+            mono = self.bank.glyph_mono_advance
+        entries, total = layout_run(str(value), aspects, target_h_px,
+                                    mono_advance=mono)
         x0 = right_x - total
         for ch, cxo, w in entries:
             out.append(Sprite(x0 + cxo, center_y, w, target_h_px,
-                              f"glyph_{ch}", (1.0, 1.0, 1.0, alpha)))
+                              f"{prefix}{ch}", (1.0, 1.0, 1.0, alpha)))
 
     # --- hit lighting -------------------------------------------------------------------
 
@@ -1995,16 +2017,19 @@ class StdScene:
         the MISS down-drift rotation reads like lazer)."""
         if alpha <= 0.0:
             return
-        h = self.cam.len_to_screen(ARGON_JUDGE_FONT_OSU) * scale
+        # bundled Argon font (aglyph_): scale the cell so the visible cap keeps
+        # the DejaVu-tuned ~14.4-osu!px size under Nunito's lower cap-fill.
+        h = self.cam.len_to_screen(ARGON_JUDGE_FONT_OSU) * scale \
+            * ARGON_GLYPH_CAP_SCALE
         spacing = self.cam.len_to_screen(ARGON_JUDGE_SPACING_OSU) * scale
-        widths = [self.bank.glyph_aspect.get(ch, 0.6) * h for ch in text]
+        widths = [self.bank.argon_glyph_aspect.get(ch, 0.6) * h for ch in text]
         total = sum(widths) + spacing * max(len(text) - 1, 0)
         cosr, sinr = math.cos(rot), math.sin(rot)
         gx = -total / 2.0
         for ch, wq in zip(text, widths):
             ox = gx + wq / 2.0
             out.append(Sprite(cx + ox * cosr, cy + ox * sinr, wq, h,
-                              f"glyph_{ch}", (*color, alpha),
+                              f"aglyph_{ch}", (*color, alpha),
                               rotation=rot, additive=True))
             gx += wq + spacing
 
