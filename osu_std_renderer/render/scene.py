@@ -1239,6 +1239,16 @@ class StdScene:
         element (fully transparent) draws nothing."""
         sk = self.skin
         if sk is None:                    # Argon league (ArgonMainCirclePiece)
+            if role == "slider_end":
+                # ArgonSliderTail draws NOTHING: DrawableSliderTail.CirclePiece
+                # is a SkinnableDrawable(SliderTailHitCircle, _ => Empty()) —
+                # "no default for this; only visible in legacy skins" — and
+                # OsuArgonSkinTransformer has NO SliderTailHitCircle case, so it
+                # falls through to that Empty() fallback. Real Argon's slider
+                # end is just the ArgonSliderBody's rounded snake cap (the body
+                # "just ends"); no accent disc / white ring there. The tail
+                # reverse arrow (ArgonReverseArrow) is emitted separately.
+                return []
             return self._argon_circle_sprites(x, y, color, alpha, scale)
         if sk is not None:
             circle_el, overlay_el = sk.circle_elements(role)
