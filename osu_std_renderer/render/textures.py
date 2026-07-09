@@ -280,8 +280,12 @@ def bake_argon_digits(height: int = DIGIT_HEIGHT) -> dict[str, np.ndarray]:
 
 # full uppercase set: HUD labels (ACCURACY/COMBO), key names, grades,
 # SPIN!/CLEAR!/RPM, UR, time readouts ("-0:00") — plus lowercase 'p'
-# for the pp counter's "pp" suffix
-HUD_CHARSET = "0123456789.%x,:-!ABCDEFGHIJKLMNOPQRSTUVWXYZp"
+# for the pp counter's "pp" suffix and '×' for the custom-rate mod pill
+# (e.g. "DT 1.3×"). Appending '×' is baked as its own glyph_× / aglyph_×
+# texture and — verified — sits inside the existing union vertical extent
+# (its bbox is narrower than the ascenders/'p' descender), so every other
+# glyph bakes byte-identically and legacy renders are unchanged.
+HUD_CHARSET = "0123456789.%x,:-!ABCDEFGHIJKLMNOPQRSTUVWXYZp×"
 PIE_STEPS = 48          # quantized progress-pie fill masks
 PIE_SIZE = 96
 KEY_SQUARE_SIZE = 128

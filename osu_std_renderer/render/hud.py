@@ -167,6 +167,7 @@ from __future__ import annotations
 
 import bisect
 import math
+from collections import namedtuple
 from dataclasses import dataclass
 
 import numpy as np
@@ -360,6 +361,61 @@ def mods_to_acronyms(mods: int) -> list[str]:
     if "PF" in out and "SD" in out:
         out.remove("SD")
     return out
+
+
+# A single gameplay mod pill: ``acr`` is the bare acronym (drives the
+# category colour); ``text`` is what's drawn on the pill — the acronym plus,
+# for a custom-rate DT/NC/HT/DC, a compact " 1.3×" speed suffix.
+ModPill = namedtuple("ModPill", ("text", "acr"))
+
+# the constant-rate mods (ModRateAdjust) that can carry a custom speed_change
+_RATE_ADJUST_ACRS = frozenset({"DT", "NC", "HT", "DC"})
+
+
+def _fmt_rate(rate: float) -> str:
+    """Compact rate label for a custom-rate pill suffix: two decimals with
+    trailing zeros trimmed — 1.3 → '1.3', 1.25 → '1.25', 1.5 → '1.5'."""
+    return f"{rate:.2f}".rstrip("0").rstrip(".") or "0"
+
+
+def build_mod_pills(mods: int, lazer_mods=(),
+                    rate_override: float | None = None) -> list[ModPill]:
+    """The gameplay HUD mod-pill list, one :class:`ModPill` per active mod.
+
+    Prefers the FULL lazer acronym set (``meta.lazer_mods`` — CL/DA/RX/WU/WD
+    and every lazer-only mod, in the .osr ScoreInfo blob's display order) when
+    present, so lazer-only mods that the legacy 32-bit bitmask cannot encode
+    still get a badge. Falls back to :func:`mods_to_acronyms` for a pure-stable
+    replay that carries no blob — for which this returns exactly the old list
+    (``ModPill(acr, acr)`` per acronym), keeping legacy renders byte-identical.
+
+    ``rate_override`` (``meta.rate_override``): a custom clock rate on a
+    DT/NC/HT/DC gets a compact " 1.3×" suffix on its pill; a default-rate mod
+    (``rate_override is None``) stays a plain "DT". WU/WD arrive as their own
+    acronyms in ``lazer_mods`` and render as a plain "WU"/"WD" badge.
+
+    The source is exclusive (lazer set OR bitmask, never both) and de-duped, so
+    a mod is never shown twice; the NC-swallows-DT / PF-swallows-SD convention
+    is applied to either source.
+    """
+    if lazer_mods:
+        acrs = [str(a).upper() for a in lazer_mods]
+        if "NC" in acrs and "DT" in acrs:
+            acrs.remove("DT")
+        if "PF" in acrs and "SD" in acrs:
+            acrs.remove("SD")
+        out: list[ModPill] = []
+        seen: set[str] = set()
+        for a in acrs:
+            if a in seen:
+                continue
+            seen.add(a)
+            if a in _RATE_ADJUST_ACRS and rate_override is not None:
+                out.append(ModPill(f"{a} {_fmt_rate(rate_override)}×", a))
+            else:
+                out.append(ModPill(a, a))
+        return out
+    return [ModPill(a, a) for a in mods_to_acronyms(mods)]
 
 
 def mod_pill_color(acr: str) -> tuple[float, float, float]:
@@ -1039,7 +1095,8 @@ class StdHud:
 
     def __init__(self, sprites, bank, settings, judgments, frames, beatmap,
                  skin_elems=None, health=None, mods: int = 0,
-                 pp_timeline=None, aim_points=None, strain=None):
+                 pp_timeline=None, aim_points=None, strain=None,
+                 mod_pills=None):
         self.spr = sprites
         self.bank = bank
         self.s = settings
@@ -1080,8 +1137,14 @@ class StdHud:
         # any custom skin keeps the bottom-centre house meter unchanged.
         self.argon_league = sk is None and not self.legacy_defaults
         # -- settings-surface data (mod pills / pp / aim / strain) --------
+        # mod_pills is the FULL display set (lazer_mods incl. lazer-only mods
+        # + custom-rate suffix — see build_mod_pills); None falls back to the
+        # legacy bitmask, which yields ModPill(acr, acr) == the old list so a
+        # pure-legacy replay's pill row is byte-identical.
         self.mods = int(mods)
-        self._mod_acrs = (mods_to_acronyms(self.mods)
+        if mod_pills is None:
+            mod_pills = build_mod_pills(self.mods)
+        self._mod_acrs = (list(mod_pills)
                           if getattr(settings, "show_mods", True) else [])
         self.pp_pts = pp_timeline            # [(t, pp)] | None (hidden)
         self._pp_times = ([p[0] for p in pp_timeline]
@@ -2034,15 +2097,15 @@ class StdHud:
         text_h = h * MOD_TEXT_FRAC
         top = self._top_right_stack_y()
         x_right = self.ui_w_l - 20.0 * es
-        for acr in reversed(self._mod_acrs):     # lay right-to-left
-            tw = self._lrun_width(acr, text_h)
+        for pill in reversed(self._mod_acrs):    # lay right-to-left
+            tw = self._lrun_width(pill.text, text_h)
             pw = tw + 2.0 * MOD_PILL_PAD_X * es
             cx = x_right - pw / 2.0
-            color = mod_pill_color(acr)
+            color = mod_pill_color(pill.acr)
             out.append(Sprite(cx * lk, (top + h / 2.0) * lk,
                               pw * lk, h * lk, "pill",
                               (*color, 0.88 * self.op)))
-            self._lrun(out, acr, cx - tw / 2.0,
+            self._lrun(out, pill.text, cx - tw / 2.0,
                        top + (h - text_h) / 2.0, text_h,
                        (1.0, 1.0, 1.0), 0.95 * self.op)
             x_right -= pw + MOD_PILL_GAP * es

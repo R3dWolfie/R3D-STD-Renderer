@@ -7,8 +7,9 @@ import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
-from osu_std_renderer.render.hud import (HudData, build_aim_points,
-                                         mod_pill_color, mods_to_acronyms)
+from osu_std_renderer.render.hud import (HudData, ModPill, build_aim_points,
+                                         build_mod_pills, mod_pill_color,
+                                         mods_to_acronyms)
 from osu_std_renderer.render.scoreboard import (ScoreboardEntry, draw,
                                                 load_scoreboard_json)
 from tests.test_hud import _three_circle_run
@@ -36,6 +37,71 @@ def test_mod_pill_colors_by_category():
     assert mod_pill_color("RX") == mod_pill_color("V2")      # automation
     assert mod_pill_color("EZ") != mod_pill_color("HR")
     assert mod_pill_color("HR") != mod_pill_color("RX")
+
+
+# --- build_mod_pills: the full display set (lazer set + custom-rate) --------------
+
+def test_build_mod_pills_from_lazer_mods_all_acronyms():
+    # the FULL lazer acronym list, in the .osr blob's order, one pill each —
+    # including lazer-only mods the 32-bit bitmask can't encode (CL/DA)
+    pills = build_mod_pills(0x48, ["HD", "DT"])
+    assert pills == [ModPill("HD", "HD"), ModPill("DT", "DT")]
+    # CL (Classic) has NO bitmask bit — only lazer_mods can surface it
+    assert build_mod_pills(0, ["CL"]) == [ModPill("CL", "CL")]
+    # DA (Difficulty Adjust) likewise, kept in order alongside a bitmask mod
+    assert build_mod_pills(0x10, ["HR", "DA"]) == [
+        ModPill("HR", "HR"), ModPill("DA", "DA")]
+    # RX surfaced from the blob (a lazer-only display path)
+    assert build_mod_pills(0, ["RX", "HD"]) == [
+        ModPill("RX", "RX"), ModPill("HD", "HD")]
+
+
+def test_build_mod_pills_custom_rate_suffix():
+    # a non-default speed_change puts a compact "1.3×" on the DT/NC/HT pill,
+    # while the acr (colour key) stays the bare acronym
+    assert build_mod_pills(0x40, ["DT"], 1.3) == [ModPill("DT 1.3×", "DT")]
+    assert build_mod_pills(0x240, ["NC"], 1.3) == [ModPill("NC 1.3×", "NC")]
+    assert build_mod_pills(0x100, ["HT"], 0.9) == [ModPill("HT 0.9×", "HT")]
+    # trailing zeros trimmed (1.25 keeps both, 1.50 → "1.5")
+    assert build_mod_pills(0x40, ["DT"], 1.25)[0].text == "DT 1.25×"
+    assert build_mod_pills(0x40, ["DT"], 1.5)[0].text == "DT 1.5×"
+    # a DEFAULT-rate DT (rate_override None) stays a plain badge — the suffix
+    # only appears for a genuinely custom rate
+    assert build_mod_pills(0x40, ["DT"], None) == [ModPill("DT", "DT")]
+    # a rate on a non-rate mod is ignored (only DT/NC/HT/DC take a suffix)
+    assert build_mod_pills(0x8, ["HD"], 1.3) == [ModPill("HD", "HD")]
+
+
+def test_build_mod_pills_wind_up_down_badge():
+    # WU/WD arrive as their own acronyms and render as a plain compact badge
+    assert build_mod_pills(0, ["WU"]) == [ModPill("WU", "WU")]
+    assert build_mod_pills(0, ["WD"]) == [ModPill("WD", "WD")]
+    assert build_mod_pills(0, ["HD", "WU"]) == [
+        ModPill("HD", "HD"), ModPill("WU", "WU")]
+
+
+def test_build_mod_pills_legacy_bitmask_fallback():
+    # no lazer_mods (a pure-stable replay) → derive from the 32-bit bitmask,
+    # exactly mods_to_acronyms wrapped as ModPill(acr, acr)
+    for m in (0x8, 0x18, 0x40 | 0x200, 0x1 | 0x8 | 0x10 | 0x40 | 0x200 | 0x400):
+        assert build_mod_pills(m) == [ModPill(a, a)
+                                      for a in mods_to_acronyms(m)]
+    # NC swallows DT, PF swallows SD on the bitmask path too
+    assert build_mod_pills(0x40 | 0x200) == [ModPill("NC", "NC")]
+    assert build_mod_pills(0x20 | 0x4000) == [ModPill("PF", "PF")]
+
+
+def test_build_mod_pills_nomod_unchanged():
+    # nomod → no pills, on both the lazer and legacy paths
+    assert build_mod_pills(0) == []
+    assert build_mod_pills(0, []) == []
+
+
+def test_build_mod_pills_lazer_dedup_and_swallow():
+    # defensive: a blob NC+DT (or PF+SD) collapses to one pill; duplicates drop
+    assert build_mod_pills(0, ["NC", "DT"]) == [ModPill("NC", "NC")]
+    assert build_mod_pills(0, ["PF", "SD"]) == [ModPill("PF", "PF")]
+    assert build_mod_pills(0, ["HD", "HD"]) == [ModPill("HD", "HD")]
 
 
 # --- hit counter -------------------------------------------------------------------
