@@ -8,12 +8,17 @@ every texture is procedurally baked in-repo, fonts = the repo's DejaVu):
   osu.Game/Screens/Ranking/ScorePanel.cs
   osu.Game/Screens/Ranking/Expanded/ExpandedPanelMiddleContent.cs
   osu.Game/Screens/Ranking/Expanded/Accuracy/AccuracyCircle.cs
-      — the graded ring (OsuColour.ForRank bands at the score-processor
-        accuracy thresholds), the accuracy arc that SWEEPS in over
-        ACCURACY_TRANSFORM_DURATION, the virtual-SS notch (a non-SS play
-        caps its arc at 1 − VIRTUAL_SS_PERCENTAGE so only a true SS closes
-        the ring), and the rank badge (grade letter) punching in at the
-        end of the sweep.
+  osu.Game/Screens/Ranking/Expanded/Accuracy/GradedCircles.cs
+      — the graded ring: OsuColour.ForRank bands (D ff5a5a, C ff8e5d,
+        B e3b130, A 88da20, S 02b5c3, X/SS de31ae) at the score-processor
+        accuracy thresholds, with the GRADE_SPACING_PERCENTAGE (2/360)
+        boundary notches; the achieved-accuracy arc SWEEPS in over
+        ACCURACY_TRANSFORM_DURATION painted THROUGH those rank colours
+        (each band's slice takes its ForRank stop); the virtual-SS notch
+        (a non-SS play caps its arc at 1 − VIRTUAL_SS_PERCENTAGE so only a
+        true SS closes the ring, and the SS/X band owns the 0.99→1.0
+        slice); and the rank badge (grade letter) punching in at the end of
+        the sweep.
   osu.Game/Screens/Ranking/Expanded/StarRatingDisplay + AccuracyStatistic
   osu.Game/Screens/Ranking/Statistics/PerformanceBreakdown.cs   (bars)
   osu.Game.Rulesets.Osu/Statistics/{HitEventTimingDistribution,
@@ -50,7 +55,7 @@ from dataclasses import dataclass
 from PIL import Image, ImageDraw
 
 from .gl import Sprite
-from .hud import BAND_50, BAND_100, BAND_300, GRADE_COLORS
+from .hud import BAND_50, BAND_100, BAND_300
 from .results import histogram_bins, mods_string
 from .textures import _load_argon_font, _load_font
 
@@ -91,6 +96,36 @@ RESULT_COLORS = {
 }
 
 
+def _hex(s: str) -> tuple[float, float, float]:
+    """'#rrggbb' / 'rrggbb' → linear-free 0..1 RGB tuple."""
+    s = s.lstrip("#")
+    return (int(s[0:2], 16) / 255.0, int(s[2:4], 16) / 255.0,
+            int(s[4:6], 16) / 255.0)
+
+
+# The rank ring colours are lazer's OsuColour.ForRank — the EXACT hexes from
+# osu.Game/Graphics/OsuColour.cs (ForRank), which AccuracyCircle's GradedCircles
+# paints as the D→C→B→A→S→X bands around the ring. (These differ from the
+# gameplay GRADE_COLORS legacy palette; ForRank is lazer's ranking-screen set.)
+FOR_RANK = {
+    "D": _hex("ff5a5a"),   # ScoreRank.D
+    "C": _hex("ff8e5d"),   # ScoreRank.C
+    "B": _hex("e3b130"),   # ScoreRank.B
+    "A": _hex("88da20"),   # ScoreRank.A
+    "S": _hex("02b5c3"),   # ScoreRank.S / SH
+    "SS": _hex("de31ae"),  # ScoreRank.X / XH  (SS)
+}
+# alias the lazer rank-letter keys the meta layer may hand us
+FOR_RANK["X"] = FOR_RANK["SS"]
+FOR_RANK["SSH"] = FOR_RANK["SS"]
+FOR_RANK["XH"] = FOR_RANK["SS"]
+FOR_RANK["SH"] = FOR_RANK["S"]
+
+# AccuracyCircle.GRADE_SPACING_PERCENTAGE = 2.0 / 360 — GradedCircles insets
+# each band by half of this on each side, opening the boundary notches.
+GRADE_SPACING_PERCENTAGE = 2.0 / 360.0
+
+
 # --- pure helpers (unit-tested) -----------------------------------------------------
 
 def _clamp01(v: float) -> float:
@@ -120,6 +155,34 @@ def grade_bands() -> list[tuple[float, float, str]]:
         hi = RANK_THRESHOLDS[i + 1][0]
         out.append((lo, hi, g))
     return out
+
+
+def rank_ring_bands() -> list[tuple[float, float, str]]:
+    """[(acc_lo, acc_hi, grade)] — lazer's GradedCircles band layout for the
+    ring (AccuracyCircle.cs). Same rank thresholds as grade_bands(), but the
+    S band stops at 1 − VIRTUAL_SS_PERCENTAGE and a distinct SS/X band owns
+    the final 0.99→1.0 slice (the virtual-SS notch). This is the layout the
+    rank-colour arc + graded background use."""
+    ss_lo = 1.0 - VIRTUAL_SS_PERCENTAGE            # 0.99
+    return [
+        (0.00, 0.70, "D"),
+        (0.70, 0.80, "C"),
+        (0.80, 0.90, "B"),
+        (0.90, 0.95, "A"),
+        (0.95, ss_lo, "S"),
+        (ss_lo, 1.00, "SS"),
+    ]
+
+
+def arc_color_at(acc: float) -> tuple[float, float, float]:
+    """The rank colour painted on the achieved arc at accuracy `acc` — the
+    ForRank stop for whichever band `acc` lands in (AccuracyCircle paints the
+    ring through the D→C→B→A→S→X rank colours)."""
+    acc = _clamp01(acc)
+    for lo, hi, g in rank_ring_bands():
+        if lo <= acc < hi:
+            return FOR_RANK[g]
+    return FOR_RANK["SS"]
 
 
 def target_arc_value(acc_frac: float, grade: str) -> float:
@@ -283,10 +346,10 @@ def _hsv(h: float, s: float, v: float) -> tuple[float, float, float]:
 
 
 def bake_accuracy_base(px: int):
-    """The AccuracyCircle background: dark track ring, the grade-boundary
-    colour bands (dimmed), boundary notches, and a rank-letter badge at
-    each threshold. Baked once (accuracy-independent). Canvas is padded so
-    the badges fit outside the ring."""
+    """The AccuracyCircle background: dark track ring, the ForRank graded
+    bands (dimmed — GradedCircles), the boundary notches (GRADE_SPACING),
+    and a rank-letter badge at each band. Baked once (accuracy-independent).
+    Canvas is padded so the badges fit outside the ring."""
     import numpy as np
     S = max(int(px), 64)
     img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
@@ -295,22 +358,20 @@ def bake_accuracy_base(px: int):
     outer_r = S * 0.40
     ring_w = int(round(S * 0.085))
     bbox = [cx - outer_r, cy - outer_r, cx + outer_r, cy + outer_r]
+    half_gap = GRADE_SPACING_PERCENTAGE / 2.0
     # dark track
     d.arc(bbox, 0, 360, fill=(30, 32, 40, 255), width=ring_w)
-    # graded bands (dimmed — the achieved arc paints bright over them)
-    for lo, hi, g in grade_bands():
-        col = tuple(int(round(c * 200)) for c in GRADE_COLORS[g])
-        d.arc(bbox, acc_to_angle_deg(lo), acc_to_angle_deg(hi),
-              fill=(*col, 150), width=ring_w)
-    # boundary notches (thin dark radial ticks) + SS notch gap
-    for lo, _hi, _g in grade_bands()[1:]:
-        _notch(d, cx, cy, outer_r, ring_w, acc_to_angle_deg(lo),
-               (12, 12, 16, 255))
-    _notch(d, cx, cy, outer_r, ring_w,
-           acc_to_angle_deg(1.0 - VIRTUAL_SS_PERCENTAGE), (12, 12, 16, 255))
-    # rank badges at each threshold
+    # graded bands (dimmed — the bright achieved arc paints over them). Each
+    # band is inset by half the grade spacing on each end → the notch gaps.
+    for lo, hi, g in rank_ring_bands():
+        col = tuple(int(round(c * 200)) for c in FOR_RANK[g])
+        a0 = acc_to_angle_deg(lo + half_gap)
+        a1 = acc_to_angle_deg(hi - half_gap)
+        if a1 > a0:
+            d.arc(bbox, a0, a1, fill=(*col, 150), width=ring_w)
+    # rank badges at each band's lower bound (ForRank-coloured)
     badge_r = S * 0.465
-    for lo, g in RANK_THRESHOLDS:
+    for lo, _hi, g in rank_ring_bands():
         ang = math.radians(acc_to_angle_deg(lo))
         bx = cx + badge_r * math.cos(ang)
         by = cy + badge_r * math.sin(ang)
@@ -329,7 +390,8 @@ def _notch(d, cx, cy, outer_r, ring_w, ang_deg, color) -> None:
 
 def _badge(img, bx, by, r, grade) -> None:
     d = ImageDraw.Draw(img)
-    col = tuple(int(round(c * 255)) for c in GRADE_COLORS[grade])
+    col = tuple(int(round(c * 255)) for c in FOR_RANK.get(grade,
+                                                          (0.8, 0.8, 0.85)))
     d.ellipse([bx - r, by - r, bx + r, by + r], fill=(*col, 235))
     label = "SS" if grade == "SS" else grade
     font = _load_font(int(r * (1.0 if len(label) == 1 else 0.72)))
@@ -341,9 +403,13 @@ def _badge(img, bx, by, r, grade) -> None:
            font=font, fill=(20, 20, 26, 255))
 
 
-def bake_accuracy_arc(px: int, progress_acc: float, color):
-    """The bright achieved-accuracy arc (0 → progress_acc) with a rounded
-    cap dot at the tip (the needle/gap). Re-baked only while sweeping."""
+def bake_accuracy_arc(px: int, progress_acc: float, color=None):
+    """The bright achieved-accuracy arc (0 → progress_acc), painted through
+    lazer's rank colours: each band's slice takes its ForRank stop
+    (AccuracyCircle / GradedCircles), with the GRADE_SPACING boundary notches
+    between fully-filled bands and a rounded white cap dot at the sweeping
+    tip. `color` is ignored (kept for signature compat). Re-baked only while
+    sweeping."""
     import numpy as np
     S = max(int(px), 64)
     img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
@@ -352,11 +418,22 @@ def bake_accuracy_arc(px: int, progress_acc: float, color):
     outer_r = S * 0.40
     ring_w = int(round(S * 0.085))
     bbox = [cx - outer_r, cy - outer_r, cx + outer_r, cy + outer_r]
-    col = tuple(int(round(c * 255)) for c in color)
+    half_gap = GRADE_SPACING_PERCENTAGE / 2.0
     if progress_acc > 0.0005:
-        d.arc(bbox, acc_to_angle_deg(0.0), acc_to_angle_deg(progress_acc),
-              fill=(*col, 255), width=ring_w)
-        # bright cap dot at the tip
+        for lo, hi, g in rank_ring_bands():
+            if progress_acc <= lo:
+                break
+            filled_hi = min(hi, progress_acc)
+            seg_lo = lo + (half_gap if lo > 0.0 else 0.0)
+            # notch before the NEXT band only where this band is fully filled;
+            # the growing tip keeps no gap
+            seg_hi = filled_hi - (half_gap if filled_hi >= hi - 1e-9 else 0.0)
+            if seg_hi <= seg_lo:
+                continue
+            col = tuple(int(round(c * 255)) for c in FOR_RANK[g])
+            d.arc(bbox, acc_to_angle_deg(seg_lo), acc_to_angle_deg(seg_hi),
+                  fill=(*col, 255), width=ring_w)
+        # bright cap dot at the sweeping tip
         ang = math.radians(acc_to_angle_deg(progress_acc))
         tx = cx + outer_r * math.cos(ang)
         ty = cy + outer_r * math.sin(ang)
@@ -448,7 +525,9 @@ class LazerResultsScreen:
         self._arc_bucket = -1.0
         self._score_val = -1
         self.acc_frac = _clamp01(data.acc_pct / 100.0)
-        self.grade_rgb = GRADE_COLORS.get(data.grade, (0.8, 0.8, 0.85))
+        # centre grade letter matches the ForRank ring (AccuracyCircle uses
+        # the rank colour for the badge too)
+        self.grade_rgb = FOR_RANK.get(data.grade, (0.8, 0.8, 0.85))
         self._bake_static()
 
     # -- baking ------------------------------------------------------------------
@@ -595,7 +674,7 @@ class LazerResultsScreen:
                 "name": self._text(_clip(pb.get("player_name", ""), 16), 22,
                                    (0.95, 0.96, 1.0)),
                 "grade": self._text(pb_grade, 40,
-                                    GRADE_COLORS.get(pb_grade, (0.8, 0.8, 0.85))),
+                                    FOR_RANK.get(pb_grade, (0.8, 0.8, 0.85))),
                 "score": self._text(f"{int(pb.get('score', 0)):,}", 30,
                                     (1, 1, 1)),
                 "acc": self._text(f"{float(pb.get('accuracy', 0.0)):.2f}%  "

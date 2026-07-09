@@ -12,9 +12,10 @@ import sqlite3
 import tempfile
 
 from osu_std_renderer.render.lazer_results import (
-    LazerResultsScreen, RANK_THRESHOLDS, ResultsData, VIRTUAL_SS_PERCENTAGE,
-    acc_to_angle_deg, ease_out_quint, grade_bands, query_pb, slider_stats,
-    target_arc_value,
+    FOR_RANK, GRADE_SPACING_PERCENTAGE, LazerResultsScreen, RANK_THRESHOLDS,
+    ResultsData, VIRTUAL_SS_PERCENTAGE, acc_to_angle_deg, arc_color_at,
+    bake_accuracy_arc, ease_out_quint, grade_bands, rank_ring_bands, query_pb,
+    slider_stats, target_arc_value,
 )
 from osu_std_renderer.render.pp import component_pct
 from osu_std_renderer.settings import StdRenderSettings
@@ -64,6 +65,80 @@ def test_grade_bands_partition_and_colours():
     assert bands[0] == (0.0, 0.70, "D")
     # thresholds match the rank table
     assert [lo for lo, _ in RANK_THRESHOLDS] == [0.0, 0.7, 0.8, 0.9, 0.95, 1.0]
+
+
+# --- rank-gradient arc (Fix 1) ------------------------------------------------------
+
+def _hexf(s):
+    return (int(s[0:2], 16) / 255.0, int(s[2:4], 16) / 255.0,
+            int(s[4:6], 16) / 255.0)
+
+
+def test_for_rank_matches_lazer_oscolour_forrank():
+    # exact hexes from osu.Game/Graphics/OsuColour.cs ForRank(ScoreRank)
+    assert FOR_RANK["D"] == _hexf("ff5a5a")
+    assert FOR_RANK["C"] == _hexf("ff8e5d")
+    assert FOR_RANK["B"] == _hexf("e3b130")
+    assert FOR_RANK["A"] == _hexf("88da20")
+    assert FOR_RANK["S"] == _hexf("02b5c3")
+    assert FOR_RANK["SS"] == _hexf("de31ae")
+    # X/SH/XH aliases resolve to the same stop as SS/S
+    assert FOR_RANK["X"] == FOR_RANK["SS"]
+    assert FOR_RANK["XH"] == FOR_RANK["SS"]
+    assert FOR_RANK["SH"] == FOR_RANK["S"]
+
+
+def test_grade_spacing_percentage_matches_lazer():
+    # AccuracyCircle.GRADE_SPACING_PERCENTAGE = 2.0 / 360
+    assert GRADE_SPACING_PERCENTAGE == 2.0 / 360.0
+
+
+def test_rank_ring_bands_layout_and_virtual_ss():
+    bands = rank_ring_bands()
+    grades = [g for _lo, _hi, g in bands]
+    assert grades == ["D", "C", "B", "A", "S", "SS"]
+    # contiguous cover of [0,1]
+    assert bands[0][0] == 0.0 and bands[-1][1] == 1.0
+    for i in range(1, len(bands)):
+        assert bands[i][0] == bands[i - 1][1]
+    # the S band stops at 1 - VIRTUAL_SS_PERCENTAGE and SS owns 0.99->1.0
+    ss_lo = 1.0 - VIRTUAL_SS_PERCENTAGE
+    assert bands[4] == (0.95, ss_lo, "S")
+    assert bands[5] == (ss_lo, 1.0, "SS")
+
+
+def test_arc_color_at_maps_accuracy_to_forrank_stop():
+    # each accuracy lands in its rank band's ForRank colour
+    assert arc_color_at(0.0) == FOR_RANK["D"]
+    assert arc_color_at(0.5) == FOR_RANK["D"]
+    assert arc_color_at(0.72) == FOR_RANK["C"]
+    assert arc_color_at(0.85) == FOR_RANK["B"]
+    assert arc_color_at(0.93) == FOR_RANK["A"]
+    assert arc_color_at(0.97) == FOR_RANK["S"]
+    assert arc_color_at(0.995) == FOR_RANK["SS"]
+    assert arc_color_at(1.0) == FOR_RANK["SS"]
+    # exact band boundaries belong to the upper band (lo <= acc < hi)
+    assert arc_color_at(0.70) == FOR_RANK["C"]
+    assert arc_color_at(0.95) == FOR_RANK["S"]
+
+
+def test_bake_accuracy_arc_paints_rank_colours_not_flat():
+    # a 97% (S) arc must contain BOTH a D-band pixel (near the start of the
+    # sweep) and an S-band pixel (near the tip) — i.e. it is a rank GRADIENT,
+    # not one flat colour. Scan the ring band for the two ForRank hues.
+    import numpy as np
+    S = 300
+    rgba = bake_accuracy_arc(S, 0.97)
+    px = rgba[..., :3].astype(int)
+
+    def _has(colour):
+        c = np.array([round(v * 255) for v in colour])
+        return bool((np.abs(px - c).sum(axis=2) <= 6).any())
+
+    assert _has(FOR_RANK["D"]), "no D-band colour on the arc"
+    assert _has(FOR_RANK["S"]), "no S-band colour on the arc"
+    # the old flat grade colour (legacy purple C) must NOT dominate the arc
+    assert not _has((0.78, 0.51, 0.86))
 
 
 # --- pp-component percentages -------------------------------------------------------
