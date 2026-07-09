@@ -454,3 +454,75 @@ def test_pb_card_only_drawn_when_present():
               max_combo=1305, mods_str="NM")
     LazerResultsScreen(spr_yes, _data(pb=pb), total_ms=5000.0)
     assert len(spr_yes.textures) > len(spr_no.textures)
+
+
+# --- map leaderboard render (flank cards + rank moment) -----------------------------
+
+def _entry(rank, name, score, grade="A"):
+    from osu_std_renderer.render.leaderboard import LeaderboardEntry
+    return LeaderboardEntry(
+        rank=rank, player_name=name, score=score, accuracy=98.5, grade=grade,
+        max_combo=1200, mods_str="HD,DT", mods=72, counts=(1100, 8, 1, 2),
+        discord_user_id=None)          # None → procedural avatar (no network)
+
+
+def _board(left, right, rank=1, moment=None, n=None):
+    from osu_std_renderer.render.leaderboard import BoardData
+    return BoardData(left=left, right=right, rank=rank,
+                     n_players=(n if n is not None else len(left) + len(right) + 1),
+                     moment=moment)
+
+
+def test_leaderboard_bakes_a_card_per_entry():
+    # 3-player board (2 flanks) bakes strictly more textures than solo
+    spr_solo = _FakeSpr()
+    LazerResultsScreen(spr_solo, _data(leaderboard=_board([], [])),
+                       total_ms=5000.0)
+    spr_board = _FakeSpr()
+    left = [_entry(1, "Froslass", 983320, "S")]
+    right = [_entry(3, "nuxx", 921143, "A")]
+    LazerResultsScreen(spr_board, _data(leaderboard=_board(left, right, rank=2)),
+                       total_ms=5000.0)
+    assert len(spr_board.textures) > len(spr_solo.textures)
+
+
+def test_leaderboard_draws_flanks_in_stage1():
+    spr = _FakeSpr()
+    left = [_entry(1, "Froslass", 983320, "S"), _entry(2, "origin_", 979968, "S")]
+    right = [_entry(4, "Woey", 901564, "A")]
+    screen = LazerResultsScreen(
+        spr, _data(leaderboard=_board(left, right, rank=3, moment="NEW BEST")),
+        total_ms=5000.0)
+    screen.draw(1900.0)          # stage 1, settled
+    # flanking cards sit left AND right of the centre panel
+    xs = [s.x for s in spr.drawn if s.texture_key is not None]
+    cx = spr.width / 2.0
+    assert any(x < cx * 0.6 for x in xs), "no left-flank card drawn"
+    assert any(x > cx * 1.4 for x in xs), "no right-flank card drawn"
+
+
+def test_leaderboard_sparse_and_solo_dont_crash():
+    # solo (no flanks) with a NEW BEST flourish → banner only, no cards, no raise
+    spr = _FakeSpr()
+    screen = LazerResultsScreen(
+        spr, _data(pb=dict(player_name="R3D", score=1, accuracy=1.0,
+                           grade="D", max_combo=1, mods_str="NM"),
+                   leaderboard=_board([], [], rank=1, moment="NEW BEST")),
+        total_ms=5000.0)
+    screen.draw(1900.0)
+    for s in spr.drawn:
+        assert math.isfinite(s.x) and math.isfinite(s.y)
+    # one-sided board (current is #1, everyone else below) still fine
+    spr2 = _FakeSpr()
+    right = [_entry(2, "a", 5), _entry(3, "b", 4)]
+    LazerResultsScreen(spr2, _data(leaderboard=_board([], right, rank=1,
+                                                      moment="NEW #1")),
+                       total_ms=5000.0).draw(1900.0)
+
+
+def test_leaderboard_off_matches_pb_only_behaviour():
+    # leaderboard=None → identical texture set to the pre-feature path
+    spr = _FakeSpr()
+    LazerResultsScreen(spr, _data(leaderboard=None), total_ms=5000.0)
+    # no leaderboard bakes leaked in
+    assert spr.textures, "screen baked nothing"

@@ -700,6 +700,192 @@ def bake_heatmap(px: int, points, ring_frac: float = 0.62):
     return _to_rgba(img)
 
 
+# --- map leaderboard: compact ranked flank cards ------------------------------------
+# The owner mockup: the featured (current-play) panel flanked by compact cards
+# of the OTHER renders of this map. Each card reuses the results identity —
+# Nunito (the client-font loader), the FOR_RANK grade colours + grade glow,
+# the RESULT_COLORS judgment palette — so the flanks read as the same UI as
+# the centre panel. Baked ONCE per entry (nothing rolls), one texture/card.
+
+LB_CARD_W = 214.0                  # compact card size (virtual 1080-space px)
+LB_CARD_H = 596.0
+
+
+def bake_avatar_square(px: int, name: str, avatar_bytes: bytes | None = None,
+                       radius_frac: float = 0.2):
+    """A rounded-SQUARE avatar chip (the mockup shape). From Discord PNG bytes
+    (cover-fit + rounded-square mask) when available, else the procedural
+    username-hued square with centred initials — the same deterministic
+    fallback as bake_avatar, so a missing/unfetchable avatar still reads as
+    that player. Never raises (bad bytes → procedural)."""
+    px = max(int(px), 16)
+    rad = max(int(px * radius_frac), 2)
+    img = None
+    if avatar_bytes:
+        try:
+            from io import BytesIO
+            src = Image.open(BytesIO(avatar_bytes)).convert("RGBA")
+            sw, sh = src.size
+            scale = px / max(min(sw, sh), 1)
+            nw, nh = max(int(sw * scale + 0.5), px), max(int(sh * scale + 0.5), px)
+            src = src.resize((nw, nh), Image.LANCZOS)
+            lft, top = (nw - px) // 2, (nh - px) // 2
+            img = src.crop((lft, top, lft + px, top + px))
+        except Exception:  # noqa: BLE001 — corrupt/animated → procedural
+            img = None
+    if img is None:
+        h = _name_hash(name)
+        hue = (h % 360) / 360.0
+        sat = 0.42 + ((h >> 9) % 18) / 100.0
+        c0 = _hsv(hue, sat, 0.62)
+        c1 = _hsv((hue + 0.06) % 1.0, min(sat + 0.08, 1.0), 0.34)
+        img = Image.new("RGBA", (px, px), (0, 0, 0, 0))
+        dd = ImageDraw.Draw(img)
+        for y in range(px):
+            f = y / max(px - 1, 1)
+            col = tuple(int(round(_lerp(c0[i], c1[i], f) * 255)) for i in range(3))
+            dd.line([(0, y), (px, y)], fill=(*col, 255))
+        ini = avatar_initials(name)
+        font = _load_font(int(px * (0.42 if len(ini) >= 2 else 0.52)))
+        try:
+            x0, y0, x1, y1 = font.getbbox(ini)
+        except AttributeError:
+            x1, y1 = font.getsize(ini); x0 = y0 = 0     # type: ignore
+        dd.text(((px - (x1 - x0)) / 2 - x0, (px - (y1 - y0)) / 2 - y0), ini,
+                font=font, fill=(255, 255, 255, 235))
+    mask = Image.new("L", (px, px), 0)
+    ImageDraw.Draw(mask).rounded_rectangle([0, 0, px - 1, px - 1], radius=rad,
+                                           fill=255)
+    img.putalpha(mask)
+    return _to_rgba(img)
+
+
+def _pil_text(draw, font, text, x, y, fill, align="l"):
+    """Draw one text run at (x, top y) with l/r/m horizontal alignment,
+    measured via getbbox (no anchor dependency). Returns text height."""
+    try:
+        x0, y0, x1, y1 = font.getbbox(text)
+    except AttributeError:
+        x1, y1 = font.getsize(text); x0 = y0 = 0        # type: ignore
+    w = x1 - x0
+    tx = x - x0 if align == "l" else (x - w - x0 if align == "r"
+                                      else x - w / 2 - x0)
+    col = tuple(int(round(c * 255)) for c in fill)
+    draw.text((tx, y - y0), text, font=font, fill=(*col, 255))
+    return y1 - y0
+
+
+def bake_lb_card(entry, avatar_bytes, W_px: int, H_px: int, k: float,
+                 font_loader, score_loader):
+    """Bake one compact leaderboard card to RGBA — rank header, rounded-square
+    avatar, name, the Great/OK/Meh/Miss rows, Max Combo, Accuracy, mods
+    badges, the big score, and the ForRank grade pill at the bottom. `entry`
+    is a leaderboard.LeaderboardEntry."""
+    W = max(int(W_px), 60)
+    H = max(int(H_px), 120)
+    rad = max(int(18 * k), 4)
+    base = bake_round_panel(W, H, rad, (0.13, 0.14, 0.19), (0.06, 0.06, 0.09),
+                            0.95, border=(0.30, 0.33, 0.40))
+    img = Image.fromarray(base, "RGBA")
+    d = ImageDraw.Draw(img)
+    pad = int(15 * k)
+
+    def font(v):
+        return font_loader(max(int(v * k), 8))
+
+    y = pad
+    # rank header (gold for #1)
+    rcol = (1.0, 0.84, 0.4) if entry.rank == 1 else (0.80, 0.84, 0.94)
+    _pil_text(d, font(24), f"#{entry.rank}", W / 2, y, rcol, "m")
+    y += int(32 * k)
+    # rounded-square avatar
+    av = min(W - 2 * pad, int(118 * k))
+    ax = (W - av) // 2
+    av_rgba = bake_avatar_square(av, entry.player_name, avatar_bytes)
+    img.alpha_composite(Image.fromarray(av_rgba, "RGBA"), (ax, int(y)))
+    y += av + int(8 * k)
+    # player name
+    _pil_text(d, font(21), _clip(entry.player_name, 12), W / 2, y,
+              (0.96, 0.97, 1.0), "m")
+    y += int(32 * k)
+    lx, rx = pad, W - pad
+    for lbl, val, col in (("Great", entry.counts[0], RESULT_COLORS["GREAT"]),
+                          ("OK", entry.counts[1], RESULT_COLORS["OK"]),
+                          ("Meh", entry.counts[2], RESULT_COLORS["MEH"]),
+                          ("Miss", entry.counts[3], RESULT_COLORS["MISS"])):
+        _pil_text(d, font(16), lbl, lx, y, (0.62, 0.66, 0.76), "l")
+        _pil_text(d, font(16), str(val), rx, y, col, "r")
+        y += int(23 * k)
+    y += int(8 * k)
+    _pil_text(d, font(15), "Max Combo", lx, y, (0.62, 0.66, 0.76), "l")
+    _pil_text(d, font(15), f"{entry.max_combo}x", rx, y, (0.96, 0.86, 0.42), "r")
+    y += int(23 * k)
+    _pil_text(d, font(15), "Accuracy", lx, y, (0.62, 0.66, 0.76), "l")
+    _pil_text(d, font(15), f"{entry.accuracy:.2f}%", rx, y, (0.96, 0.86, 0.42), "r")
+    y += int(30 * k)
+    # mods badges (small pills) — reuse the .osr mods string
+    ms = (entry.mods_str or "").strip()
+    if ms and ms.upper() != "NM":
+        mods = [m for m in ms.split(",") if m][:5]
+        mf = font(13)
+        pill_h = int(22 * k)
+        gap = int(6 * k)
+        widths = []
+        for m in mods:
+            try:
+                bb = mf.getbbox(m); w = bb[2] - bb[0]
+            except AttributeError:
+                w = mf.getsize(m)[0]                     # type: ignore
+            widths.append(w + int(14 * k))
+        total = sum(widths) + gap * (len(mods) - 1)
+        mx = W / 2 - total / 2
+        for m, w in zip(mods, widths):
+            d.rounded_rectangle([mx, y, mx + w, y + pill_h], radius=pill_h // 2,
+                                fill=(88, 70, 140, 235))
+            _pil_text(d, mf, m, mx + w / 2, y + int(3 * k), (0.96, 0.95, 1.0), "m")
+            mx += w + gap
+    # big score + grade pill anchored to the bottom
+    sy = H - int(84 * k)
+    _pil_text(d, score_loader(max(int(30 * k), 10)), f"{entry.score:,}", W / 2,
+              sy, (1.0, 1.0, 1.0), "m")
+    # grade pill (ForRank colour)
+    gcol = FOR_RANK.get(entry.grade, (0.8, 0.8, 0.85))
+    glabel = "SS" if entry.grade in ("SS", "X", "XH", "SSH") else entry.grade
+    gpw = int(58 * k)
+    gph = int(30 * k)
+    gpx = W / 2 - gpw / 2
+    gpy = H - int(42 * k)
+    gc = tuple(int(round(c * 255)) for c in gcol)
+    d.rounded_rectangle([gpx, gpy, gpx + gpw, gpy + gph], radius=gph // 2,
+                        fill=(*gc, 255))
+    lum = 0.299 * gcol[0] + 0.587 * gcol[1] + 0.114 * gcol[2]
+    gfg = (0.06, 0.06, 0.09) if lum > 0.62 else (1.0, 1.0, 1.0)
+    _pil_text(d, font(20), glabel, W / 2, gpy + int(4 * k), gfg, "m")
+    return _to_rgba(img)
+
+
+def bake_moment_pill(text: str, k: float, font_loader):
+    """The rank-moment ribbon — a bright rounded pill. NEW #1 = gold, NEW BEST
+    = cyan (the arc gradient's cyan). Returns (rgba, w, h)."""
+    up = "NEW #1" if "#1" in text else "NEW BEST"
+    bg = (1.0, 0.80, 0.28) if "#1" in text else ARC_GRAD_TOP
+    font = font_loader(max(int(20 * k), 9))
+    try:
+        x0, y0, x1, y1 = font.getbbox(up)
+    except AttributeError:
+        x1, y1 = font.getsize(up); x0 = y0 = 0          # type: ignore
+    tw, th = x1 - x0, y1 - y0
+    padx, pady = int(16 * k), int(8 * k)
+    W = tw + 2 * padx
+    H = th + 2 * pady
+    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    bgc = tuple(int(round(c * 255)) for c in bg)
+    d.rounded_rectangle([0, 0, W - 1, H - 1], radius=H // 2, fill=(*bgc, 255))
+    d.text((padx - x0, pady - y0), up, font=font, fill=(20, 18, 30, 255))
+    return _to_rgba(img), float(W), float(H)
+
+
 # --- data bundle -------------------------------------------------------------------
 
 @dataclass
@@ -948,6 +1134,53 @@ class LazerResultsScreen:
                                   (0.72, 0.75, 0.85)),
             }
 
+        # --- map leaderboard (stage 1, flanking the featured panel) ---------
+        self._bake_leaderboard()
+
+    def _bake_leaderboard(self) -> None:
+        """Bake the flanking ranked cards + the rank-moment banner (owner
+        mockup 2026-07-09). A no-op when there's no board (leaderboard off or
+        no OTHER renders of this map) — the single PB card path stays intact.
+        Adapts to the card count: 0 flanks → nothing extra; N → N cards split
+        onto the two sides. Avatars resolve here (Discord → cache → procedural
+        fallback), never blocking or crashing the bake."""
+        self._lb_board = self.d.leaderboard
+        self._lb_left: list = []
+        self._lb_right: list = []
+        self._lb_rank_row = None
+        self._lb_moment = None
+        board = self._lb_board
+        if board is None:
+            return
+        k = self.k
+        self.LB_CARD_W = LB_CARD_W
+        self.LB_CARD_H = LB_CARD_H
+        cw, ch = int(LB_CARD_W * k), int(LB_CARD_H * k)
+        try:
+            from .leaderboard import resolve_avatar_bytes
+        except Exception:  # noqa: BLE001 — module gone → all procedural
+            def resolve_avatar_bytes(*_a, **_kw):
+                return None
+
+        def _one(entry):
+            try:
+                avb = resolve_avatar_bytes(entry.discord_user_id)
+            except Exception:  # noqa: BLE001 — avatars never break a bake
+                avb = None
+            return (self._put(bake_lb_card(entry, avb, cw, ch, k,
+                                           self._font_loader,
+                                           self._score_loader)), entry)
+
+        self._lb_left = [_one(e) for e in board.left]
+        self._lb_right = [_one(e) for e in board.right]
+        if board.left or board.right:
+            self._lb_rank_row = self._text(
+                f"#{board.rank} on {_clip(self.d.title, 22)}", 22,
+                (0.9, 0.92, 1.0))
+        if board.moment:
+            rgba, w, h = bake_moment_pill(board.moment, k, self._font_loader)
+            self._lb_moment = (self._put(rgba), w, h)
+
     def _grid_cell(self, label, value, color):
         return (self._text(label, 16, (0.6, 0.63, 0.73)),
                 self._text(value, 32, color))
@@ -980,12 +1213,17 @@ class LazerResultsScreen:
             if age_ms > STAGE1_MS else 0.0
         panel_cx = _lerp(self.center_cx, self.left_cx, open_p)
 
-        # PB card (fades out as the panel opens)
-        if self.pb_parts is not None:
-            pb_a = fade * (1.0 - _clamp01((age_ms - STAGE1_MS)
+        # stage-1 flanks: the map leaderboard (owner mockup) when there are
+        # OTHER renders, else the single PB card (unchanged). Both fade out as
+        # the panel opens into stage 2.
+        stage1_a = fade * (1.0 - _clamp01((age_ms - STAGE1_MS)
                                           / (OPEN_MS * 0.6)))
-            if pb_a > 0.003:
-                self._draw_pb(out, panel_cx, pb_a)
+        if stage1_a > 0.003:
+            if self._lb_left or self._lb_right:
+                self._draw_leaderboard(out, panel_cx, stage1_a)
+            elif self.pb_parts is not None:
+                self._draw_pb(out, panel_cx, stage1_a)
+            self._draw_lb_banner(out, panel_cx, stage1_a)
 
         # stats panels (stage 2)
         if age_ms > STAGE1_MS:
@@ -1222,6 +1460,50 @@ class LazerResultsScreen:
         stk, stw, sth = self.heat_stat
         out.append(Sprite(cx + self.STATS_W * k * 0.26, hcy, stw, sth, stk,
                           (1, 1, 1, a)))
+
+    def _draw_leaderboard(self, out, panel_cx, a) -> None:
+        """The flanking ranked cards, centred vertically on the featured panel
+        and marching outward from its two edges — higher ranks to the LEFT,
+        lower to the RIGHT (owner mockup). The card nearest each edge is the
+        rank closest in score to the current play, so the board reads
+        contiguously across the centre panel."""
+        k = self.k
+        cy = self.panel_cy * k
+        cw = self.LB_CARD_W * k
+        ch = self.LB_CARD_H * k
+        gap = 22.0 * k
+        pl = (panel_cx - self.PANEL_W / 2.0) * k
+        pr = (panel_cx + self.PANEL_W / 2.0) * k
+        # left group drawn reversed so the innermost card is rank R-1
+        for i, (key, _e) in enumerate(reversed(self._lb_left)):
+            ccx = pl - gap - cw / 2.0 - i * (cw + gap)
+            out.append(Sprite(ccx, cy, cw, ch, key, (1, 1, 1, a)))
+        for i, (key, _e) in enumerate(self._lb_right):
+            ccx = pr + gap + cw / 2.0 + i * (cw + gap)
+            out.append(Sprite(ccx, cy, cw, ch, key, (1, 1, 1, a)))
+
+    def _draw_lb_banner(self, out, panel_cx, a) -> None:
+        """The rank-moment ribbon above the featured panel: '#X on <map>' with
+        the NEW #1 / NEW BEST pill beside it when earned."""
+        if self._lb_rank_row is None and self._lb_moment is None:
+            return
+        k = self.k
+        cx = panel_cx * k
+        y = (self.panel_cy - self.PANEL_H / 2.0 - 20.0) * k    # centreline
+        rw = rh = 0.0
+        rk = None
+        if self._lb_rank_row is not None:
+            rk, rw, rh = self._lb_rank_row
+        mw = self._lb_moment[1] if self._lb_moment else 0.0
+        gap = 12.0 * k if (self._lb_rank_row and self._lb_moment) else 0.0
+        total = rw + gap + mw
+        x = cx - total / 2.0
+        if rk is not None:
+            out.append(Sprite(x + rw / 2.0, y, rw, rh, rk, (1, 1, 1, a)))
+            x += rw + gap
+        if self._lb_moment:
+            mk, mwv, mhv = self._lb_moment
+            out.append(Sprite(x + mwv / 2.0, y, mwv, mhv, mk, (1, 1, 1, a)))
 
     def _draw_pb(self, out, panel_cx, a) -> None:
         k = self.k
