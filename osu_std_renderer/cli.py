@@ -436,7 +436,8 @@ def _build_lazer_results(spr, settings, beatmap, meta, judgments, hud, fv,
         slider_ends=(end_hit, end_total),
         err_deltas=list(hud.data.err_deltas),
         windows=(hud.hw.great, hud.hw.ok, hud.hw.meh),
-        aim_points=aim_points, perf=perf, pb=pb, leaderboard=board)
+        aim_points=aim_points, perf=perf, pb=pb, leaderboard=board,
+        lazer_mods=meta.lazer_mods, rate_override=meta.rate_override)
     dur_wall_ms = max(settings.results_screen_time,
                       LAZER_RESULTS_MIN_SECONDS) * 1000.0
     screen = LazerResultsScreen(spr, data, dur_wall_ms, speed=speed,

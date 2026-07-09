@@ -72,7 +72,8 @@ from dataclasses import dataclass
 from PIL import Image, ImageDraw
 
 from .gl import Sprite
-from .hud import BAND_50, BAND_100, BAND_300
+from .hud import (BAND_50, BAND_100, BAND_300, build_mod_pills,
+                  mod_pill_color)
 from .results import histogram_bins, mods_string
 from .textures import ARGON_FONT_PATH, _load_argon_font, _load_font
 
@@ -89,6 +90,14 @@ STAGGER_MS = 160.0             # per-stats-panel unfold stagger
 MIN_TOTAL_MS = 3800.0         # floor so both stages + a hold always fit
 
 DIM_ALPHA = 0.72               # scene dim under the results screen
+
+# mod badges (the played-mods row under the score — lazer's starAndModDisplay
+# ModDisplay in ExpandedPanelMiddleContent). Category colour comes from the
+# HUD's mod_pill_color so the badges match the gameplay HUD pills exactly.
+MOD_PILL_VH = 34.0             # results mod-badge height (virtual px)
+MOD_PILL_TEXT_VPX = 19.0       # acronym text size (virtual px)
+MOD_PILL_GAP_V = 8.0           # inter-badge gap (virtual px)
+MOD_PILL_ALPHA = 235           # pill fill alpha (0..255), lazer-ish opacity
 
 VIRTUAL_SS_PERCENTAGE = 0.01   # AccuracyCircle: the reserved SS notch
 
@@ -996,6 +1005,13 @@ class ResultsData:
     perf: object | None                    # pp.PerfBreakdown | None
     pb: dict | None                        # query_pb() row | None
     leaderboard: object | None = None      # leaderboard.BoardData | None
+    # played mods for the badge row: the FULL lazer acronym set
+    # (meta.lazer_mods, CL/DA/WU/… in the .osr blob's display order) + the
+    # custom clock rate (meta.rate_override) for the "DT 1.3×" suffix. Default
+    # empty/None → the legacy 32-bit `mods` bitmask drives the badges, and a
+    # pure-nomod play yields no badges (no row).
+    lazer_mods: tuple = ()                 # meta.lazer_mods (display order)
+    rate_override: float | None = None     # meta.rate_override custom rate
 
 
 class LazerResultsScreen:
@@ -1121,6 +1137,40 @@ class LazerResultsScreen:
         img = img.resize((W, H), Image.LANCZOS)
         return (self._put(_to_rgba(img)), float(W), float(H))
 
+    def _bake_mod_pill(self, text: str, color):
+        """A single played-mod badge for the results panel: a rounded,
+        category-coloured pill with the acronym (+ any custom-rate suffix like
+        "DT 1.3×") in white. Fixed height (MOD_PILL_VH), width fits the text —
+        so a badge row lines up, mirroring the gameplay HUD mod pills but
+        sized for the ranking screen. Supersampled at TEXT_SS× and
+        LANCZOS-downscaled so the edge/glyphs stay crisp through the ≥1080p
+        results bake. Returns (key, w, h)."""
+        k = self.k
+        H = max(int(round(MOD_PILL_VH * k)), 12)
+        fpx = max(int(round(MOD_PILL_TEXT_VPX * k)), 8)
+        padx = int(round(fpx * 0.62))
+        ss = TEXT_SS
+        Hb = H * ss
+        fb = self._font_loader(fpx * ss)
+        try:
+            bx0, by0, bx1, by1 = fb.getbbox(text)
+        except AttributeError:
+            bx1, by1 = fb.getsize(text); bx0 = by0 = 0    # type: ignore
+        twb, thb = bx1 - bx0, by1 - by0
+        padxb = padx * ss
+        Wb = twb + 2 * padxb
+        W = max(int(round(Wb / ss)), 8)
+        img = Image.new("RGBA", (Wb, Hb), (0, 0, 0, 0))
+        dd = ImageDraw.Draw(img)
+        bgc = tuple(int(round(c * 255)) for c in color)
+        dd.rounded_rectangle([0, 0, Wb - 1, Hb - 1], radius=Hb // 2,
+                             fill=(*bgc, MOD_PILL_ALPHA))
+        # vertically centre the glyphs within the fixed-height pill
+        ty = (Hb - thb) // 2 - by0
+        dd.text((padxb - bx0, ty), text, font=fb, fill=(255, 255, 255, 255))
+        img = img.resize((W, H), Image.LANCZOS)
+        return (self._put(_to_rgba(img)), float(W), float(H))
+
     def _bake_static(self) -> None:
         k = self.k
         d = self.d
@@ -1163,6 +1213,14 @@ class LazerResultsScreen:
         # star-rating pill (procedural star icon — the font has no ★ glyph),
         # then diff name + creator
         self.star_pill = self._bake_star_pill()
+        # played-mod badge row (lazer starAndModDisplay ModDisplay): one
+        # category-coloured pill per active mod, from the SAME build_mod_pills
+        # the gameplay HUD uses (full lazer set incl. CL/DA/WU + custom-rate
+        # "DT 1.3×"), so the badges match the HUD. Nomod → empty → no row.
+        _mp = build_mod_pills(d.mods, d.lazer_mods, d.rate_override)
+        self.mod_pill_texts = tuple(p.text for p in _mp)   # labels (introspect)
+        self.mod_pills = [
+            self._bake_mod_pill(p.text, mod_pill_color(p.acr)) for p in _mp]
         self.diff_row = self._text(_clip(d.diff_name, 28), 26, (0.9, 0.92, 1.0))
         self.creator_row = self._text(f"mapped by {_clip(d.creator, 22)}", 22,
                                       (0.65, 0.68, 0.78))
@@ -1409,6 +1467,12 @@ class LazerResultsScreen:
         # score (rolls with the sweep)
         self._roll_score(age_ms)
         y += self._blit(out, self.score_row, cx, y, a) + 12 * k
+        # played-mod badge row (lazer starAndModDisplay, just under the score).
+        # Nomod → _draw_mod_row returns 0 and adds nothing → layout identical
+        # to the no-mods panel (the nomod screen is unchanged from before).
+        mod_h = self._draw_mod_row(out, cx, y, a)
+        if mod_h > 0.0:
+            y += mod_h + 14 * k
         # star / diff / creator centred row
         y += self._draw_star_row(out, cx, y, a) + 22 * k
         # stats grid
@@ -1419,6 +1483,29 @@ class LazerResultsScreen:
         y += self._draw_grid_row(out, self._grid_c, cx, y, a,
                                  self.PANEL_W * 0.62) + 16 * k
         self._blit(out, self.date_row, cx, y, a)
+
+    def _draw_mod_row(self, out, cx, top_y, a) -> float:
+        """The played-mod badge row, centred at `cx` with its TOP at `top_y`.
+        Ported placement: lazer's ExpandedPanelMiddleContent puts the mods in
+        a `starAndModDisplay` FillFlowContainer (StarRatingDisplay + ModDisplay)
+        directly under the TotalScoreCounter; we give the badges their own
+        centred row in that same spot (our star row already carries the diff
+        name + creator that lazer's row does not). Category-coloured via the
+        HUD's mod_pill_color. Empty (nomod / no lazer mods) → 0 height, so the
+        panel is byte-identical to the pre-badge layout. Returns row height."""
+        if not self.mod_pills:
+            return 0.0
+        k = self.k
+        gap = MOD_PILL_GAP_V * k
+        total = sum(w for _key, w, _h in self.mod_pills) \
+            + gap * (len(self.mod_pills) - 1)
+        h = max(hh for _key, _w, hh in self.mod_pills)
+        x = cx - total / 2.0
+        for key, w, hh in self.mod_pills:
+            out.append(Sprite(x + w / 2.0, top_y + h / 2.0, w, hh, key,
+                              (1, 1, 1, a)))
+            x += w + gap
+        return h
 
     def _draw_star_row(self, out, cx, top_y, a) -> float:
         k = self.k
