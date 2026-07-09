@@ -31,6 +31,7 @@ SITE_PRESET = {
     "show_hit_error_meter": True, "show_unstable_rate": True,
     "show_aim_error_meter": True,        # flipped
     "show_result_screen": False,         # flipped + ALIASED name
+    "show_leaderboard": False,           # flipped (default on)
     "results_screen_time": 12,           # int → float
     "show_pp_counter": True,             # flipped
     "show_grade": True,
@@ -88,6 +89,7 @@ def test_from_preset_full_site_payload():
     # HUD
     assert s.show_key_overlay is False
     assert s.show_results is False                   # aliased key
+    assert s.show_leaderboard is False               # flipped off
     assert s.results_screen_time == 12.0
     assert s.show_pp_counter and s.show_hit_counter
     assert s.show_aim_error_meter and s.show_strain_graph
@@ -164,3 +166,4 @@ def test_engine_defaults_keep_current_cli_behaviour():
     assert s.lead_in_time == 0.0
     assert s.use_replay_hitsounds is True    # hitsounds stay ON (as before)
     assert s.slider_snaking_out is True      # flag existed; now rendered
+    assert s.show_leaderboard is True        # new feature defaults ON for std

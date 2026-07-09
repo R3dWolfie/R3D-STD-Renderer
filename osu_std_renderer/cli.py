@@ -158,6 +158,10 @@ def build_parser() -> argparse.ArgumentParser:
                     help="§4.10 FadeOutTime: video+audio fade to black "
                          "after the last object (wall seconds; default 1.5)")
     ap.add_argument("--results", action=BA, default=True)
+    ap.add_argument("--leaderboard", action=BA, default=True,
+                    help="per-map render leaderboard on the lazer results "
+                         "screen (featured play flanked by other renders of "
+                         "the same map, from the local render DB); default on")
     ap.add_argument("--results-style", choices=("lazer", "r3d"),
                     default="lazer",
                     help="outro: 'lazer' = the ported osu!(lazer) ranking "
@@ -351,6 +355,7 @@ def _build_lazer_results(spr, settings, beatmap, meta, judgments, hud, fv,
     from .render.hud import build_aim_points
     from .render.lazer_results import (LazerResultsScreen, ResultsData,
                                        query_pb, slider_stats)
+    from .render.leaderboard import build_board, query_leaderboard
     from .render.pp import build_performance_breakdown, star_rating
 
     counts = (meta.count_300, meta.count_100, meta.count_50, meta.count_miss)
@@ -377,9 +382,24 @@ def _build_lazer_results(spr, settings, beatmap, meta, judgments, hud, fv,
         print("pb:     no prior render of this map for the player — PB card "
               "omitted", file=sys.stderr)
 
+    # per-map render leaderboard: best-per-player OTHER renders of this map,
+    # ranked around the current play. Off → None (the single PB card path
+    # above stays exactly as it was). Local render DB, read-only, fail-soft.
+    cur_score = int(meta.score or fv["score"])
+    board = None
+    if settings.show_leaderboard:
+        rows = query_leaderboard(PB_DB_PATH, meta.beatmap_md5, replay_md5)
+        prev_best = int(pb["score"]) if pb is not None else None
+        board = build_board(rows, meta.player_name, cur_score,
+                            prev_best_score=prev_best, max_per_side=3)
+        moment = f" [{board.moment}]" if board.moment else ""
+        print(f"board:  #{board.rank}/{board.n_players} on this map — "
+              f"{len(board.left)} left + {len(board.right)} right"
+              f"{moment} (render DB)", file=sys.stderr)
+
     data = ResultsData(
         player=meta.player_name, grade=meta.grade, acc_pct=meta.accuracy,
-        score=int(meta.score or fv["score"]), max_combo=meta.max_combo,
+        score=cur_score, max_combo=meta.max_combo,
         counts=counts, title=beatmap.name, artist=beatmap.artist,
         diff_name=beatmap.difficulty_name, creator=beatmap.creator,
         mods=meta.mods, stars=stars, pp=pp_val,
@@ -388,7 +408,7 @@ def _build_lazer_results(spr, settings, beatmap, meta, judgments, hud, fv,
         slider_ends=(end_hit, end_total),
         err_deltas=list(hud.data.err_deltas),
         windows=(hud.hw.great, hud.hw.ok, hud.hw.meh),
-        aim_points=aim_points, perf=perf, pb=pb)
+        aim_points=aim_points, perf=perf, pb=pb, leaderboard=board)
     dur_wall_ms = max(settings.results_screen_time,
                       LAZER_RESULTS_MIN_SECONDS) * 1000.0
     screen = LazerResultsScreen(spr, data, dur_wall_ms, speed=speed,
@@ -866,6 +886,7 @@ def main(argv: list[str] | None = None) -> int:
         default_skin_dir=args.default_skin, skip_intro=args.skip_intro,
         lead_in_time=max(args.lead_in, 0.0),
         show_results=args.results, results_style=args.results_style,
+        show_leaderboard=args.leaderboard,
         letterbox_breaks=args.letterbox_breaks,
         draw_approach_circles=args.approach_circles,
         draw_combo_numbers=args.combo_numbers,

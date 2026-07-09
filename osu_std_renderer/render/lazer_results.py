@@ -726,6 +726,7 @@ class ResultsData:
     aim_points: list                       # [(t, dx, dy)]
     perf: object | None                    # pp.PerfBreakdown | None
     pb: dict | None                        # query_pb() row | None
+    leaderboard: object | None = None      # leaderboard.BoardData | None
 
 
 class LazerResultsScreen:
