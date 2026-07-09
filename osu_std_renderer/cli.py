@@ -826,6 +826,11 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
         results_start_ms=results_start_ms,
         results_ssaa=results_ssaa,
         mods=scene_mods,
+        transform_mod=(meta.transform_acronym if meta is not None else ""),
+        transform_start_scale=(meta.transform_start_scale
+                               if meta is not None else 1.0),
+        transform_strength=(meta.transform_strength
+                            if meta is not None else 1.0),
         fail_time_ms=fail_time,
         fail_anim_len_ms=fail_anim_len_ms,
     )

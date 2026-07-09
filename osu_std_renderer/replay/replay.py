@@ -32,7 +32,8 @@ from .lazer_mods import (LAZER_GAME_VERSION,
                          random_from_mods,
                          rate_adjust_from_mods,
                          rate_ramp_from_mods,
-                         read_lazer_mods)
+                         read_lazer_mods,
+                         transform_from_mods)
 
 # osrparse seeds the last frame with this sentinel time_delta (RNG seed).
 _SEED_DELTA = -12345
@@ -174,6 +175,21 @@ class ReplayMeta:
     mirror_reflection: str = ""
     random_seed: int | None = None
     random_angle_sharpness: float = 7.0
+    # Transform-family "fun" mods (GR/DF/SI/WG/TR): per-object visual entrance
+    # animation only — the beatmap geometry, the cursor and the judgement are
+    # untouched (see render/transform_mods.py). transform_acronym is "" for
+    # every non-transform replay (the gate that keeps those renders identical);
+    # transform_start_scale is the GR/DF starting size (else 1.0) and
+    # transform_strength the WG wiggle strength (else 1.0).
+    transform_acronym: str = ""
+    transform_start_scale: float = 1.0
+    transform_strength: float = 1.0
+
+    @property
+    def has_transform(self) -> bool:
+        """True when the replay carries a GR/DF/SI/WG/TR entrance-animation
+        mod (purely visual — judgement/reconcile stay on the real positions)."""
+        return bool(self.transform_acronym)
 
     @property
     def has_mirror(self) -> bool:
@@ -305,6 +321,9 @@ def parse_replay(path: Path) -> tuple[list[StdFrame], ReplayMeta]:
     mirror_reflection = ""
     random_seed: int | None = None
     random_angle_sharpness = 7.0
+    transform_acronym = ""
+    transform_start_scale = 1.0
+    transform_strength = 1.0
     if gv >= LAZER_GAME_VERSION:
         mlist = read_lazer_mods(path)
         if mlist is not None:
@@ -345,6 +364,14 @@ def parse_replay(path: Path) -> tuple[list[StdFrame], ReplayMeta]:
             if rd is not None and rd.seed is not None:
                 random_seed = rd.seed
                 random_angle_sharpness = rd.angle_sharpness
+            # Transform-family (GR/DF/SI/WG/TR): a per-object entrance
+            # animation. Visual only, so no geometry/judgement change — the
+            # scene reads transform_acronym to drive the appear transform.
+            tr = transform_from_mods(mlist)
+            if tr is not None:
+                transform_acronym = tr.acronym
+                transform_start_scale = tr.start_scale
+                transform_strength = tr.strength
 
     meta = ReplayMeta(
         mode=int(r.mode.value if hasattr(r.mode, "value") else r.mode),
@@ -380,6 +407,9 @@ def parse_replay(path: Path) -> tuple[list[StdFrame], ReplayMeta]:
         mirror_reflection=mirror_reflection,
         random_seed=random_seed,
         random_angle_sharpness=random_angle_sharpness,
+        transform_acronym=transform_acronym,
+        transform_start_scale=transform_start_scale,
+        transform_strength=transform_strength,
     )
     return frames, meta
 

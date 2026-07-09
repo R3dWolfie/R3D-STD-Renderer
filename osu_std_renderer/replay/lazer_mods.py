@@ -485,3 +485,89 @@ def read_random(osr_path: Path) -> "RandomMod | None":
     if not mods:
         return None
     return random_from_mods(mods)
+
+
+# --- Transform-family "fun" mods: GR/DF/SI/WG/TR -----------------------------
+# osu.Game.Rulesets.Osu/Mods/OsuModGrow.cs / OsuModDeflate.cs /
+# OsuModSpinIn.cs / OsuModWiggle.cs / OsuModTransform.cs — a batch of per-object
+# ENTRANCE-animation mods (ModType.Fun). They are purely VISUAL (the drawable's
+# appear transform); none change object geometry, so a play only needs the
+# acronym plus, for the two configurable ones, a single setting:
+#   * GR / DF: ``StartScale`` (SettingSource "Starting Size") → key ``start_scale``.
+#       GR default 0.5 [0, 0.99]; DF default 2.0 [1, 25].
+#   * WG:      ``Strength`` → key ``strength``. Default 1.0 [0.1, 2.0].
+#   * SI / TR: no settings (fixed animation constants).
+# An absent/non-numeric setting falls back to the mod default (clamped to the
+# SettingSource range), exactly like the DA / rate helpers above.
+TRANSFORM_GROW = "GR"
+TRANSFORM_DEFLATE = "DF"
+TRANSFORM_SPIN_IN = "SI"
+TRANSFORM_WIGGLE = "WG"
+TRANSFORM_TRANSFORM = "TR"
+TRANSFORM_MODS = frozenset({TRANSFORM_GROW, TRANSFORM_DEFLATE,
+                            TRANSFORM_SPIN_IN, TRANSFORM_WIGGLE,
+                            TRANSFORM_TRANSFORM})
+
+_TRANSFORM_START_SCALE_KEY = "start_scale"
+_TRANSFORM_STRENGTH_KEY = "strength"
+
+# acronym -> StartScale default (OsuModGrow / OsuModDeflate BindableFloat)
+TRANSFORM_START_SCALE_DEFAULT = {TRANSFORM_GROW: 0.5, TRANSFORM_DEFLATE: 2.0}
+# acronym -> (MinValue, MaxValue) the SettingSource clamps StartScale to
+TRANSFORM_START_SCALE_RANGE = {TRANSFORM_GROW: (0.0, 0.99),
+                               TRANSFORM_DEFLATE: (1.0, 25.0)}
+WIGGLE_STRENGTH_DEFAULT = 1.0
+WIGGLE_STRENGTH_RANGE = (0.1, 2.0)
+
+
+@dataclass(frozen=True)
+class TransformMod:
+    """A transform-family mod read from a .osr. ``acronym`` is one of
+    GR/DF/SI/WG/TR. ``start_scale`` is the GR/DF starting size multiplier (1.0 —
+    an identity — for SI/WG/TR, which have no scale setting). ``strength`` is
+    the WG wiggle-strength multiplier (1.0 default; unused by the others)."""
+    acronym: str
+    start_scale: float = 1.0
+    strength: float = WIGGLE_STRENGTH_DEFAULT
+
+
+def transform_from_mods(mods: list[dict]) -> "TransformMod | None":
+    """The transform-family mod from an already-parsed :func:`read_lazer_mods`
+    list, or None when no GR/DF/SI/WG/TR mod is present. These five are
+    mutually incompatible, so the first match wins. ``start_scale`` (GR/DF) and
+    ``strength`` (WG) are clamped to the SettingSource range; an absent or
+    non-numeric value falls back to the mod default."""
+    for m in mods:
+        if not isinstance(m, dict):
+            continue
+        ac = str(m.get("acronym", "")).upper()
+        if ac not in TRANSFORM_MODS:
+            continue
+        s = m.get("settings") or {}
+        start_scale = 1.0
+        if ac in TRANSFORM_START_SCALE_DEFAULT:
+            default = TRANSFORM_START_SCALE_DEFAULT[ac]
+            raw = _da_num(s, _TRANSFORM_START_SCALE_KEY)   # numeric-or-None
+            if raw is None:
+                start_scale = default
+            else:
+                lo, hi = TRANSFORM_START_SCALE_RANGE[ac]
+                start_scale = min(hi, max(lo, raw))
+        strength = WIGGLE_STRENGTH_DEFAULT
+        if ac == TRANSFORM_WIGGLE:
+            raw = _da_num(s, _TRANSFORM_STRENGTH_KEY)
+            if raw is not None:
+                lo, hi = WIGGLE_STRENGTH_RANGE
+                strength = min(hi, max(lo, raw))
+        return TransformMod(acronym=ac, start_scale=start_scale,
+                            strength=strength)
+    return None
+
+
+def read_transform(osr_path: Path) -> "TransformMod | None":
+    """The transform-family mod (GR/DF/SI/WG/TR + its setting) from a .osr, or
+    None when the replay carries none (or no ScoreInfo blob). Never raises."""
+    mods = read_lazer_mods(osr_path)
+    if not mods:
+        return None
+    return transform_from_mods(mods)

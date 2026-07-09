@@ -160,6 +160,12 @@ from .gl import Sprite
 from .hud import layout_run
 from .mods import (MOD_FLASHLIGHT, MOD_HIDDEN, build_flashlight_timeline,
                    flashlight_size_at, hidden_circle_fade, hidden_slider_fade)
+from .transform_mods import (DEFLATE, GROW, HIDES_APPROACH, IDENTITY, SPIN_IN,
+                             TRANSFORM, WIGGLE, ObjTransform,
+                             grow_deflate_scale, spin_in_circle,
+                             spin_in_slider_scale, transform_appear_offset,
+                             transform_offset_at, wiggle_events,
+                             wiggle_offset_at)
 from .markers import (arrow_alpha_scale, arrow_pulse, arrow_rotation,
                       beat_phase, followpoint_dots, followpoint_eligible,
                       followpoint_state, reverse_arrow_schedule,
@@ -865,6 +871,9 @@ class StdScene:
                  results_start_ms: float | None = None,
                  results_ssaa=None,
                  mods: int = 0,
+                 transform_mod: str = "",
+                 transform_start_scale: float = 1.0,
+                 transform_strength: float = 1.0,
                  fail_time_ms: float | None = None,
                  fail_anim_len_ms: float = FAIL_DURATION_MS):
         self.beatmap = beatmap
@@ -952,6 +961,26 @@ class StdScene:
         self._fl_diag = math.hypot(float(camera.screen_w),
                                    float(camera.screen_h))
 
+        # --- transform-family "fun" mods (GR/DF/SI/WG/TR): per-object visual
+        # entrance animation. Purely visual — the beatmap geometry, the cursor
+        # and the judgement/reconcile are untouched. GR/DF/SI drive scale (+ SI
+        # rotation) about the object origin and hide the approach circle; WG/TR
+        # drive a position OFFSET only (the approach circle moves along). No mod
+        # does both, so one affine post-transform serves the whole family. The
+        # per-object state (WG's seeded keyframes, TR's accumulated theta) is
+        # precomputed below once self.objects exists.
+        self.tmod = (transform_mod or "").upper()
+        self.t_start_scale = float(transform_start_scale)
+        self.t_strength = float(transform_strength)
+        self._wiggle_kf: dict[int, list] = {}
+        self._tr_offset: dict[int, tuple] = {}
+        # per-object transform scratch (set before drawing each object, cleared
+        # after the object loop): the approach-ring offset + hide/opaque gates.
+        self._t_off: tuple[float, float] = (0.0, 0.0)
+        self._t_hide_approach = False
+        self._t_force_opaque = False
+        self._t_body_xform = None
+
         # --- settings-surface phase (§4.10/§4.6/§4.8 additions) ------------
         self.video = video_bg             # video_bg.VideoBackground | None
         self.bg_parallax = bg_parallax
@@ -988,6 +1017,29 @@ class StdScene:
 
         self.objects = sorted(beatmap.hit_objects,
                               key=lambda o: o.get_start_time())
+        if self.tmod == WIGGLE:
+            # OsuModWiggle: per object a seeded MoveTo keyframe chain across
+            # TimePreempt (and, for sliders/spinners, their Duration too).
+            for o in self.objects:
+                st = o.get_start_time()
+                dur = (o.get_end_time() - st
+                       if isinstance(o, (Slider, Spinner)) else 0.0)
+                self._wiggle_kf[id(o)] = wiggle_events(
+                    st, self.diff.preempt, dur, self.t_strength)
+        elif self.tmod == TRANSFORM:
+            # OsuModTransform: theta accumulates +TimeFadeIn/1000 per object in
+            # spawn order (spinners advance theta but aren't visually moved —
+            # they draw on their own path). appearDistance/appear timing are
+            # constant for a constant AR; the per-object appearOffset rotates.
+            theta = 0.0
+            preempt, fade_in = self.diff.preempt, self.diff.time_fade_in
+            for o in self.objects:
+                ox0, oy0 = transform_appear_offset(theta, preempt, fade_in)
+                st = o.get_start_time()
+                if not isinstance(o, Spinner):
+                    self._tr_offset[id(o)] = (st - preempt - 1.0,
+                                              preempt + 1.0, ox0, oy0)
+                theta += fade_in / 1000.0
         self.radius_px = camera.len_to_screen(self.diff.circle_radius)
         self.circle_k = circle_pixel_scale(self.radius_px)
         self._spawn_idx = 0
@@ -1025,6 +1077,102 @@ class StdScene:
             self._fp_dots.sort(key=lambda d: d.fade_in)
         self._fp_idx = 0
         self._fp_active: list = []
+
+    # --- transform-family mod visuals (GR/DF/SI/WG/TR) --------------------------
+
+    def _obj_transform(self, obj, t: float) -> ObjTransform:
+        """The per-object visual modifier at time t for the active transform
+        mod. Spinners (and non-transform frames) return IDENTITY."""
+        tmod = self.tmod
+        if not tmod or isinstance(obj, Spinner):
+            return IDENTITY
+        preempt = self.diff.preempt
+        spawn = obj.get_start_time() - preempt
+        is_slider = isinstance(obj, Slider)
+        if tmod == GROW or tmod == DEFLATE:
+            s = grow_deflate_scale(t, spawn, preempt, self.t_start_scale)
+            return ObjTransform(scale_x=s, scale_y=s)
+        if tmod == SPIN_IN:
+            if is_slider:
+                s = spin_in_slider_scale(t, spawn, preempt)
+                return ObjTransform(scale_x=s, scale_y=s, force_opaque=True)
+            sx, sy, rot = spin_in_circle(t, spawn, preempt)
+            return ObjTransform(scale_x=sx, scale_y=sy, rotation=rot,
+                                force_opaque=True)
+        if tmod == WIGGLE:
+            ev = self._wiggle_kf.get(id(obj))
+            ox, oy = wiggle_offset_at(ev, t) if ev else (0.0, 0.0)
+            return ObjTransform(off_x=ox, off_y=oy)
+        if tmod == TRANSFORM:
+            d = self._tr_offset.get(id(obj))
+            if d is None:
+                return IDENTITY
+            appear_time, move_dur, ox0, oy0 = d
+            ox, oy = transform_offset_at(t, appear_time, move_dur, ox0, oy0)
+            return ObjTransform(off_x=ox, off_y=oy)
+        return IDENTITY
+
+    @staticmethod
+    def _transform_sprite_xform(pivot, sx, sy, rot, ox_scr, oy_scr):
+        """A Sprite->Sprite affine: scale (sx, sy) + rotate (rot) about `pivot`
+        (screen px) then translate by (ox_scr, oy_scr). Uniform scale commutes
+        with a sprite's own rotation, so GR/DF/TR/WG are exact for every sprite;
+        SI's non-uniform scale only ever hits rotation-0 circle/number sprites
+        (SI sliders scale uniformly), so it is exact too."""
+        cos_r, sin_r = math.cos(rot), math.sin(rot)
+        px, py = pivot
+
+        def xf(sp):
+            dx = (sp.x - px) * sx
+            dy = (sp.y - py) * sy
+            rx = dx * cos_r - dy * sin_r
+            ry = dx * sin_r + dy * cos_r
+            return replace(sp, x=px + rx + ox_scr, y=py + ry + oy_scr,
+                           w=sp.w * sx, h=sp.h * sy, rotation=sp.rotation + rot)
+        return xf
+
+    @staticmethod
+    def _transform_point_xform(pivot, sx, sy, rot, ox_scr, oy_scr):
+        """The same affine on a bare screen point (for the slider body pass,
+        which bypasses spr.post_xform)."""
+        cos_r, sin_r = math.cos(rot), math.sin(rot)
+        px, py = pivot
+
+        def xf(p):
+            dx = (p[0] - px) * sx
+            dy = (p[1] - py) * sy
+            rx = dx * cos_r - dy * sin_r
+            ry = dx * sin_r + dy * cos_r
+            return (px + rx + ox_scr, py + ry + oy_scr)
+        return xf
+
+    def _apply_obj_transform(self, obj, t: float) -> None:
+        """Install the per-object transform for the sprites drawn next: the
+        approach-ring offset + hide/opaque gates (read by _head_sprites) plus
+        the spr.post_xform / body-xform affine (scale+rotation about the object
+        origin, or the WG/TR position offset)."""
+        ot = self._obj_transform(obj, t)
+        self._t_hide_approach = self.tmod in HIDES_APPROACH
+        self._t_force_opaque = ot.force_opaque
+        self._t_off = (ot.off_x, ot.off_y)
+        if isinstance(obj, Spinner):
+            self.spr.post_xform = None
+            self._t_body_xform = None
+            return
+        pivot = self.cam.to_screen(*obj.get_stacked_start_position(self.diff))
+        scl = self.cam.scl
+        ox_scr, oy_scr = ot.off_x * scl, ot.off_y * scl
+        self.spr.post_xform = self._transform_sprite_xform(
+            pivot, ot.scale_x, ot.scale_y, ot.rotation, ox_scr, oy_scr)
+        self._t_body_xform = self._transform_point_xform(
+            pivot, ot.scale_x, ot.scale_y, ot.rotation, ox_scr, oy_scr)
+
+    def _clear_obj_transform(self) -> None:
+        self.spr.post_xform = None
+        self._t_body_xform = None
+        self._t_off = (0.0, 0.0)
+        self._t_hide_approach = False
+        self._t_force_opaque = False
 
     # --- lifecycle management ---------------------------------------------------
 
@@ -1138,12 +1286,16 @@ class StdScene:
         approach: list[Sprite] = []
         # §5.3: newest objects draw FIRST → end up under older ones
         for obj in reversed(self._active):
+            if self.tmod:
+                self._apply_obj_transform(obj, t)
             if isinstance(obj, Spinner):
                 self._draw_spinner(obj, t)
             elif isinstance(obj, Slider):
                 self._draw_slider(obj, t, approach)
             else:
                 self._draw_circle(obj, t, approach)
+        if self.tmod:
+            self._clear_obj_transform()
         if approach:
             self.spr.draw(approach)
         if self.draw_hit_lighting and self._lightings:
@@ -1742,6 +1894,12 @@ class StdScene:
                                               hit_time=hit_time)
             na = number_alpha(t, start, preempt, fade_in, hit_time=hit_time)
             hit_for_flash = hit_time if hit_time is not None else start
+        if self._t_force_opaque:           # OsuModSpinIn.FadeIn(): opaque from spawn
+            anchor = (v.deadline if (v is not None and v.hit_time is None)
+                      else (hit_for_flash if hit_for_flash is not None else start))
+            if t <= anchor:
+                alpha = 1.0
+                na = 1.0
         if self.hidden:                    # OsuModHidden: circle/number fade out
             hf = hidden_circle_fade(t, start, preempt, fade_in)
             alpha *= hf
@@ -1754,25 +1912,31 @@ class StdScene:
         # the additive FlashPiece bloom) — the pale accent bloom on hit.
         if self.skin is None and hit_for_flash is not None:
             self._argon_hit_flash(sprites, x, y, color, t - hit_for_flash)
-        # OsuModHidden : IHidesApproachCircles — no approach ring under HD
-        if self.draw_approach_circles and not self.hidden:
+        # OsuModHidden / GR / DF / SI : IHidesApproachCircles — no ring.
+        # WG / TR do NOT hide it: the approach circle rides the object's offset.
+        if (self.draw_approach_circles and not self.hidden
+                and not self._t_hide_approach):
             asa = approach_scale_alpha(t, start, preempt, fade_in)
             if asa is not None:
                 a_scale, a_alpha = asa
+                ax, ay = x, y
+                if self._t_off != (0.0, 0.0):
+                    ax, ay = self.cam.to_screen(pos_osu[0] + self._t_off[0],
+                                                pos_osu[1] + self._t_off[1])
                 sk = self.skin
                 if sk is not None and sk.has("approachcircle"):
                     aw, ah = sk.size["approachcircle"]
                     k = self.circle_k
                     approach_out.append(Sprite(
-                        x, y, aw * k * a_scale, ah * k * a_scale,
+                        ax, ay, aw * k * a_scale, ah * k * a_scale,
                         "sk_approachcircle", (*color, a_alpha)))
                 elif sk is None:               # Argon league approach ring
                     ad = 2.0 * self.radius_px * a_scale
-                    approach_out.append(Sprite(x, y, ad, ad, "argon_approach",
+                    approach_out.append(Sprite(ax, ay, ad, ad, "argon_approach",
                                                (*color, a_alpha)))
                 else:
                     ad = 2.0 * self.radius_px * a_scale
-                    approach_out.append(Sprite(x, y, ad, ad, "approach",
+                    approach_out.append(Sprite(ax, ay, ad, ad, "approach",
                                                (*color, a_alpha)))
         return sprites
 
@@ -1804,6 +1968,9 @@ class StdScene:
         if pts and self._fail_body_xform is not None:
             body_pts = [self._fail_body_xform(p) for p in pts]
             body_fade = self._fail_body_alpha
+        elif pts and self._t_body_xform is not None:
+            # GR/DF/SI scale (+ SI grow) / WG/TR offset the whole slider body
+            body_pts = [self._t_body_xform(p) for p in pts]
         if b_alpha > 0.0 and pts:
             if not self.slider_merge:      # merged bodies drew already
                 if self.skin is None:      # Argon league (ArgonSliderBody)
