@@ -811,34 +811,45 @@ def bake_argon_border(size: int = ARGON_CIRCLE_SIZE,
     return bake_ring(size, thickness_frac)
 
 
-ARGON_APPROACH_THICKNESS = 0.11    # MEASURED from frame_26 (real lazer, Argon
-                                   # HUD). Radial FWHM of the approach ring
-                                   # around the combo-"1" circle: stroke 18.3 px
-                                   # / outer radius 165.7 px = 0.111 (equal-ink
-                                   # 17.8/165.7 = 0.107); a_scale = 2.00 off the
-                                   # 82.8 px hit circle — i.e. the ring is exactly
-                                   # mid-contraction, so this is a clean approach
-                                   # ring, not merged with the border.
-                                   # SOURCE cross-check: Argon has no bespoke
-                                   # approach circle; DefaultApproachCircle draws
-                                   # the legacy Gameplay/osu/approachcircle
-                                   # (scaled 128/118) — a SOLID ~8 px ring = 0.064
-                                   # of its 126 px outer. But on-screen lazer
-                                   # renders it ~1.75x thicker (bright ~9 px core
-                                   # + glow shoulders). Our bake is a HARD solid
-                                   # ring with bloom OFF by default, so we match
-                                   # the VISIBLE lazer width (0.11), NOT the bare
-                                   # 0.064 texture proportion. Pass-2's 0.115 was
-                                   # ~right; pass-3's 0.06 (guessed from the bare
-                                   # texture) read too thin — owner-flagged.
+ARGON_APPROACH_THICKNESS = 0.066   # bright CORE thickness (fraction of the ring
+                                   # radius). Pass-4 re-measure of frame_26 (real
+                                   # lazer): the approach ring around the combo-1
+                                   # circle has a SHARP bright core ~11 px on its
+                                   # 166 px radius (11/166 = 0.066 — matching the
+                                   # bare DefaultApproachCircle texture proportion
+                                   # 0.064) PLUS a SOFT glow shoulder trailing to
+                                   # ~19 px total FWHM. Pass-3 baked a FLAT solid
+                                   # 0.11 band (the full FWHM at uniform bright),
+                                   # so it read too THICK vs the game's crisp ring
+                                   # (owner-flagged pass 4). We now bake the bright
+                                   # thin core at 0.066 + a faint additive-style
+                                   # glow shoulder, reproducing the measured
+                                   # profile: crisp like the game, not a slab.
+ARGON_APPROACH_GLOW_FRAC = 0.065   # glow shoulder sigma (fraction of radius) —
+                                   # frame_26's shoulder sits ~0.6 of peak out
+                                   # to ~19 px, so give the halo real weight
+ARGON_APPROACH_GLOW_ALPHA = 0.55   # shoulder peak alpha vs the bright core
 
 
 def bake_argon_approach(size: int = APPROACH_SIZE,
                         thickness_frac: float = ARGON_APPROACH_THICKNESS
                         ) -> np.ndarray:
-    """Argon approach circle — the default THIN combo-tinted ring (base
-    DrawableHitCircle ApproachCircle; Argon ships no bespoke texture)."""
-    return bake_ring(size, thickness_frac)
+    """Argon approach circle — a bright THIN core ring + a soft glow shoulder
+    (base DrawableHitCircle ApproachCircle; Argon ships no bespoke texture).
+    The core reproduces frame_26's crisp ~0.066·R bright band; the Gaussian
+    shoulder gives the game's soft falloff so the ring reads crisp, not as the
+    uniform slab pass-3's flat bake produced."""
+    d = _dist_grid(size)
+    R = size / 2.0 - 2.0
+    core_half = max(0.5 * thickness_frac * R, 1.0)
+    r0 = R - core_half - 1.0                       # ring centerline (near edge)
+    sd = np.abs(d - r0)                            # radial dist from centerline
+    core = np.clip((core_half - sd) / _AA_PX, 0.0, 1.0)
+    sigma = max(ARGON_APPROACH_GLOW_FRAC * R, 1.0)
+    glow = ARGON_APPROACH_GLOW_ALPHA * np.exp(-(sd / sigma) ** 2)
+    alpha = np.maximum(core, glow)
+    alpha = alpha * np.clip((R + 2.0 - d) / _AA_PX, 0.0, 1.0)   # clip at edge
+    return _grey_rgba(np.ones_like(d), alpha)
 
 
 # --- ArgonFollowPoint (chevrons) + RingExplosion (kiai bubbles) ----------------

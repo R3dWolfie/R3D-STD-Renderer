@@ -336,21 +336,31 @@ def test_argon_circle_bands_are_lazer_exact_darken_stack():
     assert mid < outer - 40                # ...clearly below the outer band
 
 
-def test_argon_approach_matches_measured_lazer_ring():
-    """MEASURED from frame_26 (real lazer, Argon): the approach ring's radial
-    FWHM is 18.3 px against a 165.7 px outer radius = 0.111 (equal-ink 0.107),
-    at a_scale 2.00 off the 82.8 px hit circle. Our hard solid ring (bloom OFF)
-    reproduces that VISIBLE width, NOT the bare 0.064 legacy-texture proportion
-    that pass-3's 0.06 mistook for it (owner-flagged as too thin)."""
-    assert abs(T.ARGON_APPROACH_THICKNESS - 0.11) < 1e-9
+def test_argon_approach_is_crisp_core_plus_soft_shoulder():
+    """Pass-4 re-measure of frame_26 (real lazer, Argon): the approach ring is
+    a SHARP bright core (~11 px / 166 px radius = 0.066, matching the bare
+    DefaultApproachCircle texture proportion 0.064) PLUS a soft glow shoulder
+    trailing to ~19 px total. Pass-3's FLAT solid 0.11 band read too THICK
+    (owner-flagged, pass 4). We bake a thin bright core + a Gaussian shoulder:
+    the SOLID-bright band must be thin (~0.066) while a wider, dimmer halo
+    exists around it — crisp like the game, not a uniform slab."""
+    assert abs(T.ARGON_APPROACH_THICKNESS - 0.066) < 1e-9
     a = T.bake_argon_approach(512)[..., 3].astype(float)
     R = 512 / 2.0 - 2.0
     c = 256
-    right = np.where(a[c] > 128)[0]
-    right = right[right > c]               # ring band on the right half
-    assert right.size > 0
-    band = (right.max() - right.min()) / R
-    assert 0.09 < band < 0.13              # measured ~0.11, not the 0.06 hairline
+    row = a[c]
+
+    def band(thresh):
+        idx = np.where(row > thresh)[0]
+        idx = idx[idx > c]                 # ring band on the right half
+        assert idx.size > 0
+        return (idx.max() - idx.min() + 1) / R
+
+    core = band(230)                       # solid bright band (alpha > 0.9)
+    halo = band(60)                        # incl. the soft glow shoulder
+    assert 0.045 < core < 0.085            # crisp thin core, NOT the 0.11 slab
+    assert halo > core + 0.04              # a real soft shoulder surrounds it
+    assert halo < 0.20                     # but bounded — not a blob
 
 
 # --- item 3: ArgonFollowPoint (pink chevrons) ---------------------------------
