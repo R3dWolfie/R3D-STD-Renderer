@@ -319,3 +319,82 @@ def read_rate_adjust(osr_path: Path) -> "RateAdjust | None":
     if not mods:
         return None
     return rate_adjust_from_mods(mods)
+
+
+# --- Rate-RAMP mods: Wind Up / Wind Down (ModTimeRamp) -----------------------
+# osu.Game/Rulesets/Mods/ModTimeRamp.cs + ModWindUp.cs / ModWindDown.cs — the
+# ramp mods CONTINUOUSLY vary the clock rate over the map (linear interp of
+# InitialRate -> FinalRate across [firstObject, 75% of the map]), unlike the
+# constant SpeedChange of ModRateAdjust above. Settings serialise to the
+# snake_case keys ``initial_rate`` / ``final_rate`` / ``adjust_pitch``:
+#
+#   * ModWindUp   (acronym "WU"): InitialRate  BindableDouble(1.0){Min 0.5,
+#       Max 1.99, Precision 0.01}; FinalRate BindableDouble(1.5){Min 0.51,
+#       Max 2.0}; AdjustPitch new BindableBool(TRUE).
+#   * ModWindDown (acronym "WD"): InitialRate  BindableDouble(1.0){Min 0.51,
+#       Max 2.0}; FinalRate BindableDouble(0.75){Min 0.5, Max 1.99};
+#       AdjustPitch new BindableBool(TRUE).
+#
+# WU and WD are mutually incompatible and incompatible with the constant-rate
+# ModRateAdjust family (DT/NC/HT/DC), so a play carries AT MOST one of these
+# and never alongside a rate_override. ``adjust_pitch`` DEFAULTS TO TRUE for
+# both (pitch follows the rate — the classic wind-up "chipmunk"/wind-down
+# "slowdown" sound); an absent key therefore reads back True.
+_RAMP_INITIAL_KEY = "initial_rate"
+_RAMP_FINAL_KEY = "final_rate"
+_RAMP_PITCH_KEY = "adjust_pitch"
+
+# acronym -> (initial_default, final_default)
+RATE_RAMP_DEFAULTS = {"WU": (1.0, 1.5), "WD": (1.0, 0.75)}
+# acronym -> ((initial_min, initial_max), (final_min, final_max))
+RATE_RAMP_RANGE = {"WU": ((0.5, 1.99), (0.51, 2.0)),
+                   "WD": ((0.51, 2.0), (0.5, 1.99))}
+RATE_RAMP_MODS = frozenset(RATE_RAMP_DEFAULTS)
+
+
+@dataclass(frozen=True)
+class RateRamp:
+    """A rate-ramp mod (WU/WD) read from a .osr. ``initial`` / ``final`` are
+    the effective clock rates at the ramp endpoints (each clamped to the mod's
+    SettingSource range, or the mod default when the setting is absent).
+    ``adjust_pitch`` mirrors the mod's AdjustPitch toggle: True (the default)
+    pitches the audio with the rate, False keeps pitch constant (tempo-only)."""
+    acronym: str
+    initial: float
+    final: float
+    adjust_pitch: bool
+
+
+def rate_ramp_from_mods(mods: list[dict]) -> "RateRamp | None":
+    """The rate-ramp mod (WU/WD) from an already-parsed :func:`read_lazer_mods`
+    list, or None when no WU/WD mod is present. Only one ramp can be active, so
+    the first match wins. ``initial_rate`` / ``final_rate`` are clamped to the
+    mod's range; a non-numeric value (or an absent key) falls back to the mod
+    default. ``adjust_pitch`` defaults to True (absent -> True)."""
+    for m in mods:
+        if not isinstance(m, dict):
+            continue
+        ac = str(m.get("acronym", "")).upper()
+        if ac in RATE_RAMP_MODS:
+            s = m.get("settings") or {}
+            di, df = RATE_RAMP_DEFAULTS[ac]
+            (ilo, ihi), (flo, fhi) = RATE_RAMP_RANGE[ac]
+            ri = _da_num(s, _RAMP_INITIAL_KEY)     # numeric-or-None (bools->None)
+            rf = _da_num(s, _RAMP_FINAL_KEY)
+            initial = di if ri is None else min(ihi, max(ilo, ri))
+            final = df if rf is None else min(fhi, max(flo, rf))
+            ap = s.get(_RAMP_PITCH_KEY, True)
+            adjust_pitch = ap if isinstance(ap, bool) else True
+            return RateRamp(acronym=ac, initial=initial, final=final,
+                            adjust_pitch=adjust_pitch)
+    return None
+
+
+def read_rate_ramp(osr_path: Path) -> "RateRamp | None":
+    """The rate-ramp mod (WU/WD + initial/final/adjust_pitch) from a .osr, or
+    None when the replay carries no ramp mod (or no ScoreInfo blob). Never
+    raises."""
+    mods = read_lazer_mods(osr_path)
+    if not mods:
+        return None
+    return rate_ramp_from_mods(mods)

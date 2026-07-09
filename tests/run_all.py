@@ -50,6 +50,10 @@ MODULES = [
     "tests.test_relax",
     # FAIL/DEATH handling: detection + animation transforms + F grade (2026-07)
     "tests.test_fail",
+    # osu!(lazer) Wind Up / Wind Down (WU/WD, ModTimeRamp): a clock rate that
+    # RAMPS over the map — ramp parse + the wall<->map time warp + audio warp
+    # + byte-identical non-ramp path (2026-07)
+    "tests.test_wind_mods",
 ]
 
 

@@ -271,18 +271,20 @@ def nightcore_beats(timings, t0: float, t1: float,
 
 
 def mix_nightcore(mixer, bank: "SampleBank", beats, *, speed: float = 1.0,
-                  start_ms: float = 0.0, gain: float = 1.0) -> int:
+                  start_ms: float = 0.0, gain: float = 1.0,
+                  to_wall=None) -> int:
     """Lay the nightcore overlay into the mixer: clap each beat, finish
     each downbeat, resolved through the normal-set skin chain (skin →
     fallback → synth, so the overlay never goes silent). Returns beats
-    laid."""
+    laid. ``to_wall`` (map-ms → wall-ms) overrides the constant
+    ``(t - start_ms) / speed`` mapping for the WU/WD rate ramp."""
     clap, _ = bank.get(1, "hitclap", 0)
     finish, _ = bank.get(1, "hitfinish", 0)
     laid = 0
     for t, downbeat in beats:
         pcm = finish if downbeat else clap
-        mixer.mix_at((t - start_ms) / speed, pcm,
-                     volume=NIGHTCORE_GAIN * gain)
+        w = to_wall(t) if to_wall is not None else (t - start_ms) / speed
+        mixer.mix_at(w, pcm, volume=NIGHTCORE_GAIN * gain)
         laid += 1
     return laid
 
@@ -622,27 +624,33 @@ class HitsoundMixStats:
 def mix_hitsounds(mixer, bank: SampleBank, oneshots: list[OneShot],
                   loops: list[Loop], *, speed: float = 1.0,
                   start_ms: float = 0.0, gain: float = 1.0,
+                  to_wall=None,
                   ) -> HitsoundMixStats:
     """Mix collected events into the AudioMixer track. Gameplay-ms →
     wall-ms via (t - start_ms) / speed (samples keep their natural pitch
     under rate mods — stable behaviour). mix_at clips events outside the
-    render window."""
+    render window. ``to_wall`` (map-ms → wall-ms) overrides the constant
+    mapping for the WU/WD rate ramp (loop durations then follow the ramp so a
+    slide under Wind Up compresses toward the end); samples still play at
+    natural pitch, matching lazer (hitsounds are not ramped)."""
+    def _w(t: float) -> float:
+        return to_wall(t) if to_wall is not None else (t - start_ms) / speed
+
     before = np.abs(mixer.buf).max() if len(mixer.buf) else 0.0
     for e in oneshots:
         pcm, _src = bank.get(e.set_id, e.sound, e.index)
-        mixer.mix_at((e.time_ms - start_ms) / speed, pcm,
-                     volume=e.volume * gain)
+        mixer.mix_at(_w(e.time_ms), pcm, volume=e.volume * gain)
     loop_ms = 0.0
     for lp in loops:
         pcm, _src = bank.get(lp.set_id, lp.sound, lp.index)
-        dur_ms = (lp.t1 - lp.t0) / speed
+        dur_ms = (_w(lp.t1) - _w(lp.t0)) if to_wall is not None \
+            else (lp.t1 - lp.t0) / speed
         n = int(dur_ms / 1000.0 * SAMPLE_RATE)
         if n <= 0 or len(pcm) == 0:
             continue
         reps = int(math.ceil(n / len(pcm)))
         tiled = np.tile(pcm, (reps, 1))[:n]
-        mixer.mix_at((lp.t0 - start_ms) / speed, tiled,
-                     volume=lp.volume * gain)
+        mixer.mix_at(_w(lp.t0), tiled, volume=lp.volume * gain)
         loop_ms += dur_ms
     after = np.abs(mixer.buf).max() if len(mixer.buf) else 0.0
     return HitsoundMixStats(oneshots=len(oneshots), loop_ms=loop_ms,

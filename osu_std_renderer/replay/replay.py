@@ -29,6 +29,7 @@ from osrparse import Replay
 from .lazer_mods import (LAZER_GAME_VERSION,
                          difficulty_adjust_from_mods,
                          rate_adjust_from_mods,
+                         rate_ramp_from_mods,
                          read_lazer_mods)
 
 # osrparse seeds the last frame with this sentinel time_delta (RNG seed).
@@ -153,6 +154,15 @@ class ReplayMeta:
     # DT/HT change tempo only. See lazer_mods.rate_adjust_from_mods.
     rate_override: float | None = None
     rate_pitch: bool = False
+    # Rate-RAMP mods (lazer Wind Up / Wind Down): the clock rate RAMPS linearly
+    # from ramp_initial to ramp_final over the map (see replay/lazer_mods.py
+    # RateRamp + timewarp.TimeWarp). ramp_initial is None for every non-ramp
+    # replay (constant rate / bitmask / nomod) so those stay byte-identical.
+    # ramp_pitch mirrors ModTimeRamp.AdjustPitch (True = pitch follows rate).
+    ramp_acronym: str = ""
+    ramp_initial: float | None = None
+    ramp_final: float | None = None
+    ramp_pitch: bool = False
 
     @property
     def fail_time(self) -> float | None:
@@ -181,6 +191,21 @@ class ReplayMeta:
         DT/NC/HT/DC whose speed_change differs from the fixed bitmask rate).
         The gate that keeps plain bitmask/nomod renders on the legacy path."""
         return self.rate_override is not None
+
+    @property
+    def has_rate_ramp(self) -> bool:
+        """True when the replay carries a Wind Up / Wind Down ramp (WU/WD).
+        The gate that keeps every constant-rate/nomod render byte-identical —
+        the time-varying warp only activates when this is True."""
+        return self.ramp_initial is not None
+
+    @property
+    def rate_ramp(self) -> tuple[float, float, bool] | None:
+        """The ramp descriptor ``(initial, final, adjust_pitch)`` for building
+        a timewarp.TimeWarp, or None when the replay carries no WU/WD mod."""
+        if not self.has_rate_ramp:
+            return None
+        return (self.ramp_initial, self.ramp_final, self.ramp_pitch)
 
 
 def parse_replay(path: Path) -> tuple[list[StdFrame], ReplayMeta]:
@@ -251,6 +276,10 @@ def parse_replay(path: Path) -> tuple[list[StdFrame], ReplayMeta]:
     da_ext = False
     rate_override: float | None = None
     rate_pitch = False
+    ramp_acronym = ""
+    ramp_initial: float | None = None
+    ramp_final: float | None = None
+    ramp_pitch = False
     if gv >= LAZER_GAME_VERSION:
         mlist = read_lazer_mods(path)
         if mlist is not None:
@@ -270,6 +299,16 @@ def parse_replay(path: Path) -> tuple[list[StdFrame], ReplayMeta]:
             if ra is not None and not ra.is_default:
                 rate_override = ra.speed
                 rate_pitch = ra.pitch
+            # Rate-RAMP (Wind Up / Wind Down): a continuously-varying clock
+            # rate the constant `speed` can't represent. Incompatible with the
+            # rate-adjust family above, so it never co-occurs with a rate
+            # override. Surfaced as ramp_initial/final/pitch for the timewarp.
+            rr = rate_ramp_from_mods(mlist)
+            if rr is not None:
+                ramp_acronym = rr.acronym
+                ramp_initial = rr.initial
+                ramp_final = rr.final
+                ramp_pitch = rr.adjust_pitch
 
     meta = ReplayMeta(
         mode=int(r.mode.value if hasattr(r.mode, "value") else r.mode),
@@ -298,6 +337,10 @@ def parse_replay(path: Path) -> tuple[list[StdFrame], ReplayMeta]:
         da_extended_limits=da_ext,
         rate_override=rate_override,
         rate_pitch=rate_pitch,
+        ramp_acronym=ramp_acronym,
+        ramp_initial=ramp_initial,
+        ramp_final=ramp_final,
+        ramp_pitch=ramp_pitch,
     )
     return frames, meta
 

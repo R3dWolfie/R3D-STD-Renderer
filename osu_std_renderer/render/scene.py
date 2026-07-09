@@ -2582,17 +2582,29 @@ class ScenePlayer:
     §5.3 Update semantics: map time advances delta*speed per tick (DT/HT
     rate mods change speed; frame TIMES stay wall-clock so the video runs
     at the right rate with atempo'd audio).
+
+    WU/WD (rate ramp): ``rate_fn`` (timewarp.TimeWarp.rate_at) makes the map
+    time advance delta*rate(t) per tick — the INSTANTANEOUS ramped rate. This
+    per-tick ``t += dt*rate(t)`` is exactly lazer's own per-frame discretization
+    of dg/dw = rate(g), so late-map objects approach faster (WU) / slower (WD)
+    with no per-object rescaling. ``rate_fn=None`` keeps the constant-rate line
+    untouched -> byte-identical for every non-ramp render.
     """
 
     def __init__(self, scene: StdScene, end_ms: float,
-                 speed: float = 1.0, start_ms: float = 0.0):
+                 speed: float = 1.0, start_ms: float = 0.0,
+                 rate_fn=None):
         self.scene = scene
         self.t = start_ms
         self.end_ms = end_ms
         self.speed = speed
+        self.rate_fn = rate_fn
 
     def update(self, delta_ms: float) -> bool:
-        self.t += delta_ms * self.speed
+        if self.rate_fn is None:
+            self.t += delta_ms * self.speed
+        else:
+            self.t += delta_ms * self.rate_fn(self.t)
         return self.t >= self.end_ms
 
     def draw(self):

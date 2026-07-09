@@ -600,6 +600,27 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
     # FAIL: the sequence lasts FailAnimation.duration=2500 ms WALL → ×speed
     fail_anim_len_ms = FAIL_DURATION_MS * speed
 
+    # --- WU/WD rate ramp (ModTimeRamp): build the wall<->map time warp ------------
+    # A Wind Up / Wind Down replay ramps the clock rate LINEARLY across the map
+    # (timewarp.TimeWarp). One warp drives the record clock, the audio warp and
+    # every wall<->map conversion below. ``warp is None`` for every non-ramp
+    # render, so the constant-`speed` lines stay exactly as they were
+    # (byte-identical). Ramps are incompatible with DT/HT so base speed is 1.0;
+    # the boundary spans (pre-roll before the first object = rate `initial`,
+    # fade after 75% of the map = rate `final`) are constant-rate, so map_span
+    # is exact there.
+    warp = None
+    if meta is not None and meta.has_rate_ramp:
+        from .timewarp import build_time_warp
+        _obj_starts = [o.get_start_time() for o in beatmap.hit_objects]
+        warp = build_time_warp(meta.ramp_initial, meta.ramp_final,
+                               min(_obj_starts), last_end, base_speed=speed)
+        fade_len_ms = warp.map_span(fade_start_ms,
+                                    settings.fade_out_time * 1000.0)
+        gameplay_end_ms = fade_start_ms + fade_len_ms
+        _fanchor = fail_time if fail_time is not None else last_end
+        fail_anim_len_ms = warp.map_span(_fanchor, FAIL_DURATION_MS)
+
     # FAIL results: grade F + stats FROZEN at the death point (NOT the .osr's
     # full-map reconciled totals). Tally judgments up to fail_time from the
     # (un-reconciled) sim, peak combo up to death, accuracy from those counts.
@@ -640,9 +661,13 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
             print(f"ssaa:   results supersampled at {iw}x{ih} → {w}x{h}",
                   file=sys.stderr)
         if settings.results_style == "lazer":
+            # the outro sits past the map end where a WU/WD ramp is pinned at
+            # `final`; the results screen converts its MAP age -> wall via this
+            # rate (age_ms / speed), so hand it the end rate under a ramp.
+            _results_speed = warp.final if warp is not None else speed
             results, results_dur_wall_ms = _build_lazer_results(
                 results_spr, settings, beatmap, meta, judgments, hud, fv,
-                frames, osu_path, args, speed, frozen=frozen)
+                frames, osu_path, args, _results_speed, frozen=frozen)
         else:
             from .render.results import ResultsScreen
             r_counts = frozen["counts"] if frozen else (
@@ -691,8 +716,13 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
     if results is not None:
         # results duration is WALL ms — scale by the rate mod so the outro
         # holds the same real time under DT/HT (the lazer style floors the
-        # duration so both stages + a hold always fit — see _build_lazer)
-        end_ms = results_start_ms + results_dur_wall_ms * speed
+        # duration so both stages + a hold always fit — see _build_lazer).
+        # Under WU/WD the results sit past the map end (rate pinned `final`).
+        if warp is not None:
+            end_ms = results_start_ms + warp.map_span(results_start_ms,
+                                                      results_dur_wall_ms)
+        else:
+            end_ms = results_start_ms + results_dur_wall_ms * speed
     if args.max_seconds is not None:
         end_ms = min(end_ms, args.max_seconds * 1000.0)
     start_ms = (args.start or 0.0) * 1000.0
@@ -704,14 +734,31 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
     # BEFORE start_ms: the map clock simply begins earlier — objects
     # can't spawn, the dim envelope holds the intro level, music is laid
     # correspondingly later into the wall timeline
-    seizure_ms = (SEIZURE_DURATION_S * 1000.0 * speed
-                  if settings.seizure_warning else 0.0)
-    lead_ms = settings.lead_in_time * 1000.0 * speed
-    render_start_ms = start_ms - seizure_ms - lead_ms
-    if seizure_ms or lead_ms:
-        print(f"lead:   {(seizure_ms + lead_ms) / speed / 1000.0:.1f}s "
-              f"pre-roll (seizure {seizure_ms / speed / 1000.0:.1f}s + "
-              f"lead-in {lead_ms / speed / 1000.0:.1f}s)", file=sys.stderr)
+    if warp is not None:
+        # pre-roll is defined in WALL seconds; the map clock begins earlier by
+        # the ramp-correct amount. The pre-roll lands before the first object
+        # (rate = `initial`) for a map-start render, exact via the warp.
+        seizure_wall = (SEIZURE_DURATION_S * 1000.0
+                        if settings.seizure_warning else 0.0)
+        lead_wall = settings.lead_in_time * 1000.0
+        _start_wall = warp.to_wall(start_ms)
+        render_start_ms = warp.to_map(_start_wall - seizure_wall - lead_wall)
+        _post_seizure = warp.to_map(_start_wall - lead_wall)
+        seizure_ms = _post_seizure - render_start_ms   # map span of seizure
+        lead_ms = start_ms - _post_seizure             # map span of lead-in
+        if seizure_wall or lead_wall:
+            print(f"lead:   {(seizure_wall + lead_wall) / 1000.0:.1f}s "
+                  f"pre-roll (seizure {seizure_wall / 1000.0:.1f}s + "
+                  f"lead-in {lead_wall / 1000.0:.1f}s)", file=sys.stderr)
+    else:
+        seizure_ms = (SEIZURE_DURATION_S * 1000.0 * speed
+                      if settings.seizure_warning else 0.0)
+        lead_ms = settings.lead_in_time * 1000.0 * speed
+        render_start_ms = start_ms - seizure_ms - lead_ms
+        if seizure_ms or lead_ms:
+            print(f"lead:   {(seizure_ms + lead_ms) / speed / 1000.0:.1f}s "
+                  f"pre-roll (seizure {seizure_ms / speed / 1000.0:.1f}s + "
+                  f"lead-in {lead_ms / speed / 1000.0:.1f}s)", file=sys.stderr)
 
     bloom_pass = BloomPass(spr.ctx, w, h) if settings.bloom else None
 
@@ -795,22 +842,45 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
     output.parent.mkdir(parents=True, exist_ok=True)
 
     # --- offline audio: music bed + §3.4 hitsounds (NO-BASS design) ---------------
+    # map-ms -> render-relative wall-ms. For a ramp this is the exact warp; with
+    # no ramp it is the ORIGINAL constant expression (byte-identical audio).
+    if warp is not None:
+        _rswall = warp.to_wall(render_start_ms)
+
+        def m2w(m: float) -> float:
+            return warp.to_wall(m) - _rswall
+    else:
+        def m2w(m: float) -> float:
+            return (m - render_start_ms) / speed
+
     audio_path = None
-    mixer = AudioMixer((end_ms - render_start_ms) / speed)
+    mixer = AudioMixer(m2w(end_ms))
     have_audio = False
     afile = beatmap.get_audio_file(beatmap_dir)
     if afile is not None:
         try:
-            # NC/DC pitch the music with the rate; DT/HT (and every standard/
-            # bitmask rate, where rate_pitch is False) change tempo only.
-            pcm = decode_to_pcm(afile, rate=speed,
-                                pitch=(meta is not None and meta.rate_pitch))
             vol = ((settings.music_volume / 100.0)
                    * (settings.general_volume / 100.0))
+            if warp is not None:
+                # WU/WD: the rate ramps, so a single atempo/asetrate can't warp
+                # the track — decode NATIVE and warp piecewise (record/audio.
+                # warp_music_pcm). adjust_pitch True (WU/WD default) shifts
+                # pitch with the rate; False keeps pitch (tempo-only).
+                from .record.audio import warp_music_pcm
+                pcm = decode_to_pcm(afile, rate=1.0)
+                pcm = warp_music_pcm(pcm, warp,
+                                     adjust_pitch=meta.ramp_pitch)
+            else:
+                # NC/DC pitch the music with the rate; DT/HT (and every
+                # standard/bitmask rate, where rate_pitch is False) change
+                # tempo only.
+                pcm = decode_to_pcm(afile, rate=speed,
+                                    pitch=(meta is not None and meta.rate_pitch))
             # the map-time render start lands at wall t=0: the (already
-            # rate-adjusted) music is laid render_start/speed early —
-            # mix_at clips a negative head; a pre-roll delays it instead
-            mixer.lay_music(pcm, -render_start_ms / speed, volume=vol)
+            # rate-adjusted / ramp-warped) music is laid at the wall position
+            # of map time 0 — mix_at clips a negative head; a pre-roll delays
+            # it instead
+            mixer.lay_music(pcm, m2w(0.0), volume=vol)
             have_audio = True
         except AudioError as e:
             print(f"WARNING: music decode failed, mixing without the music "
@@ -852,7 +922,8 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
             loops = [l for l in loops if l.t0 < fail_time]
         stats = mix_hitsounds(mixer, sample_bank, oneshots, loops,
                               speed=speed, start_ms=render_start_ms,
-                              gain=hs_gain)
+                              gain=hs_gain,
+                              to_wall=(m2w if warp is not None else None))
         srcs = sample_bank.source_counts()
         print(f"hitsounds: {stats.oneshots} one-shots, "
               f"{stats.loop_ms / 1000.0:.1f}s loops | samples: "
@@ -871,7 +942,8 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
         beats = nightcore_beats(beatmap.timings,
                                 max(render_start_ms, 0.0), last_end)
         laid = mix_nightcore(mixer, sample_bank, beats, speed=speed,
-                             start_ms=render_start_ms, gain=hs_gain)
+                             start_ms=render_start_ms, gain=hs_gain,
+                             to_wall=(m2w if warp is not None else None))
         downs = sum(1 for _, d in beats if d)
         print(f"nightcore: {laid} beats laid ({downs} downbeats)",
               file=sys.stderr)
@@ -881,12 +953,11 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
     # (danser LeadInTime semantics) — for a map-start render the region
     # is silent anyway; this also covers --start clips with a pre-roll
     if have_audio and (seizure_ms or lead_ms):
-        mixer.silence_before((start_ms - render_start_ms) / speed)
+        mixer.silence_before(m2w(start_ms))
 
     # §4.10 FadeOutTime, audio side: the track fades with the video
     if have_audio and fade_len_ms > 0.0 and fail_time is None:
-        mixer.fade_out((fade_start_ms - render_start_ms) / speed,
-                       (gameplay_end_ms - render_start_ms) / speed)
+        mixer.fade_out(m2w(fade_start_ms), m2w(gameplay_end_ms))
 
     # FAIL audio: the FailAnimation bends the track frequency to 0 over the
     # 2500 ms fall (a slowdown + pitch drop). We can't pitch-bend offline
@@ -895,8 +966,8 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
     # fail sample once at the death point (FailAnimation.failSample.Play).
     if fail_time is not None and settings.general_volume > 0:
         from .record.hitsounds import synth_failsound
-        t0 = (fail_time - render_start_ms) / speed
-        t1 = (fail_time + fail_anim_len_ms - render_start_ms) / speed
+        t0 = m2w(fail_time)
+        t1 = m2w(fail_time + fail_anim_len_ms)
         if have_audio:
             mixer.fade_out(t0, t1)
         fs_vol = settings.general_volume / 100.0
@@ -919,7 +990,7 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
         output_path=output, audio_path=audio_path,
         audio_offset_ms=settings.audio_offset)
 
-    total_wall_ms = (end_ms - render_start_ms) / speed
+    total_wall_ms = m2w(end_ms)
     last_pct = [-1]
 
     def progress(frac: float) -> None:
@@ -929,7 +1000,8 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
             print(f"rendering… {pct}%", file=sys.stderr, flush=True)
 
     player = ScenePlayer(scene, end_ms, speed=speed,
-                         start_ms=render_start_ms)
+                         start_ms=render_start_ms,
+                         rate_fn=(warp.rate_at if warp is not None else None))
     t0 = time.monotonic()
     try:
         with FfmpegPipe(cmd) as pipe:
@@ -1120,6 +1192,13 @@ def main(argv: list[str] | None = None) -> int:
                   f"-> speed {beatmap.diff.speed:g}x, "
                   f"AR{beatmap.diff.ar:g}->ar_real {beatmap.diff.ar_real:.2f}, "
                   f"OD{beatmap.diff.od:g}->od_real {beatmap.diff.od_real:.2f}; "
+                  f"audio {_audio}", file=sys.stderr)
+        if meta.has_rate_ramp:
+            _audio = ("pitch follows rate" if meta.ramp_pitch
+                      else "tempo-only (pitch preserved)")
+            print(f"ramp:   {meta.ramp_acronym} clock rate "
+                  f"{meta.ramp_initial:g}x -> {meta.ramp_final:g}x "
+                  f"(linear over [first object, 75% of the map], then pinned); "
                   f"audio {_audio}", file=sys.stderr)
     else:
         print("replay: (none — --no-replay perfect play)", file=sys.stderr)
