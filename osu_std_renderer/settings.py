@@ -187,6 +187,12 @@ class StdRenderSettings:
     # either style. Grade colours stay lazer's under custom skins (the
     # results screen is client UI, skin-independent).
     results_style: str = "lazer"
+    # per-map RENDER LEADERBOARD on the lazer results screen (owner mockup
+    # 2026-07-09): the featured current-play card flanked by ranked cards of
+    # OTHER renders of the same map, from the LOCAL render DB (no osu!API).
+    # On by default for std; off → the current single-card results (+ the
+    # existing PB card) are unchanged. Only affects results_style="lazer".
+    show_leaderboard: bool = True
     letterbox_breaks: bool = True
 
     # cursor (§4.7/§4.8). use_skin_cursor defaults TRUE — real osu has no
