@@ -13,11 +13,14 @@ import tempfile
 
 from osu_std_renderer.render.lazer_results import (
     FOR_RANK, GRADE_SPACING_PERCENTAGE, LazerResultsScreen, RANK_THRESHOLDS,
-    ResultsData, VIRTUAL_SS_PERCENTAGE, acc_to_angle_deg, arc_color_at,
-    avatar_hue, avatar_initials, bake_accuracy_arc, bake_avatar, bake_star,
-    ease_out_quint, for_star_difficulty, grade_bands, rank_badge_positions,
-    rank_ring_bands, query_pb, slider_stats, target_arc_value,
+    RESULTS_SCORE_WEIGHT, RESULTS_TEXT_WEIGHT, ResultsData,
+    VIRTUAL_SS_PERCENTAGE, acc_to_angle_deg, arc_color_at, avatar_hue,
+    avatar_initials, bake_accuracy_arc, bake_avatar, bake_grade_letter,
+    bake_star, ease_out_quint, for_star_difficulty, grade_bands,
+    rank_badge_positions, rank_ring_bands, query_pb, slider_stats,
+    target_arc_value,
 )
+from osu_std_renderer.render.textures import _load_argon_font
 from osu_std_renderer.render.pp import component_pct
 from osu_std_renderer.settings import StdRenderSettings
 
@@ -170,6 +173,45 @@ def test_bake_star_is_a_star_sprite():
     assert star[32, 32, 3] > 200
     assert (star[2, 2, 3] < 40 and star[2, -3, 3] < 40
             and star[-3, 2, 3] < 40 and star[-3, -3, 3] < 40)
+
+
+def test_results_always_uses_nunito_client_font():
+    # the results screen is lazer CLIENT UI (skin-independent) → always the
+    # bundled Nunito (Torus stand-in), never DejaVu, regardless of skin.
+    for argon in (True, False):
+        scr = LazerResultsScreen(_FakeSpr(), _data(), total_ms=5000.0,
+                                 argon_font=argon)
+        assert scr._font_loader is _load_argon_font
+        assert callable(scr._score_loader)
+    # the big score is lighter than the body text (lazer Torus Light score)
+    assert RESULTS_SCORE_WEIGHT < RESULTS_TEXT_WEIGHT
+
+
+def _halo_mean(rgba):
+    import numpy as np
+    rgb = rgba[..., :3].astype(float)
+    a = rgba[..., 3]
+    white = (rgb[..., 0] > 235) & (rgb[..., 1] > 235) & (rgb[..., 2] > 235)
+    m = (a > 25) & (a < 220) & (~white)          # the soft halo, not the fill
+    return rgb[m].mean(axis=0) if m.any() else np.zeros(3)
+
+
+def test_bake_grade_letter_white_fill_rank_glow():
+    import numpy as np
+    b_rgba, w, h = bake_grade_letter("B", 120, (1, 1, 1), FOR_RANK["B"])
+    assert w > 0 and h > 0
+    rgb = b_rgba[..., :3].astype(int)
+    alpha = b_rgba[..., 3]
+    # a solid WHITE core (the fill) exists
+    white = ((rgb[..., 0] > 235) & (rgb[..., 1] > 235) & (rgb[..., 2] > 235)
+             & (alpha > 235))
+    assert white.any()
+    # the halo is warm for B (orange ForRank e3b130): more red than blue;
+    # cool for S (blue 02b5c3): more blue than red — each grade glows its own
+    hb = _halo_mean(b_rgba)
+    hs = _halo_mean(bake_grade_letter("S", 120, (1, 1, 1), FOR_RANK["S"])[0])
+    assert hb[0] > hb[2] + 20        # B halo warm/orange
+    assert hs[2] > hs[0] + 20        # S halo cool/blue
 
 
 def test_for_star_difficulty_samples_spectrum():

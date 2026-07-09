@@ -3,7 +3,9 @@ renderer (owner spec 2026-07; the std default outro, R3D card behind
 `results_style=r3d`).
 
 PORTED (layout/animation semantics only — MIT, ppy/osu, no ppy assets;
-every texture is procedurally baked in-repo, fonts = the repo's DejaVu):
+every texture is procedurally baked in-repo, fonts = the bundled Nunito, our
+lazer-Torus stand-in — the results screen is CLIENT UI, skin-independent, so
+it uses the lazer font family, NOT the DejaVu of the skinnable gameplay HUD):
 
   osu.Game/Screens/Ranking/ScorePanel.cs
   osu.Game/Screens/Ranking/Expanded/ExpandedPanelMiddleContent.cs
@@ -72,7 +74,7 @@ from PIL import Image, ImageDraw
 from .gl import Sprite
 from .hud import BAND_50, BAND_100, BAND_300
 from .results import histogram_bins, mods_string
-from .textures import _load_argon_font, _load_font
+from .textures import ARGON_FONT_PATH, _load_argon_font, _load_font
 
 UH = 1080.0                    # virtual design height (HUD convention)
 
@@ -156,6 +158,33 @@ ACC_GRAD_W = 0.020        # inner graded-ring thickness (thin)
 ACC_BADGE_R = 0.435       # badge-pill centre radius (outside the arc)
 ACC_BADGE_W = 0.088       # badge-pill width
 ACC_BADGE_H = 0.050       # badge-pill height
+
+# results-screen text weights (Nunito variable-font `wght`, our lazer
+# OsuFont.Torus stand-in). Body/labels are Medium; the big rolling score is
+# Light — matching lazer's thin geometric score counter (OsuFont.Torus Light).
+RESULTS_TEXT_WEIGHT = 500        # Nunito Medium
+RESULTS_SCORE_WEIGHT = 330       # Nunito Light (thin, big)
+
+
+def _nunito_loader(weight: int):
+    """A (px)->font loader for the bundled Nunito at a given variable `wght`
+    (lazer Torus stand-in). Falls back to DejaVu if the asset is missing so a
+    stripped checkout still renders."""
+    from PIL import ImageFont
+
+    def _load(px: int):
+        try:
+            f = ImageFont.truetype(ARGON_FONT_PATH, max(int(px), 6))
+        except OSError:
+            return _load_font(max(int(px), 6))
+        try:
+            f.set_variation_by_axes([weight])
+        except Exception:  # noqa: BLE001 — non-variable build → default face
+            pass
+        return f
+
+    return _load
+
 
 # OsuColour.ForStarDifficulty gradient stops (star, hex) — the star-rating
 # pill background colour. (osu.Game/Graphics/OsuColour.cs ForStarDifficulty.)
@@ -471,6 +500,37 @@ def _hsv(h: float, s: float, v: float) -> tuple[float, float, float]:
     return colorsys.hsv_to_rgb(h, s, v)
 
 
+def bake_grade_letter(text: str, px: int, fill, glow, loader=_load_font):
+    """The AccuracyCircle centre rank letter: WHITE fill with a soft
+    rank-coloured outer glow — lazer DrawableRank's coloured EdgeEffect/Glow
+    (osu.Game/Scoring/Drawables/DrawableRank + the AccuracyCircle centre). A
+    tight bright edge + a wider soft halo in `glow` (the ForRank colour),
+    then the white glyph on top. Returns (rgba, w, h)."""
+    from PIL import ImageFilter
+    font = loader(max(int(px), 8))
+    try:
+        x0, y0, x1, y1 = font.getbbox(text)
+    except AttributeError:
+        x1, y1 = font.getsize(text); x0 = y0 = 0     # type: ignore
+    tw = max(x1 - x0, 1)
+    th = max(y1 - y0, 1)
+    pad = max(int(px * 0.42), 8)
+    W = tw + 2 * pad
+    H = th + 2 * pad
+    ox, oy = pad - x0, pad - y0
+    gc = tuple(int(round(c * 255)) for c in glow)
+    glyph = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    ImageDraw.Draw(glyph).text((ox, oy), text, font=font, fill=(*gc, 255))
+    tight = glyph.filter(ImageFilter.GaussianBlur(max(px * 0.045, 1)))
+    wide = glyph.filter(ImageFilter.GaussianBlur(max(px * 0.11, 2)))
+    out = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    for layer in (wide, wide, tight, tight):          # stack → a bright halo
+        out = Image.alpha_composite(out, layer)
+    fc = tuple(int(round(c * 255)) for c in fill)
+    ImageDraw.Draw(out).text((ox, oy), text, font=font, fill=(*fc, 255))
+    return _to_rgba(out), W, H
+
+
 def bake_star(px: int, color):
     """A filled 5-point star sprite (the repo font has no ★ glyph, so the
     star-rating icon is drawn, not typed). Supersampled for clean edges."""
@@ -676,8 +736,12 @@ class LazerResultsScreen:
         self.spr = spr
         self.d = data
         self.w, self.h = float(spr.width), float(spr.height)
-        # skinless (Argon league) → bundled OFL font; custom skin → DejaVu.
-        self._font_loader = _load_argon_font if argon_font else _load_font
+        # the results screen is lazer CLIENT UI (skin-independent) → always the
+        # bundled Nunito (Torus stand-in), NOT DejaVu, regardless of the
+        # gameplay skin. Body/labels Medium; the big rolling score Light.
+        # (`argon_font` kept for signature compat; no longer selects the face.)
+        self._font_loader = _load_argon_font                 # Nunito Medium
+        self._score_loader = _nunito_loader(RESULTS_SCORE_WEIGHT)  # Nunito Light
         self.k = self.h / UH
         self.uw = self.w / self.k              # virtual width
         # the scene feeds age in MAP ms; the timeline is WALL ms → divide by
@@ -766,8 +830,12 @@ class LazerResultsScreen:
         self.ACC_DISP = 380.0                 # canvas display size (virtual)
         cbake = int(self.ACC_DISP * k)
         self.acc_base_key = self._put(bake_accuracy_base(cbake))
-        # centre rank letter: white, like lazer's DrawableRank on the circle
-        self.grade_letter = self._text(d.grade, 150, (0.98, 0.99, 1.0))
+        # centre rank letter: WHITE fill + a soft rank-coloured glow (lazer
+        # DrawableRank's coloured EdgeEffect) — glow = ForRank[grade].
+        _gl_rgba, _gl_w, _gl_h = bake_grade_letter(
+            d.grade, int(150 * k), (0.99, 0.99, 1.0),
+            FOR_RANK.get(d.grade, (0.8, 0.8, 0.85)), self._font_loader)
+        self.grade_letter = (self._put(_gl_rgba), float(_gl_w), float(_gl_h))
         self.target_arc = target_arc_value(self.acc_frac, d.grade)
         # score baked lazily (rolls)
         self.score_row = self._score_text(0)
@@ -884,7 +952,8 @@ class LazerResultsScreen:
                 self._text(value, 32, color))
 
     def _score_text(self, value: int):
-        rgba, w, h = bake_text(f"{value:,}", int(64 * self.k), (1, 1, 1))
+        rgba, w, h = bake_text(f"{value:,}", int(64 * self.k), (1, 1, 1),
+                               self._score_loader)
         if self._score_val < 0:
             self._score_key = self._put(rgba)
         else:
