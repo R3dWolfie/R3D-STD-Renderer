@@ -60,6 +60,10 @@ MODULES = [
     # transform-family "fun" mods: GR/DF/SI/WG/TR — per-object entrance
     # animation (visual only; reconcile/geometry untouched) (2026-07)
     "tests.test_transform_mods",
+    # approach/circle-appearance mods: FR (Freeze Frame) / AD (Approach
+    # Different) / TC (Traceable) — approach-circle scale/timing + circle-fill
+    # gate (visual only; reconcile/geometry untouched) (2026-07)
+    "tests.test_appearance_mods",
 ]
 
 
