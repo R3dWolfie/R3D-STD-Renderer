@@ -13,10 +13,10 @@ import tempfile
 
 from osu_std_renderer.render.lazer_results import (
     FOR_RANK, GRADE_SPACING_PERCENTAGE, LazerResultsScreen, RANK_THRESHOLDS,
-    RESULTS_SCORE_WEIGHT, RESULTS_TEXT_WEIGHT, ResultsData,
+    RESULTS_SCORE_WEIGHT, RESULTS_TEXT_WEIGHT, TEXT_SS, ResultsData,
     VIRTUAL_SS_PERCENTAGE, acc_to_angle_deg, arc_color_at, avatar_hue,
     avatar_initials, bake_accuracy_arc, bake_avatar, bake_grade_letter,
-    bake_star, ease_out_quint, for_star_difficulty, grade_bands,
+    bake_star, bake_text, ease_out_quint, for_star_difficulty, grade_bands,
     rank_badge_positions, rank_ring_bands, query_pb, slider_stats,
     target_arc_value,
 )
@@ -163,6 +163,42 @@ def test_bake_accuracy_arc_is_cyan_green_gradient():
     assert bot_pix[:, 0].mean() > top_pix[:, 0].mean() + 30   # green: more red
     red = np.array([round(c * 255) for c in FOR_RANK["D"]])
     assert not bool((np.abs(rgb - red).sum(axis=2) <= 12).any())  # not rank-red
+
+
+def test_bake_text_bakes_at_supersampled_resolution():
+    # the crispy/aliased results text was PIL's coarse 1× AA; bake_text now
+    # rasterises at px*TEXT_SS (font at px*TEXT_SS) and downscales — prove the
+    # supersampled raster actually happens by spying on the px the loader sees.
+    assert TEXT_SS >= 2
+    seen = []
+
+    def spy_loader(px):
+        seen.append(int(px))
+        return _load_argon_font(px)
+
+    rgba, w, h = bake_text("356,457", 64, (1, 1, 1), spy_loader)
+    assert 64 in seen                       # native metrics at target px
+    assert 64 * TEXT_SS in seen             # the supersampled raster
+    assert max(seen) == 64 * TEXT_SS
+    assert w > 0 and h > 0
+    # ss=1 keeps the old 1× footprint identical → layout is unchanged
+    _r1, w1, h1 = bake_text("356,457", 64, (1, 1, 1), _load_argon_font, ss=1)
+    assert (w, h) == (w1, h1)
+
+
+def test_bake_text_has_smooth_edge_gradient():
+    # supersampling → the glyph edge is a smooth alpha gradient (many
+    # intermediate levels), not a hard/coarse 0↔255 cutover.
+    import numpy as np
+    rgba, w, h = bake_text("8", 80, (1, 1, 1))
+    a = rgba[..., 3]
+    assert a.max() > 240 and a.min() == 0            # solid fill + empty bg
+    mid = a[(a > 10) & (a < 245)]                    # the anti-aliased edge
+    assert mid.size > 0
+    assert len(np.unique(mid)) >= 12                 # smooth gradient, not binary
+    # blank text is still a 1×1 stub
+    stub, sw, sh = bake_text("", 40, (1, 1, 1))
+    assert (sw, sh) == (1, 1) and stub.shape == (1, 1, 4)
 
 
 def test_bake_star_is_a_star_sprite():

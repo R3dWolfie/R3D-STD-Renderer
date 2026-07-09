@@ -165,6 +165,19 @@ ACC_BADGE_H = 0.050       # badge-pill height
 RESULTS_TEXT_WEIGHT = 500        # Nunito Medium
 RESULTS_SCORE_WEIGHT = 330       # Nunito Light (thin, big)
 
+# Supersample factors for the procedurally-baked results text/shapes. PIL's
+# default 1× rasteriser gives too-coarse anti-aliasing — the settled panel
+# read "crispy"/stair-stepped when the owner zoomed in (score digits, thin
+# labels). Every text/shape element is instead rasterised at N× the target
+# px (font + geometry at N×) and downscaled to the native footprint with
+# LANCZOS → smooth AA that holds up zoomed and at any output scale. The
+# native (w, h) footprint is unchanged, so layout/positioning is identical.
+# Text is the priority (TEXT_SS); the accuracy ring/arc are larger and the
+# arc re-bakes while it sweeps, so a lighter factor bounds their cost
+# (SHAPE_SS) while still smoothing the big curve.
+TEXT_SS = 3
+SHAPE_SS = 2
+
 
 def _nunito_loader(weight: int):
     """A (px)->font loader for the bundled Nunito at a given variable `wght`
@@ -375,12 +388,22 @@ def _to_rgba(img: "Image.Image"):
     return np.asarray(img.convert("RGBA"), dtype="u1").copy()
 
 
-def bake_text(text: str, px: int, color, loader=_load_font) -> tuple:
-    """One baked text line → (rgba, w, h). Blank text → 1×1 stub."""
+def bake_text(text: str, px: int, color, loader=_load_font,
+              ss: int = TEXT_SS) -> tuple:
+    """One baked text line → (rgba, w, h). Blank text → 1×1 stub.
+
+    Supersampled: the glyphs are rasterised at `px*ss` with the font at
+    `px*ss`, then LANCZOS-downscaled to the native footprint — high-quality
+    smooth AA that stays clean when the results panel is viewed zoomed / at
+    any output scale (PIL's default 1× AA read as "crispy"/stair-stepped).
+    The returned (w, h) is the native footprint, so layout/positioning is
+    unchanged from the un-supersampled bake. `ss=1` = the old 1× path."""
     import numpy as np
     if not text:
         return np.zeros((1, 1, 4), dtype="u1"), 1, 1
-    font = loader(max(int(px), 6))
+    px = max(int(px), 6)
+    # native footprint (unchanged layout metrics + downscale target)
+    font = loader(px)
     try:
         x0, y0, x1, y1 = font.getbbox(text)
     except AttributeError:
@@ -389,10 +412,27 @@ def bake_text(text: str, px: int, color, loader=_load_font) -> tuple:
     pad = max(px // 12, 2)
     w = max(x1 - x0, 1) + 2 * pad
     h = max(y1 - y0, 1) + 2 * pad
-    img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     rgb = tuple(int(round(c * 255)) for c in color)
-    ImageDraw.Draw(img).text((pad - x0, pad - y0), text, font=font,
+    ss = max(int(ss), 1)
+    if ss == 1:
+        img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        ImageDraw.Draw(img).text((pad - x0, pad - y0), text, font=font,
+                                 fill=(*rgb, 255))
+        return _to_rgba(img), w, h
+    # supersampled raster at px*ss, LANCZOS-downscaled to the native (w, h)
+    fb = loader(px * ss)
+    try:
+        bx0, by0, bx1, by1 = fb.getbbox(text)
+    except AttributeError:
+        bw0, bh0 = fb.getsize(text)          # type: ignore[attr-defined]
+        bx0, by0, bx1, by1 = 0, 0, bw0, bh0
+    padb = pad * ss
+    Wb = max(bx1 - bx0, 1) + 2 * padb
+    Hb = max(by1 - by0, 1) + 2 * padb
+    big = Image.new("RGBA", (Wb, Hb), (0, 0, 0, 0))
+    ImageDraw.Draw(big).text((padb - bx0, padb - by0), text, font=fb,
                              fill=(*rgb, 255))
+    img = big.resize((w, h), Image.LANCZOS)
     return _to_rgba(img), w, h
 
 
@@ -500,14 +540,20 @@ def _hsv(h: float, s: float, v: float) -> tuple[float, float, float]:
     return colorsys.hsv_to_rgb(h, s, v)
 
 
-def bake_grade_letter(text: str, px: int, fill, glow, loader=_load_font):
+def bake_grade_letter(text: str, px: int, fill, glow, loader=_load_font,
+                      ss: int = TEXT_SS):
     """The AccuracyCircle centre rank letter: WHITE fill with a soft
     rank-coloured outer glow — lazer DrawableRank's coloured EdgeEffect/Glow
     (osu.Game/Scoring/Drawables/DrawableRank + the AccuracyCircle centre). A
     tight bright edge + a wider soft halo in `glow` (the ForRank colour),
-    then the white glyph on top. Returns (rgba, w, h)."""
+    then the white glyph on top. Supersampled at `px*ss` (glyph + blur radii)
+    then LANCZOS-downscaled to the native footprint so the white glyph edge
+    stays smooth when zoomed. Returns (rgba, w, h)."""
     from PIL import ImageFilter
-    font = loader(max(int(px), 8))
+    px = max(int(px), 8)
+    ss = max(int(ss), 1)
+    # native footprint (return size + downscale target)
+    font = loader(px)
     try:
         x0, y0, x1, y1 = font.getbbox(text)
     except AttributeError:
@@ -517,17 +563,31 @@ def bake_grade_letter(text: str, px: int, fill, glow, loader=_load_font):
     pad = max(int(px * 0.42), 8)
     W = tw + 2 * pad
     H = th + 2 * pad
-    ox, oy = pad - x0, pad - y0
+    # supersampled build (font, pads, blur radii all ×ss)
+    bpx = px * ss
+    fb = loader(bpx)
+    try:
+        bx0, by0, bx1, by1 = fb.getbbox(text)
+    except AttributeError:
+        bx1, by1 = fb.getsize(text); bx0 = by0 = 0   # type: ignore
+    btw = max(bx1 - bx0, 1)
+    bth = max(by1 - by0, 1)
+    padb = pad * ss
+    Wb = btw + 2 * padb
+    Hb = bth + 2 * padb
+    ox, oy = padb - bx0, padb - by0
     gc = tuple(int(round(c * 255)) for c in glow)
-    glyph = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    ImageDraw.Draw(glyph).text((ox, oy), text, font=font, fill=(*gc, 255))
-    tight = glyph.filter(ImageFilter.GaussianBlur(max(px * 0.045, 1)))
-    wide = glyph.filter(ImageFilter.GaussianBlur(max(px * 0.11, 2)))
-    out = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    glyph = Image.new("RGBA", (Wb, Hb), (0, 0, 0, 0))
+    ImageDraw.Draw(glyph).text((ox, oy), text, font=fb, fill=(*gc, 255))
+    tight = glyph.filter(ImageFilter.GaussianBlur(max(bpx * 0.045, 1)))
+    wide = glyph.filter(ImageFilter.GaussianBlur(max(bpx * 0.11, 2)))
+    out = Image.new("RGBA", (Wb, Hb), (0, 0, 0, 0))
     for layer in (wide, wide, tight, tight):          # stack → a bright halo
         out = Image.alpha_composite(out, layer)
     fc = tuple(int(round(c * 255)) for c in fill)
-    ImageDraw.Draw(out).text((ox, oy), text, font=font, fill=(*fc, 255))
+    ImageDraw.Draw(out).text((ox, oy), text, font=fb, fill=(*fc, 255))
+    if ss != 1:
+        out = out.resize((W, H), Image.LANCZOS)
     return _to_rgba(out), W, H
 
 
@@ -552,7 +612,7 @@ def bake_star(px: int, color):
     return _to_rgba(big)
 
 
-def bake_accuracy_base(px: int):
+def bake_accuracy_base(px: int, ss: int = SHAPE_SS):
     """The AccuracyCircle background, ported 1:1 (osu.Game/Screens/Ranking/
     Expanded/Accuracy/{AccuracyCircle,GradedCircles,RankBadge}.cs):
 
@@ -565,8 +625,12 @@ def bake_accuracy_base(px: int):
         spread cleanly (D lower-right … S/SS top).
 
     Baked once (accuracy-independent). The bright cyan→green achieved arc is
-    a separate sprite (bake_accuracy_arc) drawn over this."""
-    S = max(int(px), 64)
+    a separate sprite (bake_accuracy_arc) drawn over this. Supersampled at
+    `px*ss` then LANCZOS-downscaled so the ring notches and the RankBadge
+    letters stay smooth when the panel is viewed zoomed."""
+    S_target = max(int(px), 64)
+    ss = max(int(ss), 1)
+    S = S_target * ss
     img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
     cx = cy = S / 2.0
@@ -592,6 +656,8 @@ def bake_accuracy_base(px: int):
         bx = cx + ACC_BADGE_R * S * math.cos(ang)
         by = cy + ACC_BADGE_R * S * math.sin(ang)
         _badge_pill(img, bx, by, S, g)
+    if ss != 1:
+        img = img.resize((S_target, S_target), Image.LANCZOS)
     return _to_rgba(img)
 
 
@@ -637,13 +703,18 @@ def _arc_gradient_rgb(S: int):
     return g
 
 
-def bake_accuracy_arc(px: int, progress_acc: float, color=None):
+def bake_accuracy_arc(px: int, progress_acc: float, color=None,
+                      ss: int = SHAPE_SS):
     """The achieved-accuracy arc (0 → progress_acc) — lazer's "Accuracy
     circle": a FIXED vertical cyan→green gradient (#7CF6FF→#BAFFA9), NOT rank
     colours. A thin light dash marks the sweeping tip. `color` ignored
-    (signature compat). Re-baked per progress bucket while sweeping."""
+    (signature compat). Re-baked per progress bucket while sweeping.
+    Supersampled at `px*ss` then LANCZOS-downscaled so the big curve reads
+    smooth (not stair-stepped) when the panel is viewed zoomed."""
     import numpy as np
-    S = max(int(px), 64)
+    S_target = max(int(px), 64)
+    ss = max(int(ss), 1)
+    S = S_target * ss
     cx = cy = S / 2.0
     R = ACC_ARC_R * S
     W = max(int(round(ACC_ARC_W * S)), 2)
@@ -654,8 +725,8 @@ def bake_accuracy_arc(px: int, progress_acc: float, color=None):
             acc_to_angle_deg(progress_acc), fill=255, width=W)
     rgb = _arc_gradient_rgb(S)
     out = np.dstack([rgb, np.asarray(mask, dtype="u1")]).copy()
+    img = Image.fromarray(out, "RGBA")
     if progress_acc > 0.0005:
-        img = Image.fromarray(out, "RGBA")
         d = ImageDraw.Draw(img)
         ang = math.radians(acc_to_angle_deg(progress_acc))
         r0 = R - W / 2.0 - 1
@@ -663,8 +734,9 @@ def bake_accuracy_arc(px: int, progress_acc: float, color=None):
         d.line([(cx + r0 * math.cos(ang), cy + r0 * math.sin(ang)),
                 (cx + r1 * math.cos(ang), cy + r1 * math.sin(ang))],
                fill=(255, 255, 255, 235), width=max(int(W * 0.16), 2))
-        out = _to_rgba(img)
-    return out
+    if ss != 1:
+        img = img.resize((S_target, S_target), Image.LANCZOS)
+    return _to_rgba(img)
 
 
 def bake_heatmap(px: int, points, ring_frac: float = 0.62):
@@ -781,6 +853,7 @@ class LazerResultsScreen:
         lum = 0.299 * bg[0] + 0.587 * bg[1] + 0.114 * bg[2]
         fg = (0.06, 0.06, 0.09) if lum > 0.6 else (1.0, 1.0, 1.0)
         fpx = max(int(22 * self.k), 8)
+        # native footprint (layout metrics + downscale target)
         font = self._font_loader(fpx)
         try:
             x0, y0, x1, y1 = font.getbbox(txt)
@@ -793,17 +866,32 @@ class LazerResultsScreen:
         gap = int(fpx * 0.26)
         H = max(th, star_sz) + 2 * pady
         W = padx + star_sz + gap + tw + padx
-        img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        # supersampled build (pill/star/number at TEXT_SS×), LANCZOS-downscaled
+        # to (W, H) so the pill edge, star and star-number stay smooth zoomed.
+        ss = TEXT_SS
+        fpxb = fpx * ss
+        fb = self._font_loader(fpxb)
+        try:
+            bx0, by0, bx1, by1 = fb.getbbox(txt)
+        except AttributeError:
+            bx1, by1 = fb.getsize(txt); bx0 = by0 = 0   # type: ignore
+        twb, thb = bx1 - bx0, by1 - by0
+        star_szb = star_sz * ss
+        padxb, padyb, gapb = padx * ss, pady * ss, gap * ss
+        Hb = max(thb, star_szb) + 2 * padyb
+        Wb = padxb + star_szb + gapb + twb + padxb
+        img = Image.new("RGBA", (Wb, Hb), (0, 0, 0, 0))
         dd = ImageDraw.Draw(img)
         bgc = tuple(int(round(c * 255)) for c in bg)
-        dd.rounded_rectangle([0, 0, W - 1, H - 1], radius=H // 2,
+        dd.rounded_rectangle([0, 0, Wb - 1, Hb - 1], radius=Hb // 2,
                              fill=(*bgc, 255))
-        star_rgba = bake_star(star_sz, fg)
+        star_rgba = bake_star(star_szb, fg)
         img.alpha_composite(Image.fromarray(star_rgba, "RGBA"),
-                            (padx, (H - star_sz) // 2))
+                            (padxb, (Hb - star_szb) // 2))
         fgc = tuple(int(round(c * 255)) for c in fg)
-        dd.text((padx + star_sz + gap - x0, (H - th) // 2 - y0), txt,
-                font=font, fill=(*fgc, 255))
+        dd.text((padxb + star_szb + gapb - bx0, (Hb - thb) // 2 - by0), txt,
+                font=fb, fill=(*fgc, 255))
+        img = img.resize((W, H), Image.LANCZOS)
         return (self._put(_to_rgba(img)), float(W), float(H))
 
     def _bake_static(self) -> None:
