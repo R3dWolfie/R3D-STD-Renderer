@@ -429,24 +429,33 @@ def acc_display_value(acc: float) -> float:
 
 
 def grade_for(c300: int, c100: int, c50: int, cmiss: int) -> str:
-    """std grade thresholds (osu! wiki; the replay.py formula on live
-    counts). Silver (HD/FL) variants are a display concern, skipped."""
+    """osu!(lazer)-EXACT rank. Ported from
+    osu.Game/Rulesets/Scoring/ScoreProcessor.RankFromScore (accuracy
+    cutoffs X=1 / S=.95 / A=.9 / B=.8 / C=.7 / D=0) with the std override
+    osu.Game.Rulesets.Osu/Scoring/OsuScoreProcessor.RankFromScore, which
+    downgrades S/X to A when any Miss is present. Silver (HD/FL SH/XH)
+    variants are a display concern, skipped."""
     total = c300 + c100 + c50 + cmiss
     if total == 0:
-        return "SS"          # nothing judged yet — a clean sheet
-    if c300 == total:
-        return "SS"
-    r300 = c300 / total
-    r50 = c50 / total
-    if r300 > 0.9 and r50 <= 0.01 and cmiss == 0:
-        return "S"
-    if (r300 > 0.8 and cmiss == 0) or r300 > 0.9:
-        return "A"
-    if (r300 > 0.7 and cmiss == 0) or r300 > 0.8:
-        return "B"
-    if r300 > 0.6:
-        return "C"
-    return "D"
+        return "SS"          # nothing judged yet — the rank Bindable starts X
+    acc = std_accuracy(c300, c100, c50, cmiss)
+    # ScoreProcessor.RankFromScore (accuracy is 0..1; X requires exactly 1)
+    if acc >= 1.0:
+        rank = "SS"
+    elif acc >= 0.95:
+        rank = "S"
+    elif acc >= 0.9:
+        rank = "A"
+    elif acc >= 0.8:
+        rank = "B"
+    elif acc >= 0.7:
+        rank = "C"
+    else:
+        rank = "D"
+    # OsuScoreProcessor override: a miss caps S/X at A
+    if cmiss > 0 and rank in ("S", "SS"):
+        rank = "A"
+    return rank
 
 
 def unstable_rate(deltas) -> float:
@@ -1282,50 +1291,52 @@ class StdHud:
 
     # ==================== ARGON components (skinless default) =======================
 
-    def _wireframes(self, out, n: int, right_x_l: float, top_y_l: float,
-                    h_l: float, alpha: float) -> None:
-        """n wireframe cells behind a right-aligned digit run
-        (ArgonCounterTextComponent's wireframesPart, template '#'×n),
-        laid right-to-left on the digit mono advance."""
-        adv = self.bank.glyph_mono_advance * h_l
-        gap = _TRACKING * h_l
-        wf_asp = getattr(self.bank, "wireframe_aspect", 0.55)
-        x = right_x_l
-        for _ in range(n):
-            cx = x - adv / 2.0
-            out.append(Sprite(cx * self.lk,
-                              (top_y_l + h_l / 2.0) * self.lk,
-                              wf_asp * h_l * self.lk, h_l * self.lk,
-                              "argon_wireframe", (1, 1, 1, alpha)))
-            x -= adv + gap
+    ARGON_SEG_LIT = {".": "aseg_dot", "%": "aseg_pct", "x": "aseg_x"}
 
-    def _argon_digit_run(self, out, text: str, right_x_l: float,
-                         top_y_l: float, h_l: float, alpha: float,
-                         color=(1, 1, 1), wire_n: int | None = None,
-                         scale_pivot=None, extra_scale: float = 1.0,
-                         ) -> float:
-        """Right-aligned mono digit run with optional wireframe cells
-        (Argon counter text). Returns width (lazer px)."""
-        if wire_n is not None:
-            self._wireframes(out, max(wire_n, len([c for c in text
-                                                   if c.isdigit()])),
-                             right_x_l, top_y_l, h_l,
-                             ARGON_WIRE_ALPHA * self.op * alpha)
-        w = self._lrun_width(text, h_l, mono=True)
-        entries, _ = layout_run(text, self.bank.glyph_aspect, h_l * KL,
-                                mono_advance=self.bank.glyph_mono_advance)
-        x_left = right_x_l - w
-        for ch, cx, cw in entries:
-            gx = x_left + cx / KL
-            gy = top_y_l + h_l / 2.0
-            if scale_pivot is not None:
-                gx = scale_pivot[0] + (gx - scale_pivot[0]) * extra_scale
-                gy = scale_pivot[1] + (gy - scale_pivot[1]) * extra_scale
+    def _argon_seg_width(self, n: int, h_l: float) -> float:
+        """Width (lazer px) of an n-cell Argon 7-segment run at height h_l."""
+        return self.bank.argon_seg_advance * h_l * n
+
+    def _argon_seg_run(self, out, text: str, right_x_l: float,
+                       top_y_l: float, h_l: float, alpha: float,
+                       color=(1, 1, 1), wire_n: int | None = None,
+                       scale: float = 1.0, pivot=None) -> float:
+        """Right-aligned Argon counter run drawn as procedural 7-segment
+        bars (ArgonCounterTextComponent). The unlit "wireframes" backing
+        (all-segments '8' / dot, WireframeOpacity 0.25) and the lit glyph
+        come from the SAME segment geometry on the SAME fixed-width cell,
+        so lit + ghost register by construction (the phantom-8 fix). Digits
+        / x / % are fixed-width; '.' shares the cell (a centred dot).
+        wire_n adds leading unlit cells (RequiredDisplayDigits). scale/pivot
+        drive the combo/score pop. Returns the full run width (lazer px)."""
+        cw = self.bank.argon_seg_advance * h_l
+        n_lit = len(text)
+        n_wire = max(wire_n if wire_n is not None else n_lit, n_lit)
+        cy = top_y_l + h_l / 2.0
+        if pivot is None:
+            pivot = (right_x_l - n_wire * cw, cy)
+        wire_a = ARGON_WIRE_ALPHA * self.op
+
+        def place(cx_l: float, key: str, col, a: float) -> None:
+            gx = pivot[0] + (cx_l - pivot[0]) * scale
+            gy = pivot[1] + (cy - pivot[1]) * scale
             out.append(Sprite(gx * self.lk, gy * self.lk,
-                              (cw / KL) * extra_scale * self.lk,
-                              h_l * extra_scale * self.lk,
-                              f"glyph_{ch}", (*color, alpha)))
-        return w
+                              cw * scale * self.lk, h_l * scale * self.lk,
+                              key, (*col, a)))
+
+        # unlit wireframe cells (right-aligned, n_wire of them)
+        for i in range(n_wire):
+            cx = right_x_l - (n_wire - i) * cw + cw / 2.0
+            lit_idx = i - (n_wire - n_lit)
+            ch = text[lit_idx] if 0 <= lit_idx < n_lit else None
+            wkey = "argon_wireframe_dot" if ch == "." else "argon_wireframe"
+            place(cx, wkey, color, wire_a)
+        # lit glyphs (right-aligned over the rightmost cells)
+        for j, ch in enumerate(text):
+            cx = right_x_l - (n_lit - j) * cw + cw / 2.0
+            key = self.ARGON_SEG_LIT.get(ch, f"aseg_{ch}")
+            place(cx, key, color, alpha)
+        return n_wire * cw
 
     def _argon_score_block(self, out, t: float) -> None:
         """ArgonScoreCounter + the two ArgonWedgePiece backdrops
@@ -1347,7 +1358,7 @@ class StdHud:
                               "argon_wedge", (1, 1, 1, self.op)))
         score = int(round(self.data.score_at(t) * self._pin))
         text = str(max(score, 0))
-        self._argon_digit_run(
+        self._argon_seg_run(
             out, text, ARGON_SCORE_RIGHT_X * es, ARGON_SCORE_TOP_Y * es,
             ARGON_DIGIT_H * es, self.op,
             wire_n=max(ARGON_SCORE_DIGITS, len(text)))
@@ -1365,32 +1376,24 @@ class StdHud:
         frac = int(round((disp - whole) * 100))
         whole_txt, frac_txt = str(whole), f".{frac:02d}"
         h = ARGON_DIGIT_H * es
-        hh = h * 0.5
+        hh = h * 0.5                       # fractionPart Scale = 0.5
+        hpct = hh * 1.2
         right = self.ui_w_l + ARGON_ACC_POS[0] * es
         top = ARGON_ACC_POS[1] * es
         num_top = top + ARGON_LABEL_GAP * es
-        w_frac = self._lrun_width(frac_txt, hh, mono=True)
-        w_pct = self._lrun_width("%", hh * 1.2)
-        # right-to-left: % , fraction, whole
-        x_pct_left = right - w_pct
-        self._lrun(out, "%", x_pct_left, num_top + (h - hh * 1.2),
-                   hh * 1.2, (1, 1, 1), 0.95 * self.op)
-        x_frac_right = x_pct_left - 2.0 * es
-        self._wireframes(out, 2, x_frac_right, num_top + (h - hh), hh,
-                         ARGON_WIRE_ALPHA * self.op)
-        entries, _ = layout_run(frac_txt, self.bank.glyph_aspect, hh * KL,
-                                mono_advance=self.bank.glyph_mono_advance)
-        x_frac_left = x_frac_right - w_frac
-        for chx, cx, cw in entries:
-            out.append(Sprite((x_frac_left + cx / KL) * self.lk,
-                              (num_top + (h - hh) + hh / 2.0) * self.lk,
-                              (cw / KL) * self.lk, hh * self.lk,
-                              f"glyph_{chx}", (1, 1, 1, 0.95 * self.op)))
-        w_whole = self._argon_digit_run(
-            out, whole_txt, x_frac_left - 1.0 * es, num_top, h,
-            0.95 * self.op, wire_n=3)
+        # right-to-left: '%', the '.dd' fraction (×0.5), then the whole part
+        w_pct = self._argon_seg_width(1, hpct)
+        self._argon_seg_run(out, "%", right, num_top + (h - hpct), hpct,
+                            0.95 * self.op)
+        frac_right = right - w_pct - 2.0 * es
+        w_frac = self._argon_seg_width(len(frac_txt), hh)
+        self._argon_seg_run(out, frac_txt, frac_right, num_top + (h - hh), hh,
+                            0.95 * self.op)
+        whole_right = frac_right - w_frac - 1.0 * es
+        w_whole = self._argon_seg_run(out, whole_txt, whole_right, num_top, h,
+                                      0.95 * self.op, wire_n=3)
         # label above the whole part, left-aligned (Torus-12 stand-in)
-        label_left = x_frac_left - 1.0 * es - w_whole
+        label_left = whole_right - w_whole
         self._lrun(out, "ACCURACY", label_left, top, ARGON_LABEL_H * es,
                    BLUE0, 0.95 * self.op)
         if s.show_grade:
@@ -1426,30 +1429,10 @@ class StdHud:
         scale = argon_combo_scale_at(d.combo_changes, t)
         # NumberContainer scales from its TopLeft (component anchor)
         pivot = (x, num_top)
-        entries, total = layout_run(text, self.bank.glyph_aspect, h * KL,
-                                    mono_advance=self.bank.glyph_mono_advance)
-        # wireframes: digits + the x cell
-        n_cells = len(text)
-        adv = self.bank.glyph_mono_advance * h
-        gap = _TRACKING * h
-        wf_asp = getattr(self.bank, "wireframe_aspect", 0.55)
-        wx = x
-        for _ in range(n_cells):
-            cx = pivot[0] + (wx + adv / 2.0 - pivot[0]) * scale
-            cy = pivot[1] + (num_top + h / 2.0 - pivot[1]) * scale
-            out.append(Sprite(cx * self.lk, cy * self.lk,
-                              wf_asp * h * scale * self.lk,
-                              h * scale * self.lk,
-                              "argon_wireframe",
-                              (*color, ARGON_WIRE_ALPHA * self.op)))
-            wx += adv + gap
-        for chx, cx, cw in entries:
-            gx = pivot[0] + (x + cx / KL - pivot[0]) * scale
-            gy = pivot[1] + (num_top + h / 2.0 - pivot[1]) * scale
-            out.append(Sprite(gx * self.lk, gy * self.lk,
-                              (cw / KL) * scale * self.lk,
-                              h * scale * self.lk,
-                              f"glyph_{chx}", (*color, 0.95 * self.op)))
+        cw = self.bank.argon_seg_advance * h
+        right_x = x + len(text) * cw       # left edge lands at x
+        self._argon_seg_run(out, text, right_x, num_top, h, 0.95 * self.op,
+                            color=color, scale=scale, pivot=pivot)
         self._lrun(out, "COMBO", x, top, label_h, BLUE0, 0.95 * self.op)
 
     def _argon_health(self, out, t: float) -> None:

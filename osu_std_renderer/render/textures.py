@@ -286,44 +286,149 @@ def bake_pill(width: int = 256, height: int = 64) -> np.ndarray:
     return rgba
 
 
-def bake_wireframe_cell(width: int = 132, height: int = 240,
-                        seg_frac: float = 0.14,
-                        gap_frac: float = 0.045) -> np.ndarray:
-    """One 7-segment "wireframe" digit cell — the segmented '8' the Argon
-    counters draw behind their digits (ArgonCounterTextComponent's
-    `argon-counter-wireframes` texture, WireframeOpacity 0.25). Procedural
-    stand-in, white; the HUD tints/fades it."""
+# --- Argon counter: 7-segment display (ArgonCounterTextComponent) -------------
+# Lazer draws the score/acc/combo counters with the `argon-counter` sprite font
+# and a same-font all-segments "wireframes" backing at WireframeOpacity 0.25
+# (ArgonAccuracyCounter/ArgonComboCounter default 0.25). We draw the digits
+# procedurally as rounded 7-segment bars: the LIT glyph and the UNLIT wireframe
+# come from the SAME segment geometry on the SAME cell canvas, so lit+ghost
+# align BY CONSTRUCTION (no more phantom-8 misregistration between a DejaVu
+# digit and a hand-drawn wireframe). Zero font-license concern.
+ARGON_SEG_W = 132               # one fixed-width digit cell (aspect 0.55)
+ARGON_SEG_H = 240
+# standard 7-segment map: A top, B upper-right, C lower-right, D bottom,
+# E lower-left, F upper-left, G middle.
+_ARGON_SEG_MAP = {
+    "0": "ABCDEF", "1": "BC", "2": "ABGED", "3": "ABGCD", "4": "FGBC",
+    "5": "AFGCD", "6": "AFGEDC", "7": "ABC", "8": "ABCDEFG", "9": "ABCDFG",
+}
+ARGON_SEG_CHARS = "0123456789"
+
+
+def _argon_seg_fields(width: int, height: int, seg_frac: float,
+                      gap_frac: float):
+    """(xx, yy, seg_alpha dict) for one segment cell — each of the seven
+    segments A..G as a rounded-bar alpha field (shared by the lit glyphs
+    and the all-segments wireframe backing)."""
     yy, xx = np.mgrid[0:height, 0:width].astype(np.float64)
     t = seg_frac * width                   # segment thickness
     gap = gap_frac * height
     m = t * 0.75                           # cell inset
     x0, x1 = m, width - m
     y0, ym, y1 = m, height / 2.0, height - m
+    half_v = (ym - y0) / 2.0
 
     def hseg(cy: float) -> np.ndarray:
-        """Horizontal segment at row cy (hexagonal-ish rounded bar)."""
         qx = np.abs(xx - width / 2.0) - (x1 - x0 - 2 * t - 2 * gap) / 2.0
         qy = np.abs(yy - cy) - t / 2.0
         d = np.hypot(np.maximum(qx, 0.0), np.maximum(qy, 0.0)) \
             + np.minimum(np.maximum(qx, qy), 0.0) - t * 0.18
         return np.clip(-d / _AA_PX, 0.0, 1.0)
 
-    def vseg(cx: float, cy: float, half: float) -> np.ndarray:
+    def vseg(cx: float, cy: float) -> np.ndarray:
         qx = np.abs(xx - cx) - t / 2.0
-        qy = np.abs(yy - cy) - (half - t / 2.0 - gap)
+        qy = np.abs(yy - cy) - (half_v - t / 2.0 - gap)
         d = np.hypot(np.maximum(qx, 0.0), np.maximum(qy, 0.0)) \
             + np.minimum(np.maximum(qx, qy), 0.0) - t * 0.18
         return np.clip(-d / _AA_PX, 0.0, 1.0)
 
-    half_v = (ym - y0) / 2.0
-    alpha = hseg(y0 + t / 2.0)
-    alpha = np.maximum(alpha, hseg(ym))
-    alpha = np.maximum(alpha, hseg(y1 - t / 2.0))
-    for cx in (x0 + t / 2.0, x1 - t / 2.0):
-        alpha = np.maximum(alpha, vseg(cx, (y0 + ym) / 2.0, half_v))
-        alpha = np.maximum(alpha, vseg(cx, (ym + y1) / 2.0, half_v))
+    seg = {
+        "A": hseg(y0 + t / 2.0), "G": hseg(ym), "D": hseg(y1 - t / 2.0),
+        "F": vseg(x0 + t / 2.0, (y0 + ym) / 2.0),
+        "B": vseg(x1 - t / 2.0, (y0 + ym) / 2.0),
+        "E": vseg(x0 + t / 2.0, (ym + y1) / 2.0),
+        "C": vseg(x1 - t / 2.0, (ym + y1) / 2.0),
+    }
+    return xx, yy, seg
+
+
+def _argon_seg_char_alpha(char: str, xx, yy, seg,
+                          width: int, height: int, seg_frac: float):
+    """Alpha field for one glyph — a subset of the seven segments for a
+    digit, or a procedural '.'/'%'/'x' in the same segment weight."""
+    t = seg_frac * width
+    if char in _ARGON_SEG_MAP:
+        a = np.zeros((height, width))
+        for s in _ARGON_SEG_MAP[char]:
+            a = np.maximum(a, seg[s])
+        return a
+    if char in (".", "dot"):
+        r = t * 0.85
+        cx, cy = width / 2.0, height - t * 0.75 - r
+        d = np.hypot(xx - cx, yy - cy)
+        return np.clip((r - d) / _AA_PX, 0.0, 1.0)
+    if char in ("%", "percent"):
+        rr = height * 0.13                 # small ring radius
+        th = t * 0.62
+        cxu, cyu = width * 0.30, height * 0.24
+        cxl, cyl = width * 0.70, height * 0.76
+        du = np.abs(np.hypot(xx - cxu, yy - cyu) - rr)
+        dl = np.abs(np.hypot(xx - cxl, yy - cyl) - rr)
+        ring = np.maximum(np.clip((th - du) / _AA_PX, 0.0, 1.0),
+                          np.clip((th - dl) / _AA_PX, 0.0, 1.0))
+        # diagonal slash from bottom-left to top-right
+        m = t * 0.75
+        dirx, diry = (width - 2 * m), -(height - 2 * m)
+        L = math.hypot(dirx, diry)
+        nx, ny = -diry / L, dirx / L
+        px, py = xx - width / 2.0, yy - height / 2.0
+        dperp = np.abs(px * nx + py * ny)
+        dalong = np.abs(px * (dirx / L) + py * (diry / L))
+        slash = (np.clip((th - dperp) / _AA_PX, 0.0, 1.0)
+                 * np.clip((L / 2.0 - dalong) / _AA_PX, 0.0, 1.0))
+        return np.maximum(ring, slash)
+    if char in ("x",):
+        th = t * 0.60
+        arm = height * 0.24
+        px, py = xx - width / 2.0, yy - height * 0.5
+        s2 = 1.0 / math.sqrt(2.0)
+        d1 = np.abs((px - py) * s2)
+        d2 = np.abs((px + py) * s2)
+        reach = np.clip((arm - np.hypot(px, py)) / _AA_PX, 0.0, 1.0)
+        return np.maximum(np.clip((th - d1) / _AA_PX, 0.0, 1.0),
+                          np.clip((th - d2) / _AA_PX, 0.0, 1.0)) * reach
+    return np.zeros((height, width))
+
+
+def bake_argon_segment(char: str, width: int = ARGON_SEG_W,
+                       height: int = ARGON_SEG_H, seg_frac: float = 0.14,
+                       gap_frac: float = 0.045) -> np.ndarray:
+    """A single lit Argon-counter glyph (white, tintable): digit segments
+    or the '.'/'%'/'x' symbols, on the shared cell canvas."""
+    xx, yy, seg = _argon_seg_fields(width, height, seg_frac, gap_frac)
+    a = _argon_seg_char_alpha(char, xx, yy, seg, width, height, seg_frac)
     rgba = np.full((height, width, 4), 255, dtype=np.uint8)
-    rgba[..., 3] = np.round(alpha * 255.0).astype(np.uint8)
+    rgba[..., 3] = np.round(np.clip(a, 0.0, 1.0) * 255.0).astype(np.uint8)
+    return rgba
+
+
+def bake_argon_seg_glyphs() -> dict[str, np.ndarray]:
+    """{char: rgba} for the lit Argon-counter set (digits + . % x)."""
+    return {ch: bake_argon_segment(ch) for ch in "0123456789.%x"}
+
+
+def bake_wireframe_cell(width: int = ARGON_SEG_W, height: int = ARGON_SEG_H,
+                        seg_frac: float = 0.14,
+                        gap_frac: float = 0.045) -> np.ndarray:
+    """The all-segments '8' wireframe backing (WireframeOpacity 0.25). Same
+    segment geometry as the lit glyphs, so a lit digit registers exactly on
+    top of its own wireframe cell."""
+    xx, yy, seg = _argon_seg_fields(width, height, seg_frac, gap_frac)
+    a = np.zeros((height, width))
+    for s in "ABCDEFG":
+        a = np.maximum(a, seg[s])
+    rgba = np.full((height, width, 4), 255, dtype=np.uint8)
+    rgba[..., 3] = np.round(a * 255.0).astype(np.uint8)
+    return rgba
+
+
+def bake_wireframe_dot(width: int = ARGON_SEG_W, height: int = ARGON_SEG_H,
+                       seg_frac: float = 0.14) -> np.ndarray:
+    """The '.' wireframe backing (a dot) — matches the lit '.' glyph."""
+    xx, yy, seg = _argon_seg_fields(width, height, seg_frac, 0.045)
+    a = _argon_seg_char_alpha(".", xx, yy, seg, width, height, seg_frac)
+    rgba = np.full((height, width, 4), 255, dtype=np.uint8)
+    rgba[..., 3] = np.round(np.clip(a, 0.0, 1.0) * 255.0).astype(np.uint8)
     return rgba
 
 
@@ -616,7 +721,11 @@ def bake_argon_circle(size: int = ARGON_CIRCLE_SIZE) -> np.ndarray:
     R = size / 2.0 - 2.0
     yn = np.mgrid[0:size, 0:size][0].astype(np.float64) / (size - 1)
     inner_fill = 0.20                                   # Darken(4)
-    inner_grad = 0.6667 + (0.625 - 0.6667) * yn         # Darken(0.5→0.6)
+    # fidelity pass 2: the mid ring is pushed DARKER than lazer's exact
+    # Darken(0.5→0.6) (0.667/0.625) so the outer→mid→centre steps read as
+    # distinct concentric target bands (owner: "push the stepped contrast so
+    # it reads as concentric targets, not a smooth gradient").
+    inner_grad = 0.50 + (0.46 - 0.50) * yn              # was 0.6667→0.625
     outer_grad = 1.0 + (0.90909 - 1.0) * yn             # 1.0→Darken(0.1)
     outer_fill = 0.20                                   # Darken(4)
     w_out = _ss_inside(d, ARGON_OUTER_GRAD_R, R)
@@ -637,10 +746,44 @@ def bake_argon_border(size: int = ARGON_CIRCLE_SIZE,
     return bake_ring(size, thickness_frac)
 
 
+ARGON_APPROACH_THICKNESS = 0.115   # bolder ring (fidelity pass 2: refs read a
+                                   # noticeably bolder approach circle than the
+                                   # old 0.06 hairline)
+
+
 def bake_argon_approach(size: int = APPROACH_SIZE,
-                        thickness_frac: float = 0.06) -> np.ndarray:
-    """Argon approach circle — the default thin combo-tinted ring (Argon
-    ships no bespoke approach texture; the base DrawableHitCircle ring)."""
+                        thickness_frac: float = ARGON_APPROACH_THICKNESS
+                        ) -> np.ndarray:
+    """Argon approach circle — a BOLD combo-tinted ring (base
+    DrawableHitCircle ApproachCircle; Argon ships no bespoke texture)."""
+    return bake_ring(size, thickness_frac)
+
+
+# --- ArgonFollowPoint (chevrons) + RingExplosion (kiai bubbles) ----------------
+ARGON_FP_PINK = (0xFC, 0x61, 0x8F)      # ArgonFollowPoint gradient top
+ARGON_FP_DARKRED = (0xBB, 0x1A, 0x41)   # ArgonFollowPoint gradient bottom
+
+
+def bake_argon_followpoint(size: int = 96) -> np.ndarray:
+    """ArgonFollowPoint: a right-pointing double '>' chevron with the
+    vertical pink→dark-red gradient (FromHex FC618F→BB1A41), additive.
+    Coloured RGBA (fixed palette, not combo-tinted); the scene rotates it
+    along the connection direction and draws it additive."""
+    mask = _chevron_mask(size, hw=0.15, hh=0.28, thick=0.095, n=2, gap=0.26)
+    yn = np.mgrid[0:size, 0:size][0].astype(np.float64) / (size - 1)
+    pink = np.array(ARGON_FP_PINK, dtype=np.float64)
+    dark = np.array(ARGON_FP_DARKRED, dtype=np.float64)
+    grad = pink[None, None, :] * (1.0 - yn[..., None]) + dark[None, None, :] * yn[..., None]
+    rgba = np.zeros((size, size, 4), dtype=np.uint8)
+    rgba[..., :3] = np.round(grad).astype(np.uint8)
+    rgba[..., 3] = np.round(np.clip(mask, 0.0, 1.0) * 255.0).astype(np.uint8)
+    return rgba
+
+
+def bake_argon_bubble(size: int = 64,
+                      thickness_frac: float = 0.40) -> np.ndarray:
+    """A RingExplosion ring "bubble" (RingPiece, thickness 4). White,
+    additive, tinted by the judgement colour at draw."""
     return bake_ring(size, thickness_frac)
 
 
@@ -828,9 +971,19 @@ class TextureBank:
         # --- Argon HUD set (skinless default) --------------------------------
         renderer.upload_texture("pill", bake_pill())
         renderer.upload_texture("argon_wireframe", bake_wireframe_cell())
+        renderer.upload_texture("argon_wireframe_dot", bake_wireframe_dot())
         renderer.upload_texture("argon_wedge", bake_wedge())
         wf = bake_wireframe_cell()
         self.wireframe_aspect = wf.shape[1] / wf.shape[0]
+        # procedural 7-segment lit glyphs (same geometry as the wireframe →
+        # lit + ghost align by construction; the phantom-8 fix)
+        self.argon_seg_aspect: dict[str, float] = {}
+        for ch, rgba in bake_argon_seg_glyphs().items():
+            key = {".": "dot", "%": "pct", "x": "x"}.get(ch, ch)
+            renderer.upload_texture(f"aseg_{key}", rgba)
+            self.argon_seg_aspect[ch] = rgba.shape[1] / rgba.shape[0]
+        # fixed-width digit advance (7-seg digits are naturally monospace)
+        self.argon_seg_advance = self.argon_seg_aspect["8"]
 
         # --- legacy-default HUD set (custom-skin fallback, classic look) -----
         self.legacy_aspect: dict[str, float] = {}
@@ -856,6 +1009,8 @@ class TextureBank:
         renderer.upload_texture("argon_ball", bake_argon_ball())
         renderer.upload_texture("argon_ball_ring", bake_argon_ball_ring())
         renderer.upload_texture("argon_follow", bake_argon_follow())
+        renderer.upload_texture("argon_followpoint", bake_argon_followpoint())
+        renderer.upload_texture("argon_bubble", bake_argon_bubble())
         renderer.upload_texture("argon_tick", bake_argon_tick())
         renderer.upload_texture("argon_reverse", bake_argon_reverse())
         renderer.upload_texture("argon_cursor", bake_argon_cursor())

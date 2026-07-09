@@ -85,17 +85,18 @@ def test_acc_display_matches_replay_meta_derivation():
 # --- grade thresholds --------------------------------------------------------------
 
 def test_grade_thresholds():
-    assert grade_for(0, 0, 0, 0) == "SS"          # clean sheet
-    assert grade_for(100, 0, 0, 0) == "SS"
-    assert grade_for(95, 5, 0, 0) == "S"          # >90% 300s, no 50s/miss
-    assert grade_for(95, 4, 1, 0) == "S"          # exactly 1% 50s still S
-    assert grade_for(94, 3, 3, 0) == "A"          # >1% 50s kills the S
-    assert grade_for(95, 4, 0, 1) == "A"          # a miss kills the S
-    assert grade_for(85, 15, 0, 0) == "A"         # >80% 300s, no miss
-    assert grade_for(85, 14, 0, 1) == "B"         # >80% with a miss
-    assert grade_for(75, 25, 0, 0) == "B"         # >70% no miss
-    assert grade_for(65, 30, 0, 5) == "C"         # >60%
-    assert grade_for(50, 30, 10, 10) == "D"
+    # osu!(lazer)-exact: accuracy cutoffs X=1/S=.95/A=.9/B=.8/C=.7/D=0 with
+    # OsuScoreProcessor's std override (a Miss caps S/X at A).
+    assert grade_for(0, 0, 0, 0) == "SS"          # clean sheet (rank starts X)
+    assert grade_for(100, 0, 0, 0) == "SS"        # 100.00%
+    assert grade_for(95, 5, 0, 0) == "S"          # 96.67% clean → S
+    assert grade_for(94, 3, 3, 0) == "S"          # 95.50% clean → S (acc-based)
+    assert grade_for(95, 4, 0, 1) == "A"          # 96.33% but a miss → A
+    assert grade_for(85, 15, 0, 0) == "A"         # exactly 90.00% → A
+    assert grade_for(85, 14, 0, 1) == "B"         # 89.67% (< 90) → B
+    assert grade_for(75, 25, 0, 0) == "B"         # 83.33% → B
+    assert grade_for(65, 30, 0, 5) == "C"         # 75.00% → C (miss won't cap C)
+    assert grade_for(50, 30, 10, 10) == "D"       # 61.67% → D
 
 
 # --- UR -----------------------------------------------------------------------------
@@ -310,7 +311,7 @@ def test_hud_data_score_acc_grade_ur():
     assert 0 < d.score_at(1000.0 + 50.0) < s1               # mid-roll
     end = 5000.0
     assert abs(d.acc_at(end) - 2.0 / 3.0) < 1e-9
-    assert d.grade_at(end) == "C"           # 66.7% 300s
+    assert d.grade_at(end) == "D"           # 66.67% acc (< 70%) → D (lazer)
     ur, avg, n = d.ur_at(end)
     assert n == 2 and ur == 0.0 and avg == 0.0
     assert len(d.errors_in_window(end)) == 2

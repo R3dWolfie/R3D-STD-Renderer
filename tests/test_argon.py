@@ -17,10 +17,12 @@ from PIL import Image
 
 from osu_std_renderer.render import textures as T
 from osu_std_renderer.render.scene import (
-    ARGON_BALL_DIAM_FRAC, ARGON_GRAD_FRAC, ARGON_JUDGE_COLOR, ARGON_JUDGE_TEXT,
-    ARGON_OUTER_GRAD_R, ARGON_SLIDER_BORDER_WIDTH, StdScene,
+    ARGON_BALL_DIAM_FRAC, ARGON_FLASH_LIFE_MS, ARGON_GRAD_FRAC,
+    ARGON_JUDGE_COLOR, ARGON_JUDGE_TEXT, ARGON_OUTER_GRAD_R,
+    ARGON_RING_FADE_MS, ARGON_SLIDER_BORDER_WIDTH, StdScene,
     argon_judgment_transform,
 )
+from osu_std_renderer.render.markers import FollowPointDot
 from osu_std_renderer.render.slider_body import border_portion
 from osu_std_renderer.render.skin_elements import SkinElements
 from osu_std_renderer.ruleset import JudgmentKind
@@ -266,3 +268,193 @@ def test_argon_judgment_run_glyphs_additive_coloured():
     out2 = []
     sc._argon_judgment_run(out2, "MISS", 0.0, 0.0, 1.0, col, 0.0, 0.0)
     assert out2 == []
+
+
+# --- grade: lazer-EXACT rank table (ScoreProcessor + OsuScoreProcessor) --------
+
+def test_grade_boundary_table_and_miss_cap():
+    """osu.Game/Rulesets/Scoring/ScoreProcessor.RankFromScore cutoffs
+    (X=1 / S=.95 / A=.9 / B=.8 / C=.7 / D=0) plus the std override
+    OsuScoreProcessor.RankFromScore (a Miss downgrades S/X to A)."""
+    from osu_std_renderer.render.hud import grade_for, std_accuracy
+
+    def acc_pct(c300, c100, c50, cm):
+        return round(std_accuracy(c300, c100, c50, cm) * 100.0, 2)
+
+    # (c300, c100, c50, cmiss, expected_grade, expected_acc%)
+    cases = [
+        (100, 0, 0, 0, "SS", 100.00),      # perfect
+        (47, 0, 3, 0, "S", 95.00),         # exactly the S cutoff, clean
+        (46, 3, 1, 0, "A", 94.33),         # just below S → A
+        (98, 0, 0, 2, "A", 98.00),         # 98% but a miss caps S/X → A
+        (22, 0, 3, 0, "A", 90.00),         # exactly the A cutoff, clean
+        (126, 24, 0, 0, "B", 89.33),       # 89.33% clean → B (old rule: A)
+        (125, 24, 0, 1, "B", 88.67),       # ~89% WITH a miss → B (owner case)
+        (21, 0, 4, 0, "B", 86.67),
+        (14, 0, 6, 0, "C", 75.00),         # ≥70 → C
+        (10, 0, 6, 0, "D", 68.75),         # <70 → D
+        (0, 0, 0, 1, "D", 0.00),
+    ]
+    for c300, c100, c50, cm, exp, exp_acc in cases:
+        assert abs(acc_pct(c300, c100, c50, cm) - exp_acc) < 0.02, \
+            (c300, c100, c50, cm, acc_pct(c300, c100, c50, cm))
+        got = grade_for(c300, c100, c50, cm)
+        assert got == exp, f"{c300}/{c100}/{c50}/{cm} ({exp_acc}%) -> {got}, want {exp}"
+
+    # the miss-cap only touches S/X — an A/B/C is NOT pushed further down
+    assert grade_for(90, 10, 0, 0) == "A"          # 93.33% clean → A
+    assert grade_for(89, 10, 0, 1) == "A"          # 92.83% + miss → still A
+    assert grade_for(100, 0, 0, 0) == "SS"         # only all-300 → SS
+    assert grade_for(99, 0, 0, 1) != "SS"          # any miss is never SS
+
+
+# --- item 4: circle target bands (pushed contrast) ----------------------------
+
+def test_argon_circle_band_contrast_reads_as_target():
+    """The concentric bands must read as distinct target rings: a bright
+    outer band, a clearly DARKER mid ring, a dark centre."""
+    grey = T.bake_argon_circle(320)[..., 0].astype(float)
+    R = 320 / 2.0 - 2.0
+    c = 160
+    outer = grey[c, int(c + 0.77 * R)]     # outerGradient bright band
+    mid = grey[c, int(c + 0.60 * R)]       # innerGradient mid band
+    centre = grey[c, c]                    # innerFill dark centre
+    assert outer > 220                     # saturated outer band
+    assert centre < 60                     # dark centre
+    assert mid < 0.62 * outer              # mid pushed below the outer step
+    assert mid > centre + 18               # ...but still a distinct mid ring
+
+
+# --- item 3: ArgonFollowPoint (pink chevrons) ---------------------------------
+
+def test_argon_followpoint_texture_is_pink_chevron():
+    rgba = T.bake_argon_followpoint(96)
+    a = rgba[..., 3]
+    assert a.max() > 150                   # a solid chevron exists
+    lit = a > 100
+    r = rgba[..., 0][lit].mean()
+    g = rgba[..., 1][lit].mean()
+    b = rgba[..., 2][lit].mean()
+    assert r > g and r > b                  # pink→dark-red (R dominant)
+
+
+def test_argon_followpoint_sprite_is_rotated_chevron():
+    sc = _bare_scene()
+    sc.skin = None
+    sc.circle_k = 1.0
+    sc.diff = type("D", (), {"time_fade_in": 400.0})()
+    dot = FollowPointDot(fade_in=0.0, fade_out=1000.0, x_start=0.0,
+                         y_start=0.0, x_end=32.0, y_end=32.0, rotation=0.7853)
+    sc._fp_dots = [dot]
+    sc._fp_idx = 0
+    sc._fp_active = []
+    out = sc._followpoint_sprites(200.0)
+    assert out and out[0].texture_key == "argon_followpoint"
+    assert out[0].additive
+    assert abs(out[0].rotation - 0.7853) < 1e-9   # rotated along the path
+
+
+# --- item 2: ArgonCursorTrail (thin white line) -------------------------------
+
+def test_argon_cursor_trail_is_thin_white_additive():
+    from types import SimpleNamespace
+    sc = _bare_scene()
+    sc.skin = None
+    sc.cursor_scale = 1.0
+    sc.trail_scale = 1.0
+    sc.cursor_rainbow = False
+    sc._argon_trail_pts = [(float(i), 0.0, float(i)) for i in range(0, 20)]
+    sc._argon_trail_times = [p[2] for p in sc._argon_trail_pts]
+    sc.frames = [SimpleNamespace(x=0.0, y=0.0, time_ms=0.0, keys=0),
+                 SimpleNamespace(x=19.0, y=0.0, time_ms=19.0, keys=0)]
+    out = sc._argon_cursor_sprites(19.0)
+    trail = [s for s in out if s.texture_key == "glow" and s.additive
+             and tuple(s.color[:3]) == (1.0, 1.0, 1.0)]
+    assert len(trail) >= 3                  # a continuous white line, not a blob
+    # every additive glow tint is white (trail) or cyan (centre) — the old
+    # pink/red soft comet (R>B) is gone
+    for s in out:
+        if s.texture_key == "glow" and s.additive:
+            r, _, b = s.color[:3]
+            assert not (r > b + 0.1)
+
+
+# --- item 1: ArgonMainCirclePiece flash + RingExplosion bubbles ----------------
+
+class _Ev:
+    def __init__(self, kind, x, y, oid, tm=0.0):
+        self.kind = kind
+        self.x = x
+        self.y = y
+        self.object_id = oid
+        self.time_ms = tm
+
+
+def test_argon_hit_flash_blooms_then_expires():
+    sc = _bare_scene()
+    sc.skin = None
+    out = []
+    sc._argon_hit_flash(out, 100.0, 100.0, (0.4, 0.8, 1.0), 80.0)
+    assert out and all(s.additive for s in out)
+    keys = {s.texture_key for s in out}
+    assert "glow" in keys and "argon_circle" in keys   # accent glow + white bloom
+    assert any(tuple(s.color[:3]) == (1.0, 1.0, 1.0) for s in out)  # white flash
+    # expired outside the flash life
+    out2 = []
+    sc._argon_hit_flash(out2, 0.0, 0.0, (1, 1, 1), ARGON_FLASH_LIFE_MS + 1.0)
+    assert out2 == []
+    out3 = []
+    sc._argon_hit_flash(out3, 0.0, 0.0, (1, 1, 1), -1.0)
+    assert out3 == []
+
+
+def test_ring_explosion_bubble_counts_scatter_and_fade():
+    sc = _bare_scene()
+    sc.skin = None
+    counts = {JudgmentKind.HIT300: 8, JudgmentKind.HIT100: 4,
+              JudgmentKind.HIT50: 3, JudgmentKind.MISS: 0}
+    for kind, n in counts.items():
+        out = []
+        sc._argon_ring_explosion(out, _Ev(kind, 100.0, 120.0, 7), 50.0)
+        assert len(out) == n, (kind, len(out))
+        assert all(s.texture_key == "argon_bubble" and s.additive for s in out)
+        if n:
+            col = ARGON_JUDGE_COLOR[kind]
+            assert all(tuple(s.color[:3]) == col for s in out)
+    e = _Ev(JudgmentKind.HIT300, 100.0, 120.0, 7)
+
+    def spread(out):
+        return max(math.hypot(s.x - 100.0, s.y - 120.0) for s in out)
+
+    early, late = [], []
+    sc._argon_ring_explosion(early, e, 40.0)
+    sc._argon_ring_explosion(late, e, 500.0)
+    assert spread(late) > spread(early)            # bubbles scatter outward
+    assert late[0].color[3] < early[0].color[3]    # group fades out
+    gone = []
+    sc._argon_ring_explosion(gone, e, ARGON_RING_FADE_MS + 1.0)
+    assert gone == []
+
+
+# --- item 6: Argon 7-segment counter glyphs (aligned lit + wireframe) ---------
+
+def test_argon_segment_digits_and_wireframe_align():
+    wire = T.bake_wireframe_cell()[..., 3]
+    eight = T.bake_argon_segment("8")[..., 3]
+    # the lit '8' covers every wireframe pixel (lit+ghost register exactly →
+    # the phantom-8 fix)
+    assert (eight[wire > 10] > 10).mean() > 0.99
+    # '1' lights ONLY the right-side segments (B, C)
+    one = T.bake_argon_segment("1")[..., 3]
+    hcut = one.shape[1] // 2
+    assert one[:, hcut + 8:].max() > 150
+    assert one[:, :hcut - 8].max() < 40
+    # '.' is a dot low in the cell; white & tintable
+    dot = T.bake_argon_segment(".")
+    assert (dot[..., :3] == 255).all()
+    ys, _ = np.where(dot[..., 3] > 128)
+    assert ys.mean() > dot.shape[0] * 0.6
+    # digits are fixed-width (all share the cell canvas → monospace)
+    ref = T.bake_argon_segment("5").shape
+    for ch in "0123456789.%x":
+        assert T.bake_argon_segment(ch).shape == ref

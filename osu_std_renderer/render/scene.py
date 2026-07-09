@@ -259,6 +259,28 @@ ARGON_TICK_FRAC = 12.0 / 118.0        # ArgonSliderScorePoint SIZE / OBJECT_DIME
 ARGON_SPIN_GLOW = (0xFC / 255.0, 0x61 / 255.0, 0x8F / 255.0)   # spinner fill glow
 ARGON_CURSOR_TRAIL = (1.0, 0.55, 0.72)     # trail tint (ArgonCursor palette)
 ARGON_CURSOR_CGLOW = (171 / 255.0, 1.0, 1.0)   # centre EdgeEffect (cyan)
+ARGON_FP_LOGICAL_PX = 30.0        # ArgonFollowPoint chevron box (logical px)
+# ArgonCursorTrail: additive WHITE, IntervalMultiplier 0.4 (tight), FadeExponent
+# 4 (fast fade → a thin, wire-thin bright line, NOT a wide soft comet).
+ARGON_TRAIL_WINDOW_MS = 120.0     # short tail (FadeExponent 4 kills it fast)
+ARGON_TRAIL_SPACING_OSU = 3.0     # dense distance-resample → continuous line
+ARGON_TRAIL_WIDTH_OSU = 7.0       # thin line (~1/4 the cursor diameter)
+ARGON_TRAIL_FADE_EXP = 4.0        # ArgonCursorTrail.FadeExponent
+ARGON_TRAIL_ALPHA = 0.8           # ArgonCursorTrail Alpha
+# ArgonJudgementPiece.RingExplosion (kiai "bubbles"): additive RingPiece bits,
+# coloured OsuColour.ForHitResult, scattering out on a random direction.
+ARGON_RING_THICKNESS = 4.0 / 128.0     # RingPiece thickness / OBJECT_DIMENSIONS
+ARGON_RING_SMALL_OSU = 9.0             # small bubble diameter (osu!px @ CS auth)
+ARGON_RING_LARGE_OSU = 14.0            # large bubble diameter
+ARGON_RING_TRAVEL_OSU = 52.0           # base scatter distance
+ARGON_RING_MOVE_MS = 600.0             # MoveTo over 600 (OutQuint)
+ARGON_RING_FADE_MS = 1000.0            # FadeOutFromOne(1000, OutQuint)
+# ArgonMainCirclePiece flash: outerGradient FadeColour(White,80).Then FadeOut,
+# FlashPiece FadeTo(1,150).Then FadeOut(150) — a brief pale bloom.
+ARGON_FLASH_IN_MS = 150.0
+ARGON_FLASH_LIFE_MS = 300.0            # in 150 + out 150 (non-hit-lighting)
+ARGON_FLASH_CORE_ALPHA = 0.55         # white outerGradient bloom
+ARGON_FLASH_GLOW_ALPHA = 0.5          # accent FlashPiece glow
 # ArgonJudgementPiece: OsuColour.ForHitResult + uppercase result text
 ARGON_JUDGE_TEXT = {
     JudgmentKind.HIT300: "GREAT",
@@ -709,6 +731,14 @@ class StdScene:
         if self.long_trail and frames:
             self._trail_pts = build_distance_trail(frames)
             self._trail_times = [p[2] for p in self._trail_pts]
+        # Argon league cursor: the thin white ArgonCursorTrail (a tight
+        # distance-resampled line, drawn separately from the skin trail).
+        self._argon_trail_pts: list[tuple[float, float, float]] = []
+        self._argon_trail_times: list[float] = []
+        if self.skin is None and frames:
+            self._argon_trail_pts = build_distance_trail(
+                frames, spacing_osu=ARGON_TRAIL_SPACING_OSU)
+            self._argon_trail_times = [p[2] for p in self._argon_trail_pts]
         self.border_color = tuple(border_color)
         self.track_override = (tuple(track_override)
                                if track_override is not None else None)
@@ -1181,6 +1211,77 @@ class StdScene:
             Sprite(x, y, d, d, "argon_border", (1.0, 1.0, 1.0, alpha)),
         ]
 
+    def _argon_hit_flash(self, out: list[Sprite], x: float, y: float,
+                         color, age: float) -> None:
+        """ArgonMainCirclePiece hit flash: the outerGradient flashing white
+        plus the additive FlashPiece bloom, up over 150 ms then out — a pale
+        accent bloom (append additive over the fading circle)."""
+        if age < 0.0 or age >= ARGON_FLASH_LIFE_MS:
+            return
+        if age < ARGON_FLASH_IN_MS:
+            env = _ease_out_quint(age / ARGON_FLASH_IN_MS)
+        else:
+            env = 1.0 - _ease_out_quint(
+                (age - ARGON_FLASH_IN_MS)
+                / (ARGON_FLASH_LIFE_MS - ARGON_FLASH_IN_MS))
+        if env <= 0.0:
+            return
+        d = 2.0 * self.radius_px
+        # accent FlashPiece glow (Radius OBJECT_RADIUS*0.6 → ~1.6× the circle)
+        out.append(Sprite(x, y, d * 1.6, d * 1.6, "glow",
+                          (*color, ARGON_FLASH_GLOW_ALPHA * env),
+                          additive=True))
+        # outerGradient flashing white (the OUTER_GRADIENT_SIZE bloom)
+        out.append(Sprite(x, y, d * 0.86, d * 0.86, "argon_circle",
+                          (1.0, 1.0, 1.0, ARGON_FLASH_CORE_ALPHA * env),
+                          additive=True))
+
+    def _argon_ring_explosion(self, out: list[Sprite], ev, age: float) -> None:
+        """ArgonJudgementPiece.RingExplosion: additive ring "bubbles" that
+        scatter outward from the hit on a random direction (4 small for
+        Ok/Meh, +4 large for Great), coloured OsuColour.ForHitResult, over
+        600 ms (OutQuint move) while the group fades out over 1000 ms."""
+        if age < 0.0 or age >= ARGON_RING_FADE_MS:
+            return
+        kind = ev.kind
+        if kind is JudgmentKind.MISS:
+            return
+        if kind is JudgmentKind.HIT50:
+            n_small, n_large, tmul = 3, 0, 0.3
+        elif kind is JudgmentKind.HIT100:
+            n_small, n_large, tmul = 4, 0, 0.6
+        else:                              # HIT300 (Great/Perfect)
+            n_small, n_large, tmul = 4, 4, 1.0
+        travel = ARGON_RING_TRAVEL_OSU * tmul
+        color = ARGON_JUDGE_COLOR[kind]
+        move = _ease_out_quint(min(age, ARGON_RING_MOVE_MS)
+                               / ARGON_RING_MOVE_MS)
+        alpha = 1.0 - _ease_out_quint(age / ARGON_RING_FADE_MS)
+        if alpha <= 0.0:
+            return
+        seed = int(getattr(ev, "object_id", 0))
+        bx, by = ev.x, ev.y
+
+        def det(i: int, salt: int) -> float:
+            h = (seed * 2654435761 + i * 40503 + salt * 2246822519) & 0xFFFFFFFF
+            h ^= h >> 13
+            h = (h * 1274126177) & 0xFFFFFFFF
+            h ^= h >> 16
+            return (h & 0xFFFFFFFF) / 4294967295.0
+
+        bubbles = [(ARGON_RING_SMALL_OSU, i) for i in range(n_small)] + \
+                  [(ARGON_RING_LARGE_OSU, 100 + i) for i in range(n_large)]
+        for diam_osu, i in bubbles:
+            ang = det(i, 0) * 2.0 * math.pi
+            dist = travel * (0.5 + 0.5 * det(i, 1))
+            r = dist * (0.3 + 0.7 * move)
+            ox = math.cos(ang) * r
+            oy = math.sin(ang) * r
+            sx, sy = self.cam.to_screen(bx + ox, by + oy)
+            s = self.cam.len_to_screen(diam_osu)
+            out.append(Sprite(sx, sy, s, s, "argon_bubble",
+                              (*color, alpha), additive=True))
+
     def _number_sprites(self, x: float, y: float, number: int,
                         num_alpha: float) -> list[Sprite]:
         """Combo number: skin HitCirclePrefix digits (HitCircleOverlap
@@ -1234,6 +1335,7 @@ class StdScene:
         start = obj.get_start_time()
         v = self._verdict(obj)
         x, y = self.cam.to_screen(*pos_osu)
+        hit_for_flash = None
         if v is not None and v.hit_time is None:      # head missed
             alpha = miss_fade_alpha(t, start, preempt, fade_in, v.deadline)
             scale = 1.0
@@ -1243,10 +1345,15 @@ class StdScene:
             alpha, scale = circle_alpha_scale(t, start, preempt, fade_in,
                                               hit_time=hit_time)
             na = number_alpha(t, start, preempt, fade_in, hit_time=hit_time)
+            hit_for_flash = hit_time if hit_time is not None else start
         sprites: list[Sprite] = []
         if alpha > 0.0:
             sprites = self._circle_sprites(x, y, color, alpha, scale,
                                            obj.combo_number, na, role)
+        # Argon league: ArgonMainCirclePiece hit flash (outerGradient→white +
+        # the additive FlashPiece bloom) — the pale accent bloom on hit.
+        if self.skin is None and hit_for_flash is not None:
+            self._argon_hit_flash(sprites, x, y, color, t - hit_for_flash)
         if self.draw_approach_circles:
             asa = approach_scale_alpha(t, start, preempt, fade_in)
             if asa is not None:
@@ -1803,18 +1910,24 @@ class StdScene:
         keep: list = []
         for ev in self._popup_active:
             if self.skin is None:        # Argon league (ArgonJudgementPiece)
-                res = argon_judgment_transform(ev.kind, t - ev.time_ms)
-                if res is None:
+                age = t - ev.time_ms
+                res = argon_judgment_transform(ev.kind, age)
+                ring_alive = 0.0 <= age < ARGON_RING_FADE_MS
+                if res is None and not ring_alive:
                     if t < ev.time_ms:
                         keep.append(ev)
                     continue
                 keep.append(ev)
-                a2, sc2, dy_osu, rot2 = res
                 x, y = self.cam.to_screen(ev.x, ev.y)
-                dyp = self.cam.len_to_screen(dy_osu)
-                self._argon_judgment_run(out, ARGON_JUDGE_TEXT[ev.kind],
-                                         x, y + dyp, sc2,
-                                         ARGON_JUDGE_COLOR[ev.kind], a2, rot2)
+                # RingExplosion "bubbles" scatter under the GREAT text
+                self._argon_ring_explosion(out, ev, age)
+                if res is not None:
+                    a2, sc2, dy_osu, rot2 = res
+                    dyp = self.cam.len_to_screen(dy_osu)
+                    self._argon_judgment_run(out, ARGON_JUDGE_TEXT[ev.kind],
+                                             x, y + dyp, sc2,
+                                             ARGON_JUDGE_COLOR[ev.kind], a2,
+                                             rot2)
                 continue
             asa = popup_alpha_scale(t, ev.time_ms)
             if asa is None:
@@ -1914,6 +2027,11 @@ class StdScene:
                                   sk.frame_key("followpoint", t),
                                   (1.0, 1.0, 1.0, alpha),
                                   rotation=dot.rotation))
+            elif sk is None:                  # Argon league (ArgonFollowPoint)
+                d = ARGON_FP_LOGICAL_PX * k * scale
+                out.append(Sprite(sx, sy, d, d, "argon_followpoint",
+                                  (1.0, 1.0, 1.0, alpha),
+                                  rotation=dot.rotation, additive=True))
             else:
                 d = FP_DOT_LOGICAL_PX * k * scale
                 out.append(Sprite(sx, sy, d, d, "dot",
@@ -1951,17 +2069,24 @@ class StdScene:
 
     def _argon_cursor_sprites(self, t: float) -> list[Sprite]:
         """ArgonCursor (skinless): the pink→dark-red ring body + white centre
-        dot with the cyan EdgeEffect glow, and the additive ArgonCursorTrail
-        (FadeExponent 4). Rainbow hue-cycles the ring tint when enabled."""
+        dot with the cyan EdgeEffect glow, over the ArgonCursorTrail — a
+        thin, wire-thin WHITE additive line (IntervalMultiplier 0.4 →
+        tight; FadeExponent 4 → short bright tail), NOT a wide cyan comet.
+        Rainbow hue-cycles the ring tint when enabled."""
         out: list[Sprite] = []
         d = 2.0 * self.cam.len_to_screen(CURSOR_RADIUS_OSU) * self.cursor_scale
         tint = rainbow_rgb(t) if self.cursor_rainbow else (1.0, 1.0, 1.0)
-        for ti, k in trail_times(t):
-            x, y, _ = cursor_at(self.frames, ti)
+        # thin white trail: dense distance-resampled dots, alpha^4 fade
+        tw = self.cam.len_to_screen(ARGON_TRAIL_WIDTH_OSU) * self.trail_scale
+        trail_tint = tint if self.cursor_rainbow else (1.0, 1.0, 1.0)
+        for x, y, strength in long_trail_points(
+                self._argon_trail_pts, self._argon_trail_times, t,
+                window_ms=ARGON_TRAIL_WINDOW_MS):
             sx, sy = self.cam.to_screen(x, y)
-            s = d * (0.5 + 0.4 * k) * self.trail_scale
-            out.append(Sprite(sx, sy, s, s, "glow",
-                              (*ARGON_CURSOR_TRAIL, 0.30 * k * k),
+            a = ARGON_TRAIL_ALPHA * strength ** ARGON_TRAIL_FADE_EXP
+            if a <= 0.0:
+                continue
+            out.append(Sprite(sx, sy, tw, tw, "glow", (*trail_tint, a),
                               additive=True))
         x, y, _ = cursor_at(self.frames, t)
         sx, sy = self.cam.to_screen(x, y)

@@ -193,22 +193,28 @@ def cursor_at(frames: list[StdFrame], t_ms: float) -> tuple[float, float, int]:
 
 
 def _grade(r) -> str:
-    """std grades (osu! wiki). HD/FL upgrade SS/S to silver at display time."""
+    """osu!(lazer)-EXACT rank from the replay counts. Ported from
+    ScoreProcessor.RankFromScore (accuracy cutoffs X=1/S=.95/A=.9/B=.8/
+    C=.7/D=0) + OsuScoreProcessor's std override (a Miss caps S/X at A).
+    HD/FL silver variants are a display concern, applied elsewhere."""
     c300, c100, c50, miss = (int(r.count_300), int(r.count_100),
                              int(r.count_50), int(r.count_miss))
     total = c300 + c100 + c50 + miss
     if total == 0:
         return "D"
-    r300 = c300 / total
-    r50 = c50 / total
-    if c300 == total:
-        return "SS"
-    if r300 > 0.9 and r50 <= 0.01 and miss == 0:
-        return "S"
-    if (r300 > 0.8 and miss == 0) or r300 > 0.9:
-        return "A"
-    if (r300 > 0.7 and miss == 0) or r300 > 0.8:
-        return "B"
-    if r300 > 0.6:
-        return "C"
-    return "D"
+    acc = (300 * c300 + 100 * c100 + 50 * c50) / (300.0 * total)
+    if acc >= 1.0:
+        rank = "SS"
+    elif acc >= 0.95:
+        rank = "S"
+    elif acc >= 0.9:
+        rank = "A"
+    elif acc >= 0.8:
+        rank = "B"
+    elif acc >= 0.7:
+        rank = "C"
+    else:
+        rank = "D"
+    if miss > 0 and rank in ("S", "SS"):
+        rank = "A"
+    return rank
