@@ -130,7 +130,7 @@ class ResultsScreen:
                  avg_ms: float, err_deltas, meh_ms: float,
                  player: str = "", map_line: str = "", diff_name: str = "",
                  mods: int = 0, use_skin_ranks: bool = True,
-                 argon_font: bool = False):
+                 argon_font: bool = False, mods_display: str | None = None):
         self.spr = spr
         self.w, self.h = float(spr.width), float(spr.height)
         self.k = self.h / UI_H
@@ -156,7 +156,10 @@ class ResultsScreen:
         c300, c100, c50, cmiss = counts
         title = map_line if not diff_name else f"{map_line} [{diff_name}]"
         sub = f"played by {player}" if player else ""
-        ms = mods_string(mods)
+        # mods_display (the full lazer set incl. custom-rate suffix, comma-
+        # joined) wins when supplied; a pure-legacy render passes None and
+        # keeps the bitmask-derived string byte-identical.
+        ms = mods_display if mods_display is not None else mods_string(mods)
         if ms:
             sub = f"{sub} +{ms}" if sub else f"+{ms}"
         gc = GRADE_COLORS.get(grade, (0.8, 0.8, 0.85))

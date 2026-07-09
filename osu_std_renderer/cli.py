@@ -457,7 +457,7 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
     from .render.bloom import BloomPass
     from .render.effects import SEIZURE_DURATION_S
     from .render.gl import SpriteRenderer
-    from .render.hud import StdHud, build_aim_points
+    from .render.hud import StdHud, build_aim_points, build_mod_pills
     from .render.playfield import PlayfieldCamera
     from .render.scene import (FAIL_DURATION_MS, ScenePlayer, StdScene,
                                ssaa_internal_size)
@@ -578,11 +578,16 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
             aim_points = build_aim_points(judgments, frames,
                                           beatmap.diff.circle_radius)
 
+        # full display mod set (lazer-only mods + custom-rate suffix) — falls
+        # back to the legacy bitmask when there's no .osr / no ScoreInfo blob.
+        mod_pills = (build_mod_pills(meta.mods, meta.lazer_mods,
+                                     meta.rate_override)
+                     if meta is not None else None)
         hud = StdHud(spr, bank, settings, judgments, frames, beatmap,
                      skin_elems=skin_elems, health=health,
                      mods=meta.mods if meta is not None else 0,
                      pp_timeline=pp_timeline, aim_points=aim_points,
-                     strain=strain)
+                     strain=strain, mod_pills=mod_pills)
         if meta is not None and meta.score > 0 and fail_time is None:
             # pin the displayed score curve to the .osr's recorded total
             # (PASS only — a fail's .osr score is the partial death tally,
@@ -676,6 +681,12 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
             r_acc = frozen["acc_pct"] if frozen else meta.accuracy
             r_score = frozen["score"] if frozen else (meta.score or fv["score"])
             r_combo = frozen["max_combo"] if frozen else meta.max_combo
+            # a lazer replay shows the FULL mod set (incl. lazer-only mods +
+            # custom-rate suffix) on the results subtitle; a pure-legacy
+            # replay passes None so the bitmask string stays byte-identical.
+            mods_display = (",".join(p.text for p in mod_pills)
+                            if (meta is not None and meta.lazer_mods)
+                            else None)
             results = ResultsScreen(
                 results_spr, skin_elems,
                 counts=r_counts,
@@ -686,7 +697,8 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
                 map_line=f"{beatmap.artist} - {beatmap.name}",
                 diff_name=beatmap.difficulty_name, mods=meta.mods,
                 use_skin_ranks=not settings.renderer_default_font_and_ranks,
-                argon_font=settings.skin_dir is None)
+                argon_font=settings.skin_dir is None,
+                mods_display=mods_display)
             results.set_windows(hud.hw.great, hud.hw.ok)
             results_dur_wall_ms = settings.results_screen_time * 1000.0
         # PASS → results after the map-end fade; FAIL → after the fall
