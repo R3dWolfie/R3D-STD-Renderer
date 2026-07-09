@@ -68,6 +68,12 @@ class HitObject:
     hit_object_id: int = 0
     last_in_combo: bool = False
     new_combo: bool = False
+    # The RAW [HitObjects] new-combo bit (type & 4), captured at parse and
+    # NEVER overwritten. `new_combo` is later forced true by combo numbering
+    # (first object, post-spinner — danser/stable behaviour), but OsuModRandom
+    # reads lazer's combo info, which is derived from the RAW file flags only
+    # (IHasComboInformation.UpdateComboInformation). See mods_position._combo_info.
+    file_new_combo: bool = False
     combo_number: int = 1
     combo_set: int = 0
     combo_set_hax: int = 0
@@ -84,6 +90,7 @@ class HitObject:
         self.end_time = self.start_time
         obj_type = int(data[3])
         self.new_combo = (obj_type & TYPE_NEWCOMBO) != 0
+        self.file_new_combo = self.new_combo   # RAW flag for OsuModRandom combo info
         self.color_offset = (obj_type >> 4) & 7
         self.hit_sound_bits = int(data[4]) if len(data) > 4 else 0
         token = data[extra_index] if len(data) > extra_index else None
