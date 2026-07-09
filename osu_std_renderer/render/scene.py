@@ -166,6 +166,8 @@ from .transform_mods import (DEFLATE, GROW, HIDES_APPROACH, IDENTITY, SPIN_IN,
                              spin_in_slider_scale, transform_appear_offset,
                              transform_offset_at, wiggle_events,
                              wiggle_offset_at)
+from .appearance_mods import (approach_different_scale, freeze_frame_scale,
+                              freeze_preempts)
 from .markers import (arrow_alpha_scale, arrow_pulse, arrow_rotation,
                       beat_phase, followpoint_dots, followpoint_eligible,
                       followpoint_state, reverse_arrow_schedule,
@@ -874,6 +876,10 @@ class StdScene:
                  transform_mod: str = "",
                  transform_start_scale: float = 1.0,
                  transform_strength: float = 1.0,
+                 freeze_frame: bool = False,
+                 traceable: bool = False,
+                 approach_scale: float | None = None,
+                 approach_style: str = "",
                  fail_time_ms: float | None = None,
                  fail_anim_len_ms: float = FAIL_DURATION_MS):
         self.beatmap = beatmap
@@ -981,6 +987,26 @@ class StdScene:
         self._t_force_opaque = False
         self._t_body_xform = None
 
+        # --- approach/circle-appearance mods (FR/AD/TC): purely VISUAL. The
+        # beatmap difficulty (diff.preempt) is NEVER mutated, so the judgement/
+        # reconcile is untouched; these only change the DRAW.
+        #   FR (freeze_frame): every non-spinner object's preempt is EXTENDED so
+        #     a whole combo's objects appear together at the combo start and
+        #     stay frozen; the approach ring starts larger + shrinks over the
+        #     longer window (self._fr_preempt, precomputed once objects exist).
+        #   AD (approach_scale/style): the approach ring's custom initial size +
+        #     shrink-easing (nothing else changes).
+        #   TC (traceable): a hit circle draws ONLY its approach circle (fill +
+        #     ring + number hidden); sliders become outline-only. A draw gate.
+        # FR/AD/TC are mutually incompatible (and incompatible with the
+        # approach-hiding transform mods), so the branches never co-occur.
+        self.freeze_frame = bool(freeze_frame)
+        self.traceable = bool(traceable)
+        self.ad_scale = (float(approach_scale)
+                         if approach_scale is not None else None)
+        self.ad_style = (approach_style or "").strip().lower()
+        self._fr_preempt: dict[int, float] = {}
+
         # --- settings-surface phase (§4.10/§4.6/§4.8 additions) ------------
         self.video = video_bg             # video_bg.VideoBackground | None
         self.bg_parallax = bg_parallax
@@ -1040,6 +1066,13 @@ class StdScene:
                     self._tr_offset[id(o)] = (st - preempt - 1.0,
                                               preempt + 1.0, ox0, oy0)
                 theta += fade_in / 1000.0
+        if self.freeze_frame:
+            # OsuModFreezeFrame.ApplyToBeatmap: extend every non-spinner
+            # object's preempt by StartTime-lastNewComboTime (objects sorted by
+            # start time; new_combo marks each combo's first object).
+            self._fr_preempt = freeze_preempts(
+                self.objects, self.diff.preempt,
+                lambda o: isinstance(o, Spinner))
         self.radius_px = camera.len_to_screen(self.diff.circle_radius)
         self.circle_k = circle_pixel_scale(self.radius_px)
         self._spawn_idx = 0
@@ -1174,15 +1207,55 @@ class StdScene:
         self._t_hide_approach = False
         self._t_force_opaque = False
 
+    # --- Freeze Frame per-object preempt --------------------------------------
+
+    def _preempt_for(self, obj) -> float:
+        """The object's effective TimePreempt: the extended Freeze Frame value
+        (so its whole combo appears together) when FR is active and the object
+        is non-spinner, else the beatmap's ``diff.preempt``. TimeFadeIn is
+        unchanged either way (FR leaves TimeFadeIn alone)."""
+        if self.freeze_frame:
+            p = self._fr_preempt.get(id(obj))
+            if p is not None:
+                return p
+        return self.diff.preempt
+
+    def _approach_geometry(self, obj, t: float, start: float, preempt: float,
+                           fade_in: float) -> "tuple[float, float] | None":
+        """(scale, alpha) for a hit-circle/slider-head approach ring, or None
+        outside its life. Alpha is the normal fade-in (capped 0.9); the SCALE
+        curve is FR's (bigger start, linear over the extended preempt), AD's
+        (custom initial size + per-style easing) or the §2.5 default 4→1."""
+        if t >= start or t < start - preempt:
+            return None
+        alpha = min(fade_in_alpha(t, start, preempt, fade_in),
+                    APPROACH_MAX_ALPHA)
+        if self.freeze_frame:
+            s = freeze_frame_scale(t, start, preempt, self.diff.preempt)
+        elif self.ad_scale is not None:
+            s = approach_different_scale(t, start, preempt,
+                                         self.ad_scale, self.ad_style)
+        else:
+            w = _clamp01((t - (start - preempt)) / preempt)
+            s = APPROACH_START_SCALE - (APPROACH_START_SCALE - 1.0) * w
+        if s is None:
+            return None
+        return s, alpha
+
     # --- lifecycle management ---------------------------------------------------
 
     def _advance(self, t: float) -> None:
         if t < self._last_t:
             raise ValueError(f"scene time went backwards: {t} < {self._last_t}")
         self._last_t = t
-        preempt = self.diff.preempt
+        # spawn when the object first appears. Normally start-preempt; under
+        # Freeze Frame the extended preempt makes a combo's objects appear
+        # together at the combo start. Appear times stay non-decreasing in
+        # object order (a combo's members share the combo-start appear time),
+        # so the single forward pointer remains valid.
         while (self._spawn_idx < len(self.objects)
-               and self.objects[self._spawn_idx].get_start_time() - preempt <= t):
+               and (self.objects[self._spawn_idx].get_start_time()
+                    - self._preempt_for(self.objects[self._spawn_idx])) <= t):
             obj = self.objects[self._spawn_idx]
             self._spawn_idx += 1
             self._active.append(obj)
@@ -1233,7 +1306,7 @@ class StdScene:
                           obj.start_time + tm.span * obj.part_len,
                           outcomes.get(("tick", round(tm.time, 2)), True)))
         arrows = []
-        spawn = obj.get_start_time() - self.diff.preempt
+        spawn = obj.get_start_time() - self._preempt_for(obj)
         # owner spec: multi-reverse arrows only show once the head is HIT
         # (a missed head resolves at its window close); no judgments →
         # the perfect-play head hit at startTime
@@ -1650,16 +1723,18 @@ class StdScene:
         OLDEST visible slider's combo colour (danser does the same) and
         the max body alpha (bodies mid-fade merge at the brighter value —
         an accepted approximation, documented)."""
-        preempt, fade_in = self.diff.preempt, self.diff.time_fade_in
+        fade_in = self.diff.time_fade_in
         items = []
         alpha = 0.0
         color = None
+        border = None
         for obj in self._active:                 # oldest first
             if not isinstance(obj, Slider):
                 continue
             pts = self._slider_paths.get(id(obj))
             if not pts:
                 continue
+            preempt = self._preempt_for(obj)     # FR extends per object
             b_alpha = body_alpha(t, obj.get_start_time(), obj.get_end_time(),
                                  preempt, fade_in)
             if b_alpha <= 0.0:
@@ -1669,13 +1744,19 @@ class StdScene:
                 preempt, self.snaking_in, self.snaking_out)))
             alpha = max(alpha, b_alpha)
             if color is None:
+                oc = self._color(obj)
                 color = (self.track_override if self.track_override
-                         is not None else self._color(obj))
+                         is not None else oc)
+                # TC: outline-only merged body (transparent fill, accent border)
+                border = oc if self.traceable else self.border_color
         if not items:
             return
-        body = self.bodies.build_merged(
-            items, self.radius_px,
-            BodyStyle(body_color=color, border_color=self.border_color))
+        if self.traceable:
+            style = BodyStyle(body_color=color, border_color=border,
+                              inner_alpha=0.0, outer_alpha=0.0)
+        else:
+            style = BodyStyle(body_color=color, border_color=border)
+        body = self.bodies.build_merged(items, self.radius_px, style)
         self.bodies.draw_body(body, self.spr.fbo, alpha=alpha)
 
     # --- per-object draws -----------------------------------------------------------
@@ -1876,7 +1957,10 @@ class StdScene:
         missed head quick-fades at its window close instead of exploding.
         Without judgments: the Phase-1 perfect-hit-at-startTime fallback."""
         color = self._color(obj)
-        preempt, fade_in = self.diff.preempt, self.diff.time_fade_in
+        # Freeze Frame extends this object's preempt (whole combo appears at the
+        # combo start); TimeFadeIn is unchanged. All fade/approach math below
+        # keys off this per-object preempt.
+        preempt, fade_in = self._preempt_for(obj), self.diff.time_fade_in
         start = obj.get_start_time()
         v = self._verdict(obj)
         x, y = self.cam.to_screen(*pos_osu)
@@ -1905,18 +1989,22 @@ class StdScene:
             alpha *= hf
             na *= hf
         sprites: list[Sprite] = []
-        if alpha > 0.0:
-            sprites = self._circle_sprites(x, y, color, alpha, scale,
-                                           obj.combo_number, na, role)
-        # Argon league: ArgonMainCirclePiece hit flash (outerGradient→white +
-        # the additive FlashPiece bloom) — the pale accent bloom on hit.
-        if self.skin is None and hit_for_flash is not None:
-            self._argon_hit_flash(sprites, x, y, color, t - hit_for_flash)
+        # OsuModTraceable: hide the whole CirclePiece (fill + ring + number) and
+        # its hit flash — "we only want to see the approach circle". The
+        # approach ring below still draws (TC : IRequiresApproachCircles).
+        if not self.traceable:
+            if alpha > 0.0:
+                sprites = self._circle_sprites(x, y, color, alpha, scale,
+                                               obj.combo_number, na, role)
+            # Argon league: ArgonMainCirclePiece hit flash (outerGradient→white
+            # + the additive FlashPiece bloom) — the pale accent bloom on hit.
+            if self.skin is None and hit_for_flash is not None:
+                self._argon_hit_flash(sprites, x, y, color, t - hit_for_flash)
         # OsuModHidden / GR / DF / SI : IHidesApproachCircles — no ring.
         # WG / TR do NOT hide it: the approach circle rides the object's offset.
         if (self.draw_approach_circles and not self.hidden
                 and not self._t_hide_approach):
-            asa = approach_scale_alpha(t, start, preempt, fade_in)
+            asa = self._approach_geometry(obj, t, start, preempt, fade_in)
             if asa is not None:
                 a_scale, a_alpha = asa
                 ax, ay = x, y
@@ -1948,7 +2036,9 @@ class StdScene:
 
     def _draw_slider(self, obj, t: float, approach_out) -> None:
         color = self._color(obj)
-        preempt, fade_in = self.diff.preempt, self.diff.time_fade_in
+        # Freeze Frame extends the slider's preempt too (its body/snake/head all
+        # appear at the combo start); TimeFadeIn unchanged.
+        preempt, fade_in = self._preempt_for(obj), self.diff.time_fade_in
         start, end = obj.get_start_time(), obj.get_end_time()
         spawn = start - preempt
         b_alpha = body_alpha(t, start, end, preempt, fade_in)
@@ -1973,7 +2063,18 @@ class StdScene:
             body_pts = [self._t_body_xform(p) for p in pts]
         if b_alpha > 0.0 and pts:
             if not self.slider_merge:      # merged bodies drew already
-                if self.skin is None:      # Argon league (ArgonSliderBody)
+                if self.traceable:
+                    # OsuModTraceable: outline-only body — AccentColour.Opacity(0)
+                    # (transparent fill) + BorderColour = AccentColour. Same look
+                    # skinned or skinless (standard border width, path radius).
+                    body = self.bodies.build_body(
+                        body_pts, self.radius_px,
+                        BodyStyle(body_color=color, border_color=color,
+                                  inner_alpha=0.0, outer_alpha=0.0),
+                        snake=(snake_a, snake))
+                    self.bodies.draw_body(body, self.spr.fbo,
+                                          alpha=b_alpha * body_fade)
+                elif self.skin is None:    # Argon league (ArgonSliderBody)
                     body = self.bodies.build_body(
                         body_pts, ARGON_OUTER_GRAD_R * self.radius_px,
                         self._argon_body_style(color, b_alpha),
@@ -1995,11 +2096,13 @@ class StdScene:
                                               snake_a, snake))
             # tail end circle rides the visible body's far end: the snake
             # tip during snake-in; the RETRACTING tip when a tail→head
-            # final span snakes out (danser: the cap follows the shrink)
+            # final span snakes out (danser: the cap follows the shrink).
+            # OsuModTraceable hides the DrawableSliderTail entirely (no cap).
             tip = sub_path(pts, snake_a, snake)[-1]
-            sprites.extend(self._plain_circle_sprites(tip[0], tip[1],
-                                                      color, b_alpha,
-                                                      role="slider_end"))
+            if not self.traceable:
+                sprites.extend(self._plain_circle_sprites(tip[0], tip[1],
+                                                          color, b_alpha,
+                                                          role="slider_end"))
             # tail reverse arrow ON the end circle (rides the snake-in tip;
             # t < start guards it off the snake-OUT retraction — arrows are
             # long consumed by then, only their explosion could linger)

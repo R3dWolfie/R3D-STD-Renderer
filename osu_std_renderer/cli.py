@@ -831,6 +831,10 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
                                if meta is not None else 1.0),
         transform_strength=(meta.transform_strength
                             if meta is not None else 1.0),
+        freeze_frame=(meta.freeze_frame if meta is not None else False),
+        traceable=(meta.traceable if meta is not None else False),
+        approach_scale=(meta.approach_scale if meta is not None else None),
+        approach_style=(meta.approach_style if meta is not None else ""),
         fail_time_ms=fail_time,
         fail_anim_len_ms=fail_anim_len_ms,
     )
