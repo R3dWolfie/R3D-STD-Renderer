@@ -107,17 +107,24 @@ class SpriteRenderer:
 
     # --- texture management ---------------------------------------------------
 
-    def upload_texture(self, key: str, rgba: np.ndarray) -> None:
+    def upload_texture(self, key: str, rgba: np.ndarray,
+                       clamp: bool = False) -> None:
         """rgba: HxWx4 uint8 array (top-left origin). Re-uploading a key
         releases the previous texture (the HUD hp bar re-uploads per
-        frame — without the release that's a VRAM leak)."""
+        frame — without the release that's a VRAM leak). clamp=True sets
+        clamp-to-edge wrapping (the flashlight overlay samples uv beyond
+        [0,1] and needs the edge texel, not a repeat)."""
         if rgba.dtype != np.uint8:
             rgba = rgba.astype("u1")
         if rgba.shape[2] == 3:
             a = np.full(rgba.shape[:2] + (1,), 255, dtype="u1")
             rgba = np.concatenate([rgba, a], axis=2)
         old = self._textures.get(key)
-        self._textures[key] = self._make_texture_rgba(rgba)
+        tex = self._make_texture_rgba(rgba)
+        if clamp:
+            tex.repeat_x = False
+            tex.repeat_y = False
+        self._textures[key] = tex
         if old is not None:
             try:
                 old.release()

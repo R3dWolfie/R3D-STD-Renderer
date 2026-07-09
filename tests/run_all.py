@@ -35,6 +35,8 @@ MODULES = [
     "tests.test_hud_extras",
     # Argon league (skinless) gameplay port (2026-07)
     "tests.test_argon",
+    # mod visuals: OsuModHidden fades + OsuModFlashlight overlay (2026-07)
+    "tests.test_mods",
 ]
 
 

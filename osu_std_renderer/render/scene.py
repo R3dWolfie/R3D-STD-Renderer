@@ -157,6 +157,8 @@ from .effects import (LOGO_UI_SIZE, break_resume_anchors, fade_to_black_alpha,
                       triangle_states, warning_arrow_alpha)
 from .gl import Sprite
 from .hud import layout_run
+from .mods import (MOD_FLASHLIGHT, MOD_HIDDEN, build_flashlight_timeline,
+                   flashlight_size_at, hidden_circle_fade, hidden_slider_fade)
 from .markers import (arrow_alpha_scale, arrow_pulse, arrow_rotation,
                       beat_phase, followpoint_dots, followpoint_eligible,
                       followpoint_state, reverse_arrow_schedule,
@@ -714,7 +716,8 @@ class StdScene:
                  miss_fall: bool = True,
                  playfield_borders: str = "none",
                  results=None,
-                 results_start_ms: float | None = None):
+                 results_start_ms: float | None = None,
+                 mods: int = 0):
         self.beatmap = beatmap
         self.diff = beatmap.diff
         self.frames = frames
@@ -773,6 +776,19 @@ class StdScene:
         self.miss_fall = miss_fall        # classic falling hit0 (owner: ON)
         self.results = results            # results.ResultsScreen | None
         self.results_start_ms = results_start_ms
+
+        # --- mod visuals: OsuModHidden fades + OsuModFlashlight overlay -----
+        self.mods = mods
+        self.hidden = bool(mods & MOD_HIDDEN)
+        self.flashlight = bool(mods & MOD_FLASHLIGHT)
+        # FlashlightSize is combo-driven; precompute the change schedule and
+        # a quad big enough to keep the black covering every corner (the
+        # cursor can sit at a screen corner, so a full-diagonal half-size).
+        self._fl_timeline = (build_flashlight_timeline(judgments.events)
+                             if self.flashlight and judgments is not None
+                             else [])
+        self._fl_diag = math.hypot(float(camera.screen_w),
+                                   float(camera.screen_h))
 
         # --- settings-surface phase (§4.10/§4.6/§4.8 additions) ------------
         self.video = video_bg             # video_bg.VideoBackground | None
@@ -985,6 +1001,10 @@ class StdScene:
             strength = beat_strength(beat_phase(t, self.beatmap.timings),
                                      self.bloom_to_beat)
             self.bloom.apply(self.spr.color_tex, self.spr.fbo, strength)
+        if self.flashlight and self.frames:
+            # OsuModFlashlight: dark overlay + cursor-following cutout, OVER
+            # the gameplay layer but UNDER the HUD (lazer draw order)
+            self.spr.draw([self._flashlight_sprite(t)])
         if self.hud is not None:
             self.hud.draw(t)          # §5.3 draw order: … → cursors → HUD
         if self.fade_start_ms is not None and self.fade_len_ms > 0.0:
@@ -1011,6 +1031,22 @@ class StdScene:
         return Sprite(self.cam.screen_w / 2.0, self.cam.screen_h / 2.0,
                       float(self.cam.screen_w), float(self.cam.screen_h),
                       None, (0.0, 0.0, 0.0, alpha))
+
+    def _flashlight_sprite(self, t: float) -> Sprite:
+        """OsuModFlashlight overlay quad: a screen-covering black square
+        centred on the cursor, its uv scaled so the 'flashlight' texture's
+        mid-edge (normalised distance 1) lands on the combo-driven radius.
+        Clamp-to-edge sampling makes everything past the radius solid black."""
+        cx_osu, cy_osu, _ = cursor_at(self.frames, t)
+        cx, cy = self.cam.to_screen(cx_osu, cy_osu)
+        size_osu = flashlight_size_at(self._fl_timeline, t)
+        r_screen = max(self.cam.len_to_screen(size_osu), 1.0)
+        half = self._fl_diag                  # half-quad, covers every corner
+        k = half / r_screen                   # uv zoom: mid-edge → r_screen
+        off = 0.5 * (1.0 - k)
+        return Sprite(cx, cy, 2.0 * half, 2.0 * half, "flashlight",
+                      (1.0, 1.0, 1.0, 1.0),
+                      uv_off=(off, off), uv_scale=(k, k))
 
     def _draw_background(self, t: float) -> float:
         """§4.10 background: the map video frame when live (fail-soft to
@@ -1378,6 +1414,10 @@ class StdScene:
                                               hit_time=hit_time)
             na = number_alpha(t, start, preempt, fade_in, hit_time=hit_time)
             hit_for_flash = hit_time if hit_time is not None else start
+        if self.hidden:                    # OsuModHidden: circle/number fade out
+            hf = hidden_circle_fade(t, start, preempt, fade_in)
+            alpha *= hf
+            na *= hf
         sprites: list[Sprite] = []
         if alpha > 0.0:
             sprites = self._circle_sprites(x, y, color, alpha, scale,
@@ -1386,7 +1426,8 @@ class StdScene:
         # the additive FlashPiece bloom) — the pale accent bloom on hit.
         if self.skin is None and hit_for_flash is not None:
             self._argon_hit_flash(sprites, x, y, color, t - hit_for_flash)
-        if self.draw_approach_circles:
+        # OsuModHidden : IHidesApproachCircles — no approach ring under HD
+        if self.draw_approach_circles and not self.hidden:
             asa = approach_scale_alpha(t, start, preempt, fade_in)
             if asa is not None:
                 a_scale, a_alpha = asa
@@ -1419,6 +1460,8 @@ class StdScene:
         start, end = obj.get_start_time(), obj.get_end_time()
         spawn = start - preempt
         b_alpha = body_alpha(t, start, end, preempt, fade_in)
+        if self.hidden:                    # OsuModHidden: body fades (Easing.Out)
+            b_alpha *= hidden_slider_fade(t, start, end, preempt, fade_in)
         pts = self._slider_paths.get(id(obj))
         ticks, arrows = self._slider_marks.get(id(obj), ([], []))
         snake_a, snake = snake_range(t, start, obj.part_len,

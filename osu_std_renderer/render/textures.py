@@ -145,6 +145,24 @@ def bake_glow(size: int = GLOW_SIZE, power: float = 2.2) -> np.ndarray:
     return rgba
 
 
+def bake_flashlight(size: int = 1024, core: float = 0.45) -> np.ndarray:
+    """OsuModFlashlight overlay texture: BLACK RGB with a radial alpha ramp —
+    fully transparent in the lit core, smoothstep up to fully opaque at the
+    texture mid-edge and beyond. Drawn as one cursor-centred quad whose uv is
+    scaled so the mid-edge (normalised distance 1) lands on the flashlight
+    radius; sampled with clamp-to-edge so everything past the radius is solid
+    black (the playfield outside the flashlight is invisible). `core` is the
+    fraction of the radius that stays fully lit before the soft falloff — a
+    stand-in for Flashlight.cs's FlashlightSmoothness gradient."""
+    d = _dist_grid(size)
+    dn = d / (size / 2.0)                       # 1.0 at the mid-edge
+    x = np.clip((dn - core) / (1.0 - core), 0.0, 1.0)
+    alpha = x * x * (3.0 - 2.0 * x)             # smoothstep(core, 1, dn)
+    rgba = np.zeros((size, size, 4), dtype=np.uint8)   # black RGB
+    rgba[..., 3] = np.round(alpha * 255.0).astype(np.uint8)
+    return rgba
+
+
 def bake_miss_x(size: int = 128, thickness: float = 0.16,
                 arm: float = 0.42) -> np.ndarray:
     """White AA diagonal cross (the miss popup, tinted red at draw time).
@@ -1050,6 +1068,9 @@ class TextureBank:
         renderer.upload_texture("approach",
                                 bake_ring(APPROACH_SIZE, APPROACH_THICKNESS))
         renderer.upload_texture("glow", bake_glow())
+        # OsuModFlashlight overlay: clamp-to-edge so uv beyond the cutout
+        # samples solid black (see bake_flashlight / scene flashlight quad)
+        renderer.upload_texture("flashlight", bake_flashlight(), clamp=True)
         renderer.upload_texture("miss_x", bake_miss_x())
         renderer.upload_texture("dot", bake_dot())
         renderer.upload_texture("arrow", bake_arrow())

@@ -113,6 +113,24 @@ def _ms_list(s: str) -> list[float]:
     return [float(tok) for tok in s.split(",") if tok.strip()]
 
 
+# visual-only mod overrides (--add-mods): HD/FL are driven purely by the mod
+# bitmask and don't alter geometry/timing, so they can be forced on ANY replay
+# without re-loading the beatmap or touching judgment reconciliation.
+_VISUAL_MOD_BITS = {"HD": 1 << 3, "FL": 1 << 10}
+
+
+def _mod_list(s: str) -> int:
+    bits = 0
+    for tok in s.replace(",", " ").split():
+        acr = tok.strip().upper()
+        if acr not in _VISUAL_MOD_BITS:
+            raise argparse.ArgumentTypeError(
+                f"--add-mods only forces visual mods {sorted(_VISUAL_MOD_BITS)}"
+                f" (got {acr!r})")
+        bits |= _VISUAL_MOD_BITS[acr]
+    return bits
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="osu_std_renderer")
     ap.add_argument("osr", type=Path, nargs="?", default=None,
@@ -296,6 +314,9 @@ def build_parser() -> argparse.ArgumentParser:
                     metavar="MS,MS,…",
                     help="write single-frame PNGs at these map times "
                          "instead of encoding video")
+    ap.add_argument("--add-mods", type=_mod_list, default=0, metavar="HD,FL",
+                    help="force extra VISUAL mods (HD/FL) on top of the "
+                         "replay's mods — for proofs when no replay has them")
     return ap
 
 
@@ -592,6 +613,11 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
 
     bloom_pass = BloomPass(spr.ctx, w, h) if settings.bloom else None
 
+    # mods driving the playfield visuals (HD fades / FL overlay): the
+    # replay's mods plus any forced visual-only --add-mods
+    scene_mods = (meta.mods if meta is not None else 0) | getattr(
+        args, "add_mods", 0)
+
     scene = StdScene(
         beatmap, frames, cam, spr, bodies, bank,
         combo_colors=combo_colors,
@@ -637,6 +663,7 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
         playfield_borders=settings.playfield_borders,
         results=results,
         results_start_ms=results_start_ms,
+        mods=scene_mods,
     )
 
     # --- keyframe dump mode -----------------------------------------------------
