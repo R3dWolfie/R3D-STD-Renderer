@@ -349,21 +349,43 @@ LAZER_RESULTS_MIN_SECONDS = 4.5   # floor so both stages + a hold fit
 
 
 def _build_lazer_results(spr, settings, beatmap, meta, judgments, hud, fv,
-                         frames, osu_path, args, speed):
+                         frames, osu_path, args, speed, frozen=None):
     """Assemble the lazer ranking screen (render/lazer_results.py) — gather
     stars/pp/perf-breakdown/slider-stats/aim-scatter/PB-card data, size the
-    outro to fit both stages. Returns (screen, duration_wall_ms)."""
+    outro to fit both stages. Returns (screen, duration_wall_ms).
+
+    `frozen` (a FAIL): a dict with grade/counts/max_combo/acc_pct/score
+    tallied AT the death point — overrides the .osr's full-map totals, and
+    pp/perf are dropped (meaningless for a partial play)."""
     from .render.hud import build_aim_points
     from .render.lazer_results import (LazerResultsScreen, ResultsData,
                                        query_pb, slider_stats)
     from .render.pp import build_performance_breakdown, star_rating
 
-    counts = (meta.count_300, meta.count_100, meta.count_50, meta.count_miss)
+    is_fail = frozen is not None
+    if is_fail:
+        counts = frozen["counts"]
+        grade = frozen["grade"]
+        acc_pct = frozen["acc_pct"]
+        score = frozen["score"]
+        max_combo = frozen["max_combo"]
+    else:
+        counts = (meta.count_300, meta.count_100, meta.count_50,
+                  meta.count_miss)
+        grade = meta.grade
+        acc_pct = meta.accuracy
+        score = int(meta.score or fv["score"])
+        max_combo = meta.max_combo
     stars = star_rating(osu_path, meta.mods)
-    perf = build_performance_breakdown(osu_path, meta.mods, judgments, counts,
-                                       judgments.final_max_combo)
+    # pp/perf are pass-only: a failed play never earns pp
+    if is_fail:
+        perf = None
+    else:
+        perf = build_performance_breakdown(osu_path, meta.mods, judgments,
+                                           counts, judgments.final_max_combo)
     pp_val = perf.achieved_pp if perf is not None else None
-    tick_hit, tick_total, end_hit, end_total = slider_stats(judgments)
+    tick_hit, tick_total, end_hit, end_total = slider_stats(
+        judgments, before=frozen["fail_time"] if is_fail else None)
     aim_points = build_aim_points(judgments, frames,
                                   beatmap.diff.circle_radius)
     # PB card: this player's best PREVIOUS render of the map (exclude the
@@ -383,8 +405,8 @@ def _build_lazer_results(spr, settings, beatmap, meta, judgments, hud, fv,
               "omitted", file=sys.stderr)
 
     data = ResultsData(
-        player=meta.player_name, grade=meta.grade, acc_pct=meta.accuracy,
-        score=int(meta.score or fv["score"]), max_combo=meta.max_combo,
+        player=meta.player_name, grade=grade, acc_pct=acc_pct,
+        score=score, max_combo=max_combo,
         counts=counts, title=beatmap.name, artist=beatmap.artist,
         diff_name=beatmap.difficulty_name, creator=beatmap.creator,
         mods=meta.mods, stars=stars, pp=pp_val,
@@ -416,7 +438,7 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
     from .render.gl import SpriteRenderer
     from .render.hud import StdHud, build_aim_points
     from .render.playfield import PlayfieldCamera
-    from .render.scene import ScenePlayer, StdScene
+    from .render.scene import FAIL_DURATION_MS, ScenePlayer, StdScene
     from .render.skin_elements import SkinElements
     from .render.slider_body import SliderBodyRenderer
     from .render.textures import TextureBank
@@ -428,6 +450,11 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
     bank = TextureBank(spr)
     bodies = SliderBodyRenderer(spr.ctx, w, h)
     cam = PlayfieldCamera(w, h)
+
+    # FAIL: the death point in MAP ms (None = pass or --no-fail-animation).
+    # Gameplay freezes here, the fail sequence plays, then the F results.
+    fail_time = (meta.fail_time if meta is not None
+                 and not args.no_fail_animation else None)
 
     # --- real-skin core textures (per-element procedural fallback) ---------------
     skin_elems = None
@@ -534,8 +561,10 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
                      mods=meta.mods if meta is not None else 0,
                      pp_timeline=pp_timeline, aim_points=aim_points,
                      strain=strain)
-        if meta is not None and meta.score > 0:
+        if meta is not None and meta.score > 0 and fail_time is None:
             # pin the displayed score curve to the .osr's recorded total
+            # (PASS only — a fail's .osr score is the partial death tally,
+            # and the HUD is frozen at fail_time showing that tally already)
             hud.pin_final_score(meta.score)
 
     # --- RED'S results screen (render/results.py; §4.6 ShowResultsScreen) --------
@@ -546,6 +575,31 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
     fade_start_ms = last_end + HIT_FADE_OUT
     fade_len_ms = settings.fade_out_time * 1000.0 * speed
     gameplay_end_ms = fade_start_ms + fade_len_ms
+    # FAIL: the sequence lasts FailAnimation.duration=2500 ms WALL → ×speed
+    fail_anim_len_ms = FAIL_DURATION_MS * speed
+
+    # FAIL results: grade F + stats FROZEN at the death point (NOT the .osr's
+    # full-map reconciled totals). Tally judgments up to fail_time from the
+    # (un-reconciled) sim, peak combo up to death, accuracy from those counts.
+    frozen = None
+    if fail_time is not None and hud is not None:
+        fc = hud.data.counts_at(fail_time)
+        ftot = sum(fc)
+        facc = ((300 * fc[0] + 100 * fc[1] + 50 * fc[2]) / (300.0 * ftot)
+                if ftot else 1.0)
+        frozen = {
+            "grade": "F",
+            "counts": fc,
+            "max_combo": hud.data.max_combo_upto(fail_time),
+            "acc_pct": round(facc * 100.0, 2),
+            "score": int(meta.score) if meta.score > 0
+            else hud.data.score_upto(fail_time),
+            "fail_time": fail_time,
+        }
+        print(f"fail:   frozen stats @ death — {fc[0]}/{fc[1]}/{fc[2]}/{fc[3]} "
+              f"{frozen['acc_pct']}% combo {frozen['max_combo']}x "
+              f"score {frozen['score']} grade F", file=sys.stderr)
+
     results = results_start_ms = results_dur_wall_ms = None
     if settings.show_results and hud is not None and meta is not None:
         fv = hud.final_values()
@@ -554,15 +608,20 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
         if settings.results_style == "lazer":
             results, results_dur_wall_ms = _build_lazer_results(
                 spr, settings, beatmap, meta, judgments, hud, fv, frames,
-                osu_path, args, speed)
+                osu_path, args, speed, frozen=frozen)
         else:
             from .render.results import ResultsScreen
+            r_counts = frozen["counts"] if frozen else (
+                meta.count_300, meta.count_100, meta.count_50, meta.count_miss)
+            r_grade = frozen["grade"] if frozen else meta.grade
+            r_acc = frozen["acc_pct"] if frozen else meta.accuracy
+            r_score = frozen["score"] if frozen else (meta.score or fv["score"])
+            r_combo = frozen["max_combo"] if frozen else meta.max_combo
             results = ResultsScreen(
                 spr, skin_elems,
-                counts=(meta.count_300, meta.count_100, meta.count_50,
-                        meta.count_miss),
-                acc_pct=meta.accuracy, score=(meta.score or fv["score"]),
-                max_combo=meta.max_combo, grade=meta.grade, ur=fv["ur"],
+                counts=r_counts,
+                acc_pct=r_acc, score=r_score,
+                max_combo=r_combo, grade=r_grade, ur=fv["ur"],
                 avg_ms=avg_ms, err_deltas=deltas, meh_ms=hud.hw.meh,
                 player=meta.player_name,
                 map_line=f"{beatmap.artist} - {beatmap.name}",
@@ -571,7 +630,9 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
                 argon_font=settings.skin_dir is None)
             results.set_windows(hud.hw.great, hud.hw.ok)
             results_dur_wall_ms = settings.results_screen_time * 1000.0
-        results_start_ms = gameplay_end_ms
+        # PASS → results after the map-end fade; FAIL → after the fall
+        results_start_ms = (fail_time + fail_anim_len_ms
+                            if fail_time is not None else gameplay_end_ms)
 
     # §3.5/§4.7 combo colour source: the .osu [Colours] when the preset
     # says "beatmap" AND the map defines them; the skin.ini set otherwise
@@ -590,12 +651,14 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
                                for c in skin_info.slider_track_override)
 
     # --- flow: end/start + the §4.10 pre-roll (lead-in + seizure card) ------------
-    end_ms = gameplay_end_ms
+    # FAIL: gameplay ends at the death frame + the fall, never at map end
+    end_ms = (fail_time + fail_anim_len_ms if fail_time is not None
+              else gameplay_end_ms)
     if results is not None:
         # results duration is WALL ms — scale by the rate mod so the outro
         # holds the same real time under DT/HT (the lazer style floors the
         # duration so both stages + a hold always fit — see _build_lazer)
-        end_ms += results_dur_wall_ms * speed
+        end_ms = results_start_ms + results_dur_wall_ms * speed
     if args.max_seconds is not None:
         end_ms = min(end_ms, args.max_seconds * 1000.0)
     start_ms = (args.start or 0.0) * 1000.0
@@ -669,6 +732,8 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
         results=results,
         results_start_ms=results_start_ms,
         mods=scene_mods,
+        fail_time_ms=fail_time,
+        fail_anim_len_ms=fail_anim_len_ms,
     )
 
     # --- keyframe dump mode -----------------------------------------------------
@@ -742,6 +807,11 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
         from .record.hitsounds import collect_hitsound_events, mix_hitsounds
         oneshots, loops = collect_hitsound_events(
             beatmap, judgments, layered=skin_info.layered_hit_sounds)
+        if fail_time is not None:
+            # FAIL: objects after the death point were never played — drop
+            # their hitsounds (loops clip at the death point)
+            oneshots = [o for o in oneshots if o.time_ms < fail_time]
+            loops = [l for l in loops if l.t0 < fail_time]
         stats = mix_hitsounds(mixer, sample_bank, oneshots, loops,
                               speed=speed, start_ms=render_start_ms,
                               gain=hs_gain)
@@ -776,9 +846,26 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
         mixer.silence_before((start_ms - render_start_ms) / speed)
 
     # §4.10 FadeOutTime, audio side: the track fades with the video
-    if have_audio and fade_len_ms > 0.0:
+    if have_audio and fade_len_ms > 0.0 and fail_time is None:
         mixer.fade_out((fade_start_ms - render_start_ms) / speed,
                        (gameplay_end_ms - render_start_ms) / speed)
+
+    # FAIL audio: the FailAnimation bends the track frequency to 0 over the
+    # 2500 ms fall (a slowdown + pitch drop). We can't pitch-bend offline
+    # without BASS, so we APPROXIMATE with a linear music fade to silence
+    # across the fall (honest gap: no pitch-bend), and play the synthesized
+    # fail sample once at the death point (FailAnimation.failSample.Play).
+    if fail_time is not None and settings.general_volume > 0:
+        from .record.hitsounds import synth_failsound
+        t0 = (fail_time - render_start_ms) / speed
+        t1 = (fail_time + fail_anim_len_ms - render_start_ms) / speed
+        if have_audio:
+            mixer.fade_out(t0, t1)
+        fs_vol = settings.general_volume / 100.0
+        mixer.mix_at(t0, synth_failsound(), volume=fs_vol)
+        have_audio = True
+        print(f"fail:   music fades {t0:.1f}→{t1:.1f}s (wall), fail sample "
+              f"at {t0:.1f}s (pitch-bend approximated)", file=sys.stderr)
 
     if have_audio:
         audio_path = output.with_suffix(".audio.wav")

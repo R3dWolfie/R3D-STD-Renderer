@@ -169,6 +169,106 @@ def test_fail_transform_sprite_grays_shrinks_fades():
     assert out.texture_key == "k"                          # preserved
 
 
+# --- 3. F grade + stats frozen at death ----------------------------------------------
+
+def test_F_grade_colour_is_fail_red():
+    from osu_std_renderer.render.hud import GRADE_COLORS
+    from osu_std_renderer.render.lazer_results import FOR_RANK
+    # ff5a5a = (1.0, 0x5a/255, 0x5a/255)
+    r, g, b = GRADE_COLORS["F"]
+    assert abs(r - 1.0) < 1e-6 and abs(g - 0x5a / 255) < 1e-2
+    fr, fg, fb = FOR_RANK["F"]
+    assert abs(fr - 1.0) < 1e-6 and abs(fg - 0x5a / 255) < 1e-6
+    # same red as the D / stable fail red
+    assert FOR_RANK["F"] == FOR_RANK["D"]
+
+
+def test_F_grade_arc_caps_at_virtual_ss_notch():
+    # a non-SS grade's accuracy arc must never close the ring
+    from osu_std_renderer.render.lazer_results import (VIRTUAL_SS_PERCENTAGE,
+                                                       target_arc_value)
+    assert target_arc_value(0.30, "F") <= 1.0 - VIRTUAL_SS_PERCENTAGE
+    assert target_arc_value(0.999, "F") <= 1.0 - VIRTUAL_SS_PERCENTAGE
+
+
+class _Part:
+    def __init__(self, kind, hit):
+        self.kind = kind
+        self.hit = hit
+
+
+class _Verdict:
+    def __init__(self, start_time, parts):
+        self.start_time = start_time
+        self.parts = parts
+
+
+class _Sim:
+    def __init__(self, verdicts):
+        self.verdicts = verdicts
+
+
+def test_slider_stats_before_filter_drops_post_death_sliders():
+    from osu_std_renderer.render.lazer_results import slider_stats
+    sim = _Sim({
+        1: _Verdict(1000.0, [_Part("tick", True), _Part("tail", True)]),
+        2: _Verdict(5000.0, [_Part("tick", True), _Part("tail", True)]),
+    })
+    # all sliders → 2 ticks + 2 tails
+    assert slider_stats(sim) == (2, 2, 2, 2)
+    # only the slider that STARTED before death @ 3000
+    assert slider_stats(sim, before=3000.0) == (1, 1, 1, 1)
+    # death before both → none counted
+    assert slider_stats(sim, before=500.0) == (0, 0, 0, 0)
+
+
+def _fake_sim_for_hud():
+    """A minimal SimResult stand-in HudData can consume: a stream of
+    circle judgments with a combo that peaks then breaks (a death)."""
+    from osu_std_renderer.ruleset.ruleset import JudgmentEvent, JudgmentKind
+    K = JudgmentKind
+    # (t, kind, combo, score, acc)
+    rows = [
+        (100, K.HIT300, 1, 1000, 1.0),
+        (200, K.HIT300, 2, 2000, 1.0),
+        (300, K.HIT100, 3, 2800, 0.94),
+        (400, K.MISS,   0, 2800, 0.80),   # break — combo drops
+        (500, K.HIT300, 1, 3800, 0.83),
+        (600, K.HIT50,  2, 4000, 0.78),
+        (700, K.MISS,   0, 4000, 0.70),   # post-death miss (frozen out)
+    ]
+    ev = [JudgmentEvent(time_ms=t, kind=k, object_id=i, x=0.0, y=0.0,
+                        combo_after=c, score_after=s, acc_after=a)
+          for i, (t, k, c, s, a) in enumerate(rows)]
+
+    class _S:
+        events = ev
+        combo_timeline = [(t, c) for (t, _k, c, _s, _a) in rows]
+        final_max_combo = 3
+        verdicts = {}
+    return _S()
+
+
+def test_hud_frozen_stats_at_death():
+    from osu_std_renderer.render.hud import HudData
+    d = HudData(_fake_sim_for_hud())
+    # freeze at t=650 (after the 600ms judgment, before the 700ms post-death)
+    ft = 650.0
+    assert d.counts_at(ft) == (3, 1, 1, 1)      # 300s/100s/50s/misses to death
+    assert d.max_combo_upto(ft) == 3            # peak BEFORE the death break
+    assert d.score_upto(ft) == 4000             # raw score at death
+    # the post-death miss @700 must NOT be included
+    assert d.counts_at(ft)[3] == 1              # only the one break-miss @400
+
+
+def test_hud_max_combo_upto_is_peak_not_final():
+    from osu_std_renderer.render.hud import HudData
+    d = HudData(_fake_sim_for_hud())
+    # even though combo later reaches only 2, the peak up to death is 3
+    assert d.max_combo_upto(350.0) == 3
+    assert d.max_combo_upto(150.0) == 1
+
+
 # --- fail sound synth ----------------------------------------------------------------
 
 def test_synth_failsound_shape_and_descends():

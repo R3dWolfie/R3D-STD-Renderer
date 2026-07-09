@@ -131,6 +131,11 @@ FOR_RANK = {
     "A": _hex("88da20"),   # ScoreRank.A
     "S": _hex("02b5c3"),   # ScoreRank.S / SH
     "SS": _hex("de31ae"),  # ScoreRank.X / XH  (SS)
+    # F = FAIL: lazer's ScoreRank enum has no F (it bottoms at D), but
+    # osu!STABLE shows a red F for a failed play — the owner's pick. Reuse
+    # the ForRank fail red (== ScoreRank.D ff5a5a) for the centre letter +
+    # its rank glow; target_arc_value caps a non-SS at the virtual-SS notch.
+    "F": _hex("ff5a5a"),   # osu!stable fail red
 }
 # alias the lazer rank-letter keys the meta layer may hand us
 FOR_RANK["X"] = FOR_RANK["SS"]
@@ -311,14 +316,20 @@ def acc_to_angle_deg(acc: float) -> float:
     return 270.0 + _clamp01(acc) * 360.0
 
 
-def slider_stats(sim) -> tuple[int, int, int, int]:
+def slider_stats(sim, before: float | None = None
+                 ) -> tuple[int, int, int, int]:
     """(tick_hit, tick_total, end_hit, end_total) over every slider
     verdict's part outcomes — the SLIDER TICK n/N + SLIDER END n/N rows.
-    ticks include repeats (tick-equivalent in the ruleset)."""
+    ticks include repeats (tick-equivalent in the ruleset).
+
+    `before` (a FAIL death time in ms): count only sliders that STARTED
+    before the death point — the parts the player actually reached."""
     tick_hit = tick_total = end_hit = end_total = 0
     if sim is None:
         return 0, 0, 0, 0
     for v in sim.verdicts.values():
+        if before is not None and v.start_time >= before:
+            continue
         for p in v.parts:
             if p.kind in ("tick", "repeat"):
                 tick_total += 1
