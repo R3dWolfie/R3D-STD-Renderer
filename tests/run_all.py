@@ -64,6 +64,11 @@ MODULES = [
     # Different) / TC (Traceable) — approach-circle scale/timing + circle-fill
     # gate (visual only; reconcile/geometry untouched) (2026-07)
     "tests.test_appearance_mods",
+    # screen / cursor-effect visual mods: BR (Barrel Roll) / BM (Bloom) / SY
+    # (Synesthesia) / BL (Blinds) / NS (No Scope) / DP (Depth) / BU (Bubbles) —
+    # playfield spin, cursor scale/fade, snap colours, screen blinds, per-object
+    # depth + hit-position bubbles (visual only; reconcile/geometry untouched)
+    "tests.test_screen_mods",
 ]
 
 

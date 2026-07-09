@@ -537,6 +537,7 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
     # legacy). The HP drain model (ruleset/health.py) and the .osr score
     # pin wire in here.
     hud = None
+    health = None
     if judgments is not None:
         from .ruleset import HealthTimeline
         health = HealthTimeline(beatmap, judgments)
@@ -835,6 +836,14 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
         traceable=(meta.traceable if meta is not None else False),
         approach_scale=(meta.approach_scale if meta is not None else None),
         approach_style=(meta.approach_style if meta is not None else ""),
+        barrel_roll=(meta.barrel_roll if meta is not None else None),
+        bloom=(meta.bloom if meta is not None else None),
+        synesthesia=(meta.synesthesia if meta is not None else False),
+        blinds=(meta.blinds if meta is not None else False),
+        no_scope=(meta.no_scope if meta is not None else None),
+        depth=(meta.depth if meta is not None else None),
+        bubbles=(meta.bubbles if meta is not None else False),
+        health=health,
         fail_time_ms=fail_time,
         fail_anim_len_ms=fail_anim_len_ms,
     )

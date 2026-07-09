@@ -168,6 +168,7 @@ from .transform_mods import (DEFLATE, GROW, HIDES_APPROACH, IDENTITY, SPIN_IN,
                              wiggle_offset_at)
 from .appearance_mods import (approach_different_scale, freeze_frame_scale,
                               freeze_preempts)
+from . import screen_mods as _sm
 from .markers import (arrow_alpha_scale, arrow_pulse, arrow_rotation,
                       beat_phase, followpoint_dots, followpoint_eligible,
                       followpoint_state, reverse_arrow_schedule,
@@ -880,6 +881,14 @@ class StdScene:
                  traceable: bool = False,
                  approach_scale: float | None = None,
                  approach_style: str = "",
+                 barrel_roll=None,
+                 bloom=None,
+                 synesthesia: bool = False,
+                 blinds: bool = False,
+                 no_scope=None,
+                 depth=None,
+                 bubbles: bool = False,
+                 health=None,
                  fail_time_ms: float | None = None,
                  fail_anim_len_ms: float = FAIL_DURATION_MS):
         self.beatmap = beatmap
@@ -986,6 +995,10 @@ class StdScene:
         self._t_hide_approach = False
         self._t_force_opaque = False
         self._t_body_xform = None
+        # DP: per-object depth scale + depth-repositioned centre (osu!px), read
+        # by _head_sprites so the approach ring rides the depth transform too.
+        self._dp_scale = 1.0
+        self._dp_center_osu: tuple[float, float] | None = None
 
         # --- approach/circle-appearance mods (FR/AD/TC): purely VISUAL. The
         # beatmap difficulty (diff.preempt) is NEVER mutated, so the judgement/
@@ -1006,6 +1019,32 @@ class StdScene:
                          if approach_scale is not None else None)
         self.ad_style = (approach_style or "").strip().lower()
         self._fr_preempt: dict[int, float] = {}
+
+        # --- screen / cursor-effect visual mods (BR/BM/SY/BL/NS/DP/BU) ------
+        # All purely VISUAL (the beatmap geometry, the replay cursor and the
+        # judgement/reconcile are untouched — the ruleset already simulated the
+        # real positions before the scene draws). See render/screen_mods.py.
+        self.barrel = barrel_roll         # lazer_mods.BarrelRoll | None (BR)
+        self.bloom_mod = bloom            # lazer_mods.Bloom | None (BM)
+        self.synesthesia = bool(synesthesia)               # (SY)
+        self.blinds = bool(blinds)                          # (BL)
+        self.no_scope = no_scope          # lazer_mods.NoScope | None (NS)
+        self.depth_mod = depth            # lazer_mods.Depth | None (DP)
+        self.bubbles = bool(bubbles)                        # (BU)
+        self.health = health              # ruleset.HealthTimeline | None (BL)
+        # BR: the global playfield spin+scale is installed as spr.post_xform /
+        # body xform per frame; these hold the current affines so the per-object
+        # transform mods (GR/DF/... , DP) can COMPOSE with the spin.
+        self._barrel_sprite = None
+        self._barrel_point = None
+        if self.barrel is not None:
+            self._br_scale = _sm.barrel_playfield_scale(
+                camera.screen_w, camera.screen_h)
+            self._br_center = (camera.screen_w / 2.0, camera.screen_h / 2.0)
+        # DP hides follow points (lazer: "won't make any sense"); its approach
+        # rings obey ShowApproachCircles.
+        if self.depth_mod is not None:
+            self.draw_follow_points = False
 
         # --- settings-surface phase (§4.10/§4.6/§4.8 additions) ------------
         self.video = video_bg             # video_bg.VideoBackground | None
@@ -1075,6 +1114,77 @@ class StdScene:
                 lambda o: isinstance(o, Spinner))
         self.radius_px = camera.len_to_screen(self.diff.circle_radius)
         self.circle_k = circle_pixel_scale(self.radius_px)
+
+        # --- screen-mod precompute (needs objects + radius + judgments) ------
+        # SY: each object's combo colour comes from its beat-snap divisor at
+        # StartTime (BindableBeatDivisor.GetColourFor). Precompute id(obj)->rgb.
+        self._sy_colour: dict[int, tuple[float, float, float]] = {}
+        if self.synesthesia:
+            for o in self.objects:
+                st = o.get_start_time()
+                tp = beatmap.timings.get_original_point_at(st)
+                div = _sm.closest_beat_divisor(st, tp.time, tp.beat_length_base)
+                self._sy_colour[id(o)] = _sm.snap_colour(div)
+        # break intervals (BM resets cursor size / NS forces cursor visible
+        # during breaks; BL widens the blinds) — from the beatmap's pause spans.
+        self._breaks = [(p.start_time, p.end_time)
+                        for p in (getattr(beatmap, "pauses", []) or [])]
+        # BM: combo-driven cursor-scale timeline (100 ms settle, =1 in breaks).
+        self._bm_timeline: list[tuple[float, float, float]] = []
+        if self.bloom_mod is not None and judgments is not None:
+            bm = self.bloom_mod
+            self._bm_timeline = _sm.build_combo_timeline(
+                judgments.events,
+                lambda c: _sm.bloom_cursor_size(c, bm.max_size_combo_count,
+                                                bm.max_cursor_size))
+        # NS: combo-driven cursor-alpha timeline (=1 in breaks + during
+        # spinners: OsuModNoScope's spinnerPeriods [start-100, end]).
+        self._ns_timeline: list[tuple[float, float, float]] = []
+        self._ns_spinner: list[tuple[float, float]] = []
+        if self.no_scope is not None and judgments is not None:
+            hcc = self.no_scope.hidden_combo_count
+            self._ns_timeline = _sm.build_combo_timeline(
+                judgments.events, lambda c: _sm.no_scope_alpha(c, hcc))
+            self._ns_spinner = [
+                (o.get_start_time() - _sm.NO_SCOPE_TRANSITION_MS,
+                 o.get_end_time())
+                for o in self.objects if isinstance(o, Spinner)]
+        # BL: the two black boxes' playfield span (screen px) + the
+        # targetBreakMultiplier schedule.
+        if self.blinds:
+            self._bl_start = camera.to_screen(0.0, 192.0)[0]
+            self._bl_end = camera.to_screen(512.0, 192.0)[0]
+            fs = min(starts_all) if starts_all else 0.0
+            self._bl_break = _sm.build_blinds_break_timeline(
+                fs, self.diff.preempt, self._breaks)
+        # BU: one expanding bubble per hit object (circle / slider head /
+        # spinner), spawned at its head position tinted by its combo colour.
+        self._bu_events: list[tuple] = []
+        self._bu_times: list[float] = []
+        self._bu_duration = 0.0
+        self._bu_size_px = 0.0
+        if self.bubbles and judgments is not None:
+            self._bu_duration = _sm.bubble_duration(
+                _sm.bubble_fade_time(self.diff.preempt))
+            self._bu_size_px = camera.len_to_screen(
+                _sm.bubble_initial_size_osu(self.diff.circle_radius))
+            # JudgmentEvent.object_id is the sim's start-order index; both the
+            # ruleset and self.objects sort by start time, so it indexes here.
+            for ev in sorted(judgments.events, key=lambda e: e.time_ms):
+                if not (0 <= ev.object_id < len(self.objects)):
+                    continue
+                o = self.objects[ev.object_id]
+                px, py = o.get_stacked_start_position(self.diff)
+                sx, sy = camera.to_screen(px, py)
+                was_hit = str(ev.kind).lower().find("miss") < 0
+                col = self._color(o)
+                if was_hit:              # BubbleDrawable colourBox.Darken(0.1)
+                    col = tuple(c * 0.9 for c in col)
+                self._bu_events.append(
+                    (ev.time_ms, sx, sy, col, was_hit,
+                     _sm.bubble_max_size(ev.combo_after)))
+            self._bu_events.sort(key=lambda e: e[0])
+            self._bu_times = [e[0] for e in self._bu_events]
         self._spawn_idx = 0
         self._active: list = []
         self._last_t = -math.inf
@@ -1179,33 +1289,94 @@ class StdScene:
             return (px + rx + ox_scr, py + ry + oy_scr)
         return xf
 
+    def _compose_barrel(self, sprite_xf, point_xf):
+        """Compose a per-object affine with the active BR playfield spin (which
+        rotates the whole layer about the screen centre). The object-local
+        transform runs first (screen-space), then the global barrel."""
+        bs, bp = self._barrel_sprite, self._barrel_point
+        if bs is None:
+            self.spr.post_xform = sprite_xf
+            self._t_body_xform = point_xf
+            return
+        if sprite_xf is None:
+            self.spr.post_xform = bs
+            self._t_body_xform = bp
+            return
+        self.spr.post_xform = lambda sp: bs(sprite_xf(sp))
+        self._t_body_xform = lambda p: bp(point_xf(p))
+
     def _apply_obj_transform(self, obj, t: float) -> None:
         """Install the per-object transform for the sprites drawn next: the
         approach-ring offset + hide/opaque gates (read by _head_sprites) plus
-        the spr.post_xform / body-xform affine (scale+rotation about the object
-        origin, or the WG/TR position offset)."""
+        the spr.post_xform / body-xform affine (transform-family scale/rotation
+        or WG/TR offset, or the DP depth scale+reposition), composed with the
+        BR playfield spin when active."""
+        self._dp_scale = 1.0
+        self._dp_center_osu = None
+        if self.depth_mod is not None:
+            self._apply_depth_transform(obj, t)
+            return
         ot = self._obj_transform(obj, t)
         self._t_hide_approach = self.tmod in HIDES_APPROACH
         self._t_force_opaque = ot.force_opaque
         self._t_off = (ot.off_x, ot.off_y)
         if isinstance(obj, Spinner):
-            self.spr.post_xform = None
-            self._t_body_xform = None
+            self._compose_barrel(None, None)
             return
         pivot = self.cam.to_screen(*obj.get_stacked_start_position(self.diff))
         scl = self.cam.scl
         ox_scr, oy_scr = ot.off_x * scl, ot.off_y * scl
-        self.spr.post_xform = self._transform_sprite_xform(
-            pivot, ot.scale_x, ot.scale_y, ot.rotation, ox_scr, oy_scr)
-        self._t_body_xform = self._transform_point_xform(
-            pivot, ot.scale_x, ot.scale_y, ot.rotation, ox_scr, oy_scr)
+        self._compose_barrel(
+            self._transform_sprite_xform(
+                pivot, ot.scale_x, ot.scale_y, ot.rotation, ox_scr, oy_scr),
+            self._transform_point_xform(
+                pivot, ot.scale_x, ot.scale_y, ot.rotation, ox_scr, oy_scr))
+
+    def _apply_depth_transform(self, obj, t: float) -> None:
+        """OsuModDepth: scale the object by its depth and reposition it toward
+        the playfield-centre vanishing point. Uniform scale about the real head
+        pivot + a screen offset (depthPos-realPos) is algebraically the depth
+        scale about the vanishing point, so one affine serves circle body,
+        slider body/ball and the approach ring."""
+        self._t_off = (0.0, 0.0)
+        self._t_force_opaque = False
+        # ShowApproachCircles gate (approach ring hidden when off).
+        self._t_hide_approach = not self.depth_mod.show_approach_circles
+        if isinstance(obj, Spinner):
+            self._compose_barrel(None, None)
+            return
+        start = obj.get_start_time()
+        preempt = self._preempt_for(obj)
+        max_depth = self.depth_mod.max_depth
+        if isinstance(obj, Slider):
+            z = _sm.depth_z_slider(t, start, obj.get_end_time() - start,
+                                   preempt, max_depth)
+        else:
+            z = _sm.depth_z_circle(t, start, preempt, max_depth)
+        scale = _sm.depth_scale_for(z)
+        real = obj.get_stacked_start_position(self.diff)
+        dcx, dcy = _sm.depth_position(real[0], real[1], scale)
+        self._dp_scale = scale
+        self._dp_center_osu = (dcx, dcy)
+        pivot = self.cam.to_screen(*real)
+        dsx, dsy = self.cam.to_screen(dcx, dcy)
+        ox_scr, oy_scr = dsx - pivot[0], dsy - pivot[1]
+        self._compose_barrel(
+            self._transform_sprite_xform(pivot, scale, scale, 0.0,
+                                         ox_scr, oy_scr),
+            self._transform_point_xform(pivot, scale, scale, 0.0,
+                                        ox_scr, oy_scr))
 
     def _clear_obj_transform(self) -> None:
-        self.spr.post_xform = None
-        self._t_body_xform = None
+        # restore the BR playfield spin base (or None) so the deferred approach
+        # pass + cursor still ride the spin.
+        self.spr.post_xform = self._barrel_sprite
+        self._t_body_xform = self._barrel_point
         self._t_off = (0.0, 0.0)
         self._t_hide_approach = False
         self._t_force_opaque = False
+        self._dp_scale = 1.0
+        self._dp_center_osu = None
 
     # --- Freeze Frame per-object preempt --------------------------------------
 
@@ -1350,6 +1521,11 @@ class StdScene:
             self.spr.draw([Sprite(cx, cy, w, h, None,
                                   (1.0, 1.0, 1.0, BORDER_ALPHA))
                            for cx, cy, w, h in self._border_rects])
+        # BR: install the global playfield spin (+ scale) as the base
+        # post_xform / body xform so objects, deferred approach rings, popups
+        # and the cursor all ride it. Background/borders above stay fixed.
+        self._install_barrel(t)
+        per_obj = bool(self.tmod) or self.depth_mod is not None
         if self.draw_follow_points and self._fp_dots:
             fps = self._followpoint_sprites(t)
             if fps:
@@ -1359,7 +1535,7 @@ class StdScene:
         approach: list[Sprite] = []
         # §5.3: newest objects draw FIRST → end up under older ones
         for obj in reversed(self._active):
-            if self.tmod:
+            if per_obj:
                 self._apply_obj_transform(obj, t)
             if isinstance(obj, Spinner):
                 self._draw_spinner(obj, t)
@@ -1367,7 +1543,7 @@ class StdScene:
                 self._draw_slider(obj, t, approach)
             else:
                 self._draw_circle(obj, t, approach)
-        if self.tmod:
+        if per_obj:
             self._clear_obj_transform()
         if approach:
             self.spr.draw(approach)
@@ -1387,13 +1563,26 @@ class StdScene:
             ripples = self._ripple_sprites(t)
             if ripples:
                 self.spr.draw(ripples)     # §4.8 ripples UNDER the cursor
+        if self.bubbles:
+            # BU: expanding hit-position bubbles over the objects (they obscure
+            # judgements in lazer), under the cursor + HUD.
+            bub = self._bubble_sprites(t)
+            if bub:
+                self.spr.draw(bub)
         if self.draw_cursor and self.frames:
             self.spr.draw(self._cursor_sprites(t))
+        # BR: the playfield spin ends here — the bloom post-pass, blinds,
+        # flashlight, fade + HUD are all screen-space (must NOT rotate).
+        self._uninstall_barrel()
         if self.bloom is not None:
             # §4.10 bloom: gameplay layer only — the HUD stays crisp above
             strength = beat_strength(beat_phase(t, self.beatmap.timings),
                                      self.bloom_to_beat)
             self.bloom.apply(self.spr.color_tex, self.spr.fbo, strength)
+        if self.blinds:
+            # BL: two health-driven black panels close in from the screen
+            # edges, over the gameplay + under the HUD (lazer Overlays order).
+            self.spr.draw(self._blinds_sprites(t))
         if self.flashlight and self.frames:
             # OsuModFlashlight: dark overlay + cursor-following cutout, OVER
             # the gameplay layer but UNDER the HUD (lazer draw order)
@@ -1571,6 +1760,84 @@ class StdScene:
         return Sprite(self.cam.screen_w / 2.0, self.cam.screen_h / 2.0,
                       float(self.cam.screen_w), float(self.cam.screen_h),
                       None, (0.0, 0.0, 0.0, alpha))
+
+    # --- BR: barrel-roll playfield spin -----------------------------------------
+
+    def _install_barrel(self, t: float) -> None:
+        """Set the BR playfield-spin affines as the base post_xform / body
+        xform for this frame's gameplay draws (rotate about the screen centre +
+        scale by minSide/maxSide). No-op when BR is off."""
+        if self.barrel is None:
+            self._barrel_sprite = None
+            self._barrel_point = None
+            return
+        rot = math.radians(_sm.barrel_rotation_deg(
+            t, self.barrel.spin_speed, self.barrel.direction))
+        s = self._br_scale
+        self._barrel_sprite = self._transform_sprite_xform(
+            self._br_center, s, s, rot, 0.0, 0.0)
+        self._barrel_point = self._transform_point_xform(
+            self._br_center, s, s, rot, 0.0, 0.0)
+        self.spr.post_xform = self._barrel_sprite
+        self._t_body_xform = self._barrel_point
+
+    def _uninstall_barrel(self) -> None:
+        if self.barrel is not None:
+            self.spr.post_xform = None
+            self._t_body_xform = None
+            self._barrel_sprite = None
+            self._barrel_point = None
+
+    # --- BL: blinds panels ------------------------------------------------------
+
+    def _blinds_sprites(self, t: float) -> list[Sprite]:
+        """OsuModBlinds.DrawableOsuBlinds: two black boxes closing in from the
+        left/right screen edges. Their covered width is health-driven (higher HP
+        = MORE closed, matching lazer) with the start/break widening from the
+        targetBreakMultiplier schedule."""
+        closedness = self.health.hp_at(t) if self.health is not None else 1.0
+        bmult = _sm.blinds_break_multiplier_at(self._bl_break, t)
+        left_edge, right_edge = _sm.blinds_inner_edges(
+            self._bl_start, self._bl_end, closedness, bmult)
+        h = float(self.cam.screen_h)
+        w = float(self.cam.screen_w)
+        out: list[Sprite] = []
+        if left_edge > 0.0:                # covers [0, left_edge]
+            out.append(Sprite(left_edge / 2.0, h / 2.0, left_edge, h,
+                              None, (0.0, 0.0, 0.0, 1.0)))
+        if right_edge < w:                 # covers [right_edge, w]
+            rw = w - right_edge
+            out.append(Sprite(right_edge + rw / 2.0, h / 2.0, rw, h,
+                              None, (0.0, 0.0, 0.0, 1.0)))
+        return out
+
+    # --- BU: hit-position bubbles -----------------------------------------------
+
+    def _bubble_sprites(self, t: float) -> list[Sprite]:
+        """OsuModBubbles: for each active bubble (spawned on a hit) an expanding,
+        fading disc tinted by the object's combo colour. Scale 1->MaxSize over
+        0.8·duration then pops to MaxSize·1.5 while fading out."""
+        out: list[Sprite] = []
+        if not self._bu_events:
+            return out
+        dur = self._bu_duration
+        lo = bisect.bisect_right(self._bu_times, t) - 1
+        # walk back over every bubble whose life window still contains t
+        i = lo
+        while i >= 0:
+            spawn, sx, sy, col, was_hit, max_size = self._bu_events[i]
+            if t - spawn >= dur:
+                break                      # older bubbles have all expired
+            age = t - spawn
+            if 0.0 <= age < dur:
+                scale = _sm.bubble_scale_at(age, dur, max_size)
+                alpha = _sm.bubble_alpha_at(age, dur)
+                if alpha > 0.0:
+                    d = self._bu_size_px * scale
+                    out.append(Sprite(sx, sy, d, d, "disc",
+                                      (col[0], col[1], col[2], alpha)))
+            i -= 1
+        return out
 
     def _flashlight_sprite(self, t: float) -> Sprite:
         """OsuModFlashlight overlay quad: a screen-covering black square
@@ -1772,6 +2039,12 @@ class StdScene:
         # Beatmap [Colours] use ComboIndexWithOffsets (LegacyBeatmapSkin
         # override → combo_set_hax); skin/default colours use ComboIndex
         # (→ combo_set).
+        if getattr(self, "synesthesia", False):
+            # OsuModSynesthesia overrides AccentColour from the beat-snap
+            # divisor; precomputed per object in __init__.
+            c = self._sy_colour.get(id(obj))
+            if c is not None:
+                return c
         idx = (obj.combo_set_hax if self.combo_colors_from_beatmap
                else obj.combo_set) + 1
         return self.combo_colors[idx % len(self.combo_colors)]
@@ -2008,7 +2281,12 @@ class StdScene:
             if asa is not None:
                 a_scale, a_alpha = asa
                 ax, ay = x, y
-                if self._t_off != (0.0, 0.0):
+                if self._dp_center_osu is not None:
+                    # DP: the ring rides the object's depth centre + scale (the
+                    # deferred approach pass bypasses the per-object post_xform).
+                    ax, ay = self.cam.to_screen(*self._dp_center_osu)
+                    a_scale *= self._dp_scale
+                elif self._t_off != (0.0, 0.0):
                     ax, ay = self.cam.to_screen(pos_osu[0] + self._t_off[0],
                                                 pos_osu[1] + self._t_off[1])
                 sk = self.skin
@@ -2738,7 +3016,49 @@ class StdScene:
 
     # --- cursor -----------------------------------------------------------------------
 
+    def _in_break(self, t: float) -> bool:
+        return any(b0 <= t <= b1 for b0, b1 in self._breaks)
+
+    def _bm_factor(self, t: float) -> float:
+        """OsuModBloom cursor-scale multiplier at t (=1 with no BM / in a
+        break)."""
+        if self.bloom_mod is None or self._in_break(t):
+            return 1.0
+        return _sm.combo_value_at(self._bm_timeline, t,
+                                  _sm.BLOOM_TRANSITION_MS, 1.0)
+
+    def _ns_factor(self, t: float) -> float:
+        """OsuModNoScope cursor-alpha multiplier at t (=1 with no NS, or during
+        a break / a spinner period)."""
+        if self.no_scope is None:
+            return 1.0
+        if self._in_break(t) or any(s0 <= t <= s1 for s0, s1 in self._ns_spinner):
+            return 1.0
+        initial = _sm.no_scope_alpha(0, self.no_scope.hidden_combo_count)
+        return _sm.combo_value_at(self._ns_timeline, t,
+                                  _sm.NO_SCOPE_TRANSITION_MS, initial)
+
     def _cursor_sprites(self, t: float) -> list[Sprite]:
+        sprites = self._base_cursor_sprites(t)
+        # BM (bloom): scale the cursor about its screen centre; NS (no scope):
+        # fade it. Both are cursor-only, so they wrap the base cursor sprites.
+        scale = self._bm_factor(t)
+        alpha = self._ns_factor(t)
+        if scale == 1.0 and alpha == 1.0:
+            return sprites
+        cx_osu, cy_osu, _ = cursor_at(self.frames, t)
+        px, py = self.cam.to_screen(cx_osu, cy_osu)
+        out: list[Sprite] = []
+        for sp in sprites:
+            col = sp.color
+            if alpha != 1.0:
+                col = (col[0], col[1], col[2], col[3] * alpha)
+            out.append(replace(sp, x=px + (sp.x - px) * scale,
+                               y=py + (sp.y - py) * scale,
+                               w=sp.w * scale, h=sp.h * scale, color=col))
+        return out
+
+    def _base_cursor_sprites(self, t: float) -> list[Sprite]:
         if self.use_skin_cursor:
             return self._skin_cursor_sprites(t)
         if self.skin is None:            # Argon league (ArgonCursor + trail)
