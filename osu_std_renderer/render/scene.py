@@ -1177,9 +1177,11 @@ class StdScene:
                 px, py = o.get_stacked_start_position(self.diff)
                 sx, sy = camera.to_screen(px, py)
                 was_hit = str(ev.kind).lower().find("miss") < 0
-                col = self._color(o)
-                if was_hit:              # BubbleDrawable colourBox.Darken(0.1)
-                    col = tuple(c * 0.9 for c in col)
+                # BubbleDrawable.PrepareForUse: a hit bubble is the accent
+                # colour darkened 0.1 (Colour White * colourBox.Darken); a miss
+                # is Colour4.Black (barely visible), matching lazer.
+                col = (tuple(c * 0.9 for c in self._color(o)) if was_hit
+                       else (0.0, 0.0, 0.0))
                 self._bu_events.append(
                     (ev.time_ms, sx, sy, col, was_hit,
                      _sm.bubble_max_size(ev.combo_after)))
