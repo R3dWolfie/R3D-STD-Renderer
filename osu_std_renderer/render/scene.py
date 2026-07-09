@@ -246,9 +246,73 @@ MIDDLE_RED = (1.0, 0.0, 0.0)   # spinner-middle fade target (white→red)
 WARN_SPRITE_OSU = 160.0        # arrow-warning canvas edge in osu!px (≈240 px
                                # at 720p → the ~96 px white diamond danser draws)
 
+# --- Argon league (skinless) gameplay constants -------------------------------
+# All applied ONLY when self.skin is None (the "Argon league"). ppy/osu master
+# (MIT) Argon* ruleset pieces; the custom-skin path is byte-for-byte unchanged.
+ARGON_OUTER_GRAD_R = 50.0 / 58.0      # ArgonSliderBody path radius / OBJECT_RADIUS
+ARGON_BALL_DIAM_FRAC = 50.0 / 58.0    # ArgonSliderBall dia / OBJECT_DIMENSIONS
+ARGON_GRAD_FRAC = 10.0 / 58.0         # GRADIENT_THICKNESS / OBJECT_RADIUS
+ARGON_SLIDER_BORDER_WIDTH = 1.815     # border_portion(1.815)=0.2 → GRADIENT_THICKNESS
+ARGON_SLIDER_BODY_ALPHA = 0.98        # ArgonSliderBody BodyAlpha (non-pro)
+ARGON_FOLLOW_AREA = 2.4               # DrawableSliderBall.FOLLOW_AREA
+ARGON_TICK_FRAC = 12.0 / 118.0        # ArgonSliderScorePoint SIZE / OBJECT_DIMENSIONS
+ARGON_SPIN_GLOW = (0xFC / 255.0, 0x61 / 255.0, 0x8F / 255.0)   # spinner fill glow
+ARGON_CURSOR_TRAIL = (1.0, 0.55, 0.72)     # trail tint (ArgonCursor palette)
+ARGON_CURSOR_CGLOW = (171 / 255.0, 1.0, 1.0)   # centre EdgeEffect (cyan)
+# ArgonJudgementPiece: OsuColour.ForHitResult + uppercase result text
+ARGON_JUDGE_TEXT = {
+    JudgmentKind.HIT300: "GREAT",
+    JudgmentKind.HIT100: "OK",
+    JudgmentKind.HIT50: "MEH",
+    JudgmentKind.MISS: "MISS",
+}
+ARGON_JUDGE_COLOR = {                             # OsuColour hex → linear-ish rgb
+    JudgmentKind.HIT300: (0x66 / 255.0, 0xCC / 255.0, 0xFF / 255.0),   # Blue
+    JudgmentKind.HIT100: (0x88 / 255.0, 0xB3 / 255.0, 0x00 / 255.0),   # Green
+    JudgmentKind.HIT50: (0xFF / 255.0, 0xCC / 255.0, 0x22 / 255.0),    # Yellow
+    JudgmentKind.MISS: (0xED / 255.0, 0x11 / 255.0, 0x21 / 255.0),     # Red
+}
+ARGON_JUDGE_FONT_OSU = 25.0     # OsuSpriteText size 20 (a touch up for legibility)
+ARGON_JUDGE_SPACING_OSU = 7.0   # Spacing (5,0) at size 20 → ~0.27 of the font
+ARGON_JUDGE_LIFE_MS = 800.0     # FadeOutFromOne(800)
+
 
 def _clamp01(v: float) -> float:
     return 0.0 if v < 0.0 else (1.0 if v > 1.0 else v)
+
+
+# --- easing (pure; ArgonJudgementPiece transforms) ----------------------------
+
+def _ease_out_quint(p: float) -> float:
+    return 1.0 - (1.0 - _clamp01(p)) ** 5
+
+
+def _ease_in_quint(p: float) -> float:
+    return _clamp01(p) ** 5
+
+
+def _ease_in_quad(p: float) -> float:
+    return _clamp01(p) ** 2
+
+
+def argon_judgment_transform(kind, age_ms: float):
+    """ArgonJudgementPiece.PlayAnimation → (alpha, scale, dy_osu, rot_rad) or
+    None once expired. Hits: whole piece FadeOutFromOne(800) × text
+    FadeInFromZero(300, OutQuint), text ScaleTo 1→1.2 over 1800 (OutQuint).
+    Miss: FadeOutFromOne(800), ScaleTo 1.6→1 over 100 (In), MoveToOffset
+    (0,100) over 800 (InQuint), RotateTo 40° over 800 (InQuint)."""
+    if age_ms < 0.0 or age_ms >= ARGON_JUDGE_LIFE_MS:
+        return None
+    life = ARGON_JUDGE_LIFE_MS
+    if kind is JudgmentKind.MISS:
+        alpha = 1.0 - age_ms / life
+        scale = (1.6 + (1.0 - 1.6) * _ease_in_quad(age_ms / 100.0)
+                 if age_ms < 100.0 else 1.0)
+        pm = _ease_in_quint(age_ms / life)
+        return alpha, scale, 100.0 * pm, math.radians(40.0) * pm
+    alpha = (1.0 - age_ms / life) * _ease_out_quint(min(age_ms, 300.0) / 300.0)
+    scale = 1.0 + 0.2 * _ease_out_quint(min(age_ms, 1800.0) / 1800.0)
+    return alpha, scale, 0.0, 0.0
 
 
 # --- lifecycle math (pure; unit-tested) ---------------------------------------
@@ -1083,6 +1147,8 @@ class StdScene:
         sliderendcircle(+overlays) via GetMostSpecific. A skin-blanked
         element (fully transparent) draws nothing."""
         sk = self.skin
+        if sk is None:                    # Argon league (ArgonMainCirclePiece)
+            return self._argon_circle_sprites(x, y, color, alpha, scale)
         if sk is not None:
             circle_el, overlay_el = sk.circle_elements(role)
             if circle_el is not None:
@@ -1102,6 +1168,17 @@ class StdScene:
         return [
             Sprite(x, y, d, d, "disc", (*color, alpha)),
             Sprite(x, y, d, d, "ring", (1.0, 1.0, 1.0, alpha)),
+        ]
+
+    def _argon_circle_sprites(self, x: float, y: float, color, alpha: float,
+                              scale: float = 1.0) -> list[Sprite]:
+        """ArgonMainCirclePiece (skinless): the layered accent disc
+        (bake_argon_circle: outer/inner gradient + dark fills, combo-tinted)
+        under the bold white RingPiece border (bake_argon_border, untinted)."""
+        d = 2.0 * self.radius_px * scale
+        return [
+            Sprite(x, y, d, d, "argon_circle", (*color, alpha)),
+            Sprite(x, y, d, d, "argon_border", (1.0, 1.0, 1.0, alpha)),
         ]
 
     def _number_sprites(self, x: float, y: float, number: int,
@@ -1181,6 +1258,10 @@ class StdScene:
                     approach_out.append(Sprite(
                         x, y, aw * k * a_scale, ah * k * a_scale,
                         "sk_approachcircle", (*color, a_alpha)))
+                elif sk is None:               # Argon league approach ring
+                    ad = 2.0 * self.radius_px * a_scale
+                    approach_out.append(Sprite(x, y, ad, ad, "argon_approach",
+                                               (*color, a_alpha)))
                 else:
                     ad = 2.0 * self.radius_px * a_scale
                     approach_out.append(Sprite(x, y, ad, ad, "approach",
@@ -1208,15 +1289,22 @@ class StdScene:
         tip = None
         if b_alpha > 0.0 and pts:
             if not self.slider_merge:      # merged bodies drew already
-                body_base = (self.track_override
-                             if self.track_override is not None
-                             else color)   # skin.ini SliderTrackOverride
-                body = self.bodies.build_body(
-                    pts, self.radius_px,
-                    BodyStyle(body_color=body_base,
-                              border_color=self.border_color),
-                    snake=(snake_a, snake))
-                self.bodies.draw_body(body, self.spr.fbo, alpha=b_alpha)
+                if self.skin is None:      # Argon league (ArgonSliderBody)
+                    body = self.bodies.build_body(
+                        pts, ARGON_OUTER_GRAD_R * self.radius_px,
+                        self._argon_body_style(color, b_alpha),
+                        snake=(snake_a, snake))
+                    self.bodies.draw_body(body, self.spr.fbo, alpha=1.0)
+                else:
+                    body_base = (self.track_override
+                                 if self.track_override is not None
+                                 else color)   # skin.ini SliderTrackOverride
+                    body = self.bodies.build_body(
+                        pts, self.radius_px,
+                        BodyStyle(body_color=body_base,
+                                  border_color=self.border_color),
+                        snake=(snake_a, snake))
+                    self.bodies.draw_body(body, self.spr.fbo, alpha=b_alpha)
             # ticks of the ACTIVE span: above the body, under the circles
             sprites.extend(self._tick_sprites(t, ticks, obj, spawn, fade_in,
                                               snake_a, snake))
@@ -1245,23 +1333,27 @@ class StdScene:
             bx, by = self.cam.to_screen(
                 *obj.get_stacked_position_at(t, self.diff))
             sk = self.skin
-            if tracked and sk is not None and sk.has("sliderfollowcircle"):
-                # follow circle at 2.4× the circle diameter while tracking
-                fw, fh = sk.size["sliderfollowcircle"]
-                m = FOLLOW_CIRCLE_SCALE * 2.0 * self.radius_px / max(fw, fh)
-                sprites.append(Sprite(bx, by, fw * m, fh * m,
-                                      "sk_sliderfollowcircle",
-                                      (1.0, 1.0, 1.0, 1.0)))
-            if sk is not None and sk.has("sliderb"):
-                bw, bh = sk.size["sliderb"]
-                k = self.circle_k
-                sprites.append(Sprite(bx, by, bw * k, bh * k,
-                                      sk.frame_key("sliderb", t),
-                                      (*self._ball_tint(color), ball_alpha)))
+            if sk is None:                 # Argon league ball + follow circle
+                sprites.extend(self._argon_ball_sprites(bx, by, color,
+                                                        ball_alpha, tracked))
             else:
-                d = 2.0 * self.radius_px
-                sprites.append(Sprite(bx, by, d, d, "disc",
-                                      (*color, ball_alpha)))
+                if tracked and sk.has("sliderfollowcircle"):
+                    # follow circle at 2.4× the circle diameter while tracking
+                    fw, fh = sk.size["sliderfollowcircle"]
+                    m = FOLLOW_CIRCLE_SCALE * 2.0 * self.radius_px / max(fw, fh)
+                    sprites.append(Sprite(bx, by, fw * m, fh * m,
+                                          "sk_sliderfollowcircle",
+                                          (1.0, 1.0, 1.0, 1.0)))
+                if sk.has("sliderb"):
+                    bw, bh = sk.size["sliderb"]
+                    k = self.circle_k
+                    sprites.append(Sprite(bx, by, bw * k, bh * k,
+                                          sk.frame_key("sliderb", t),
+                                          (*self._ball_tint(color), ball_alpha)))
+                else:
+                    d = 2.0 * self.radius_px
+                    sprites.append(Sprite(bx, by, d, d, "disc",
+                                          (*color, ball_alpha)))
         # head circle (+ its approach ring) on top of body/ball
         sprites.extend(self._head_sprites(
             obj, t, obj.get_stacked_start_position(self.diff), approach_out,
@@ -1272,6 +1364,32 @@ class StdScene:
                                                fade_in, pts, snake, None))
         if sprites:
             self.spr.draw(sprites)
+
+    def _argon_body_style(self, color, b_alpha: float) -> BodyStyle:
+        """ArgonSliderBody (skinless): accent border, interior = accent
+        .Darken(4) (=×0.2 via shade2 offset −4), border width tuned so the
+        border portion == GRADIENT_THICKNESS on the 0.862·R path radius."""
+        return BodyStyle(body_color=color, border_color=color,
+                         inner_offset=-4.0, outer_offset=-4.0,
+                         inner_alpha=1.0, outer_alpha=1.0,
+                         border_width=ARGON_SLIDER_BORDER_WIDTH,
+                         alpha=b_alpha * ARGON_SLIDER_BODY_ALPHA)
+
+    def _argon_ball_sprites(self, bx: float, by: float, color, ball_alpha,
+                            tracked: bool) -> list[Sprite]:
+        """ArgonSliderBall (accent gradient fill + dark '>' + white ring) with
+        the additive ArgonFollowCircle while tracking."""
+        out: list[Sprite] = []
+        ball_d = ARGON_BALL_DIAM_FRAC * 2.0 * self.radius_px
+        if tracked:
+            fd = ARGON_FOLLOW_AREA * ball_d
+            out.append(Sprite(bx, by, fd, fd, "argon_follow",
+                              (*color, 0.9), additive=True))
+        out.append(Sprite(bx, by, ball_d, ball_d, "argon_ball",
+                          (*color, ball_alpha)))
+        out.append(Sprite(bx, by, ball_d, ball_d, "argon_ball_ring",
+                          (1.0, 1.0, 1.0, ball_alpha)))
+        return out
 
     def _tick_sprites(self, t: float, ticks, obj, spawn: float,
                       fade_in: float, snake_a: float,
@@ -1289,6 +1407,8 @@ class StdScene:
         use_skin = sk is not None and sk.has("sliderscorepoint")
         if use_skin and "sliderscorepoint" in sk.empty:
             return []          # skin explicitly blanks ticks
+        argon = sk is None     # Argon league (ArgonSliderScorePoint)
+        tint = self._color(obj) if argon else (1.0, 1.0, 1.0)
         out: list[Sprite] = []
         k = self.circle_k
         for tm, sx, sy, span_start, hit in ticks:
@@ -1305,6 +1425,10 @@ class StdScene:
                 out.append(Sprite(sx, sy, w * k * scale, h * k * scale,
                                   "sk_sliderscorepoint",
                                   (1.0, 1.0, 1.0, alpha)))
+            elif argon:
+                d = ARGON_TICK_FRAC * 2.0 * self.radius_px * scale
+                out.append(Sprite(sx, sy, d, d, "argon_tick",
+                                  (*tint, alpha)))
             else:
                 d = TICK_LOGICAL_PX * k * scale
                 out.append(Sprite(sx, sy, d, d, "dot",
@@ -1346,6 +1470,11 @@ class StdScene:
                 w, h = sk.size["reversearrow"]
                 out.append(Sprite(sx, sy, w * k * scale, h * k * scale,
                                   "sk_reversearrow", (1.0, 1.0, 1.0, alpha),
+                                  rotation=rot + p_rot))
+            elif sk is None:               # Argon league (pill + '>>' chevron)
+                d = 2.0 * self.radius_px * scale
+                out.append(Sprite(sx, sy, d, d, "argon_reverse",
+                                  (1.0, 1.0, 1.0, alpha),
                                   rotation=rot + p_rot))
             else:
                 d = 2.0 * self.radius_px * scale
@@ -1428,8 +1557,9 @@ class StdScene:
         else:
             if prog > 0.0:
                 d = osu(PROC_SPINNER_GLOW_OSU)
+                gcol = ARGON_SPIN_GLOW if self.skin is None else GLOW_BLUE
                 self.spr.draw([Sprite(cx, cy, d, d, "glow",
-                                      (*GLOW_BLUE,
+                                      (*gcol,
                                        0.85 * min(prog, 1.0) * alpha),
                                       additive=True)])
             self._procedural_spinner_sprites(sprites, cx, cy, rot, alpha)
@@ -1493,6 +1623,9 @@ class StdScene:
         """The Argon-ish fallback: outer ring + dark hub + an orbiting
         marker pair riding the accumulated rotation (progress lives in the
         glow behind and the RPM readout below)."""
+        if self.skin is None:             # Argon league (ArgonSpinnerDisc)
+            self._argon_spinner_sprites(out, cx, cy, rot, alpha)
+            return
         osu = self.cam.len_to_screen
         ring_d = osu(PROC_SPINNER_RING_OSU)
         out.append(Sprite(cx, cy, ring_d, ring_d, "approach",
@@ -1511,6 +1644,28 @@ class StdScene:
         d2 = d * 0.7
         out.append(Sprite(ox, oy, d2, d2, "dot",
                           (1.0, 1.0, 1.0, 0.45 * alpha)))
+
+    def _argon_spinner_sprites(self, out: list[Sprite], cx: float, cy: float,
+                               rot: float, alpha: float) -> None:
+        """ArgonSpinnerDisc (skinless): white outer ring (ArgonSpinnerRingArc),
+        25 orbiting rounded ticks (ArgonSpinnerTicks) riding the rotation, and
+        the centre double-ring. The pink fill glow is drawn behind by
+        _draw_spinner (progress-scaled)."""
+        osu = self.cam.len_to_screen
+        ring_d = osu(PROC_SPINNER_RING_OSU)
+        out.append(Sprite(cx, cy, ring_d, ring_d, "argon_spin_ring",
+                          (1.0, 1.0, 1.0, 0.9 * alpha)))
+        tick_r = ring_d * 0.5 * 0.75            # ticks at 0.75 of the radius
+        tw, th = osu(34.0), osu(9.0)            # 30×5 rounded bar (readable)
+        for i in range(25):
+            a = rot + i / 25.0 * 2.0 * math.pi
+            tx = cx + tick_r * math.cos(a)
+            ty = cy + tick_r * math.sin(a)
+            out.append(Sprite(tx, ty, tw, th, "pill",
+                              (1.0, 1.0, 1.0, 0.55 * alpha), rotation=a))
+        cd = osu(PROC_SPINNER_HUB_OSU)          # centre double-ring
+        out.append(Sprite(cx, cy, cd, cd, "argon_spin_center",
+                          (1.0, 1.0, 1.0, alpha)))
 
     def _spinner_overlay_sprites(self, out: list[Sprite], t: float, track,
                                  start: float, end: float, cx: float,
@@ -1647,6 +1802,20 @@ class StdScene:
         out: list[Sprite] = []
         keep: list = []
         for ev in self._popup_active:
+            if self.skin is None:        # Argon league (ArgonJudgementPiece)
+                res = argon_judgment_transform(ev.kind, t - ev.time_ms)
+                if res is None:
+                    if t < ev.time_ms:
+                        keep.append(ev)
+                    continue
+                keep.append(ev)
+                a2, sc2, dy_osu, rot2 = res
+                x, y = self.cam.to_screen(ev.x, ev.y)
+                dyp = self.cam.len_to_screen(dy_osu)
+                self._argon_judgment_run(out, ARGON_JUDGE_TEXT[ev.kind],
+                                         x, y + dyp, sc2,
+                                         ARGON_JUDGE_COLOR[ev.kind], a2, rot2)
+                continue
             asa = popup_alpha_scale(t, ev.time_ms)
             if asa is None:
                 if t >= ev.time_ms:      # expired
@@ -1689,6 +1858,27 @@ class StdScene:
                                   (*color, alpha)))
         self._popup_active = keep
         return out
+
+    def _argon_judgment_run(self, out: list[Sprite], text: str, cx: float,
+                            cy: float, scale: float, color, alpha: float,
+                            rot: float) -> None:
+        """ArgonJudgementPiece text: uppercase result, additive, Spacing (5,0),
+        drawn centred at the object with the group rotated rigidly about it (so
+        the MISS down-drift rotation reads like lazer)."""
+        if alpha <= 0.0:
+            return
+        h = self.cam.len_to_screen(ARGON_JUDGE_FONT_OSU) * scale
+        spacing = self.cam.len_to_screen(ARGON_JUDGE_SPACING_OSU) * scale
+        widths = [self.bank.glyph_aspect.get(ch, 0.6) * h for ch in text]
+        total = sum(widths) + spacing * max(len(text) - 1, 0)
+        cosr, sinr = math.cos(rot), math.sin(rot)
+        gx = -total / 2.0
+        for ch, wq in zip(text, widths):
+            ox = gx + wq / 2.0
+            out.append(Sprite(cx + ox * cosr, cy + ox * sinr, wq, h,
+                              f"glyph_{ch}", (*color, alpha),
+                              rotation=rot, additive=True))
+            gx += wq + spacing
 
     # --- follow points -----------------------------------------------------------------
 
@@ -1737,6 +1927,8 @@ class StdScene:
     def _cursor_sprites(self, t: float) -> list[Sprite]:
         if self.use_skin_cursor:
             return self._skin_cursor_sprites(t)
+        if self.skin is None:            # Argon league (ArgonCursor + trail)
+            return self._argon_cursor_sprites(t)
         # §4.8 rainbow: hue-cycle the accent (glow/ring/trail tint)
         accent = (rainbow_rgb(t) if self.cursor_rainbow
                   else CURSOR_GLOW_COLOR)
@@ -1755,6 +1947,29 @@ class StdScene:
         out.append(Sprite(sx, sy, core, core, "ring", (*accent, 0.9)))
         out.append(Sprite(sx, sy, d_glow * 1.6, d_glow * 1.6, "glow",
                           (*accent, 0.5), additive=True))
+        return out
+
+    def _argon_cursor_sprites(self, t: float) -> list[Sprite]:
+        """ArgonCursor (skinless): the pink→dark-red ring body + white centre
+        dot with the cyan EdgeEffect glow, and the additive ArgonCursorTrail
+        (FadeExponent 4). Rainbow hue-cycles the ring tint when enabled."""
+        out: list[Sprite] = []
+        d = 2.0 * self.cam.len_to_screen(CURSOR_RADIUS_OSU) * self.cursor_scale
+        tint = rainbow_rgb(t) if self.cursor_rainbow else (1.0, 1.0, 1.0)
+        for ti, k in trail_times(t):
+            x, y, _ = cursor_at(self.frames, ti)
+            sx, sy = self.cam.to_screen(x, y)
+            s = d * (0.5 + 0.4 * k) * self.trail_scale
+            out.append(Sprite(sx, sy, s, s, "glow",
+                              (*ARGON_CURSOR_TRAIL, 0.30 * k * k),
+                              additive=True))
+        x, y, _ = cursor_at(self.frames, t)
+        sx, sy = self.cam.to_screen(x, y)
+        out.append(Sprite(sx, sy, d * 1.5, d * 1.5, "glow",
+                          (*ARGON_CURSOR_CGLOW, 0.45), additive=True))
+        out.append(Sprite(sx, sy, d, d, "argon_cursor", (*tint, 1.0)))
+        dot = d * 0.22
+        out.append(Sprite(sx, sy, dot, dot, "disc", (1.0, 1.0, 1.0, 1.0)))
         return out
 
     def _skin_cursor_sprites(self, t: float) -> list[Sprite]:

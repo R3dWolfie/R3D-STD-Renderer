@@ -555,6 +555,235 @@ def bake_logo_tile(size: int = 256) -> np.ndarray:
     return np.asarray(img, dtype=np.uint8).copy()
 
 
+# ============================================================================
+# Argon GAMEPLAY bakes — the skinless "Argon league" pieces.
+#
+# Procedural port of ppy/osu master (MIT) osu.Game.Rulesets.Osu/Skinning/Argon/
+# (ZERO ppy asset files; fonts stay DejaVu — Torus is non-commercial). These
+# textures are drawn ONLY when NO custom skin is attached
+# (scene.StdScene.skin is None → the "Argon league"). The classic procedural
+# set above is left byte-for-byte for the custom-skin per-element fallback, so
+# custom-skin renders are pixel-identical (league integrity).
+#
+# Geometry from ArgonMainCirclePiece.cs, as fractions of the object RADIUS R
+# (lazer OBJECT_RADIUS=59, OBJECT_DIMENSIONS=118, BORDER_THICKNESS=D*2/58):
+#   BORDER_THICKNESS   = 4/58 R  = 0.068966 R   (white RingPiece, at the rim)
+#   GRADIENT_THICKNESS = 10/58 R = 0.172414 R   (slider/ball band thickness)
+#   OUTER_GRADIENT r   = 50/58 R = 0.862069 R   (bright saturated band edge)
+#   INNER_GRADIENT r   = 40/58 R = 0.689655 R
+#   INNER_FILL r       = 30/58 R = 0.517241 R   (dark centre)
+# osu!framework Color4.Darken(a) = channel/(1+a):
+#   Darken(4)=0.20 (fills), Darken(0.5)=0.6667 / Darken(0.6)=0.625 (inner
+#   gradient), Darken(0.1)=0.9091 (outer gradient bottom).  All Argon bakes
+#   are grayscale so the combo-accent multiply (gl.py u_color) colours them;
+#   the WHITE pieces (borders) are separate sprites so they stay white.
+ARGON_BORDER_FRAC = 4.0 / 58.0     # 0.068966 R — the white circle border
+ARGON_OUTER_GRAD_R = 50.0 / 58.0   # 0.862069 R
+ARGON_INNER_GRAD_R = 40.0 / 58.0   # 0.689655 R
+ARGON_INNER_FILL_R = 30.0 / 58.0   # 0.517241 R
+ARGON_GRAD_FRAC = 10.0 / 58.0      # 0.172414 R — GRADIENT_THICKNESS
+ARGON_BALL_BORDER_FRAC = 0.20      # GRADIENT_THICKNESS / (OUTER_GRADIENT/2)
+ARGON_CIRCLE_SIZE = 320
+ARGON_BALL_SIZE = 256
+
+# ArgonCursor.cs palette (fixed — not combo-tinted):
+ARGON_CURSOR_PINK = (0xFC, 0x61, 0x8F)
+ARGON_CURSOR_DARKRED = (0xBB, 0x1A, 0x41)
+ARGON_CURSOR_CGLOW = (171, 255, 255)   # centre EdgeEffect glow (cyan)
+
+
+def _ss_inside(d: np.ndarray, edge_r: float, R: float) -> np.ndarray:
+    """1 inside radius edge_r*R, smooth 1→0 across the AA band at the edge."""
+    return np.clip((edge_r * R - d) / _AA_PX, 0.0, 1.0)
+
+
+def _grey_rgba(val: np.ndarray, alpha: np.ndarray) -> np.ndarray:
+    grey = np.round(np.clip(val, 0.0, 1.0) * 255.0).astype(np.uint8)
+    rgba = np.empty(val.shape + (4,), dtype=np.uint8)
+    rgba[..., 0] = grey
+    rgba[..., 1] = grey
+    rgba[..., 2] = grey
+    rgba[..., 3] = np.round(np.clip(alpha, 0.0, 1.0) * 255.0).astype(np.uint8)
+    return rgba
+
+
+def bake_argon_circle(size: int = ARGON_CIRCLE_SIZE) -> np.ndarray:
+    """ArgonMainCirclePiece's fill stack (outerFill/outerGradient/
+    innerGradient/innerFill) as ONE grayscale disc — the radial bands with
+    lazer's vertical gradient baked in, tinted by the combo accent at draw.
+    The white RingPiece border is bake_argon_border (drawn on top)."""
+    d = _dist_grid(size)
+    R = size / 2.0 - 2.0
+    yn = np.mgrid[0:size, 0:size][0].astype(np.float64) / (size - 1)
+    inner_fill = 0.20                                   # Darken(4)
+    inner_grad = 0.6667 + (0.625 - 0.6667) * yn         # Darken(0.5→0.6)
+    outer_grad = 1.0 + (0.90909 - 1.0) * yn             # 1.0→Darken(0.1)
+    outer_fill = 0.20                                   # Darken(4)
+    w_out = _ss_inside(d, ARGON_OUTER_GRAD_R, R)
+    w_in = _ss_inside(d, ARGON_INNER_GRAD_R, R)
+    w_fl = _ss_inside(d, ARGON_INNER_FILL_R, R)
+    val = np.full_like(d, outer_fill)
+    val = val * (1.0 - w_out) + outer_grad * w_out
+    val = val * (1.0 - w_in) + inner_grad * w_in
+    val = val * (1.0 - w_fl) + inner_fill * w_fl
+    alpha = np.clip((R - d) / _AA_PX, 0.0, 1.0)
+    return _grey_rgba(val, alpha)
+
+
+def bake_argon_border(size: int = ARGON_CIRCLE_SIZE,
+                      thickness_frac: float = ARGON_BORDER_FRAC) -> np.ndarray:
+    """The white RingPiece(BORDER_THICKNESS): a bright thin ring at the rim
+    (drawn untinted over the accent disc)."""
+    return bake_ring(size, thickness_frac)
+
+
+def bake_argon_approach(size: int = APPROACH_SIZE,
+                        thickness_frac: float = 0.06) -> np.ndarray:
+    """Argon approach circle — the default thin combo-tinted ring (Argon
+    ships no bespoke approach texture; the base DrawableHitCircle ring)."""
+    return bake_ring(size, thickness_frac)
+
+
+def _chevron_mask(size: int, hw: float, hh: float, thick: float,
+                  n: int = 1, gap: float = 0.0) -> np.ndarray:
+    """Right-pointing '>' (n=1) or '>>' (n=2) chevron mask in [0,1]."""
+    s4 = 4
+    img = Image.new("L", (size * s4, size * s4), 0)
+    drw = ImageDraw.Draw(img)
+    cx, cy = size * s4 / 2.0, size * s4 / 2.0
+    for i in range(n):
+        ox = (i - (n - 1) / 2.0) * gap * size * s4
+        drw.line([(cx + ox - hw * size * s4, cy - hh * size * s4),
+                  (cx + ox + hw * size * s4, cy),
+                  (cx + ox - hw * size * s4, cy + hh * size * s4)],
+                 fill=255, width=int(thick * size * s4), joint="curve")
+    img = img.resize((size, size), Image.LANCZOS)
+    return np.asarray(img, dtype=np.float64) / 255.0
+
+
+def bake_argon_ball(size: int = ARGON_BALL_SIZE) -> np.ndarray:
+    """ArgonSliderBall fill: a vertical accent gradient (accent→Darken(0.5))
+    with the dark AngleRight '>' icon (accent.Darken(4)) baked in. Grayscale
+    → tinted by the combo accent. The white ball border is bake_argon_ball_ring."""
+    d = _dist_grid(size)
+    R = size / 2.0 - 2.0
+    yn = np.mgrid[0:size, 0:size][0].astype(np.float64) / (size - 1)
+    val = 1.0 + (0.6667 - 1.0) * yn                     # accent→Darken(0.5)
+    chev = _chevron_mask(size, hw=0.14, hh=0.20, thick=0.055)
+    val = val * (1.0 - chev) + 0.20 * chev              # dark '>' (Darken 4)
+    alpha = np.clip((R - d) / _AA_PX, 0.0, 1.0)
+    return _grey_rgba(val, alpha)
+
+
+def bake_argon_ball_ring(size: int = ARGON_BALL_SIZE) -> np.ndarray:
+    """The ArgonSliderBall white border (BorderThickness=GRADIENT_THICKNESS
+    → 0.2 of the ball radius)."""
+    return bake_ring(size, ARGON_BALL_BORDER_FRAC)
+
+
+def bake_argon_follow(size: int = 256, thickness_frac: float = 0.04,
+                      fill: float = 0.30) -> np.ndarray:
+    """ArgonFollowCircle: additive accent ring (border) + faint accent fill
+    (Alpha 0.3). Grayscale (ring=1, interior=fill); tinted accent + drawn
+    additive by the scene."""
+    d = _dist_grid(size)
+    R = size / 2.0 - 2.0
+    outer = np.clip((R - d) / _AA_PX, 0.0, 1.0)
+    inner_edge = R * (1.0 - thickness_frac)
+    ring = outer * np.clip((d - inner_edge) / _AA_PX, 0.0, 1.0)
+    val = np.maximum(ring, fill * outer)
+    return _grey_rgba(val, outer)
+
+
+def bake_argon_tick(size: int = 96,
+                    thickness_frac: float = 0.42) -> np.ndarray:
+    """ArgonSliderScorePoint: a hollow ring (BorderThickness 3 in Size 12 →
+    ~0.42 of the radius), border = accent. Grayscale ring, tinted accent."""
+    return bake_ring(size, thickness_frac)
+
+
+def bake_argon_reverse(size: int = 256) -> np.ndarray:
+    """ArgonReverseArrow: a white rounded pill (40×20 in the 118 object box)
+    with the dark AngleDoubleRight '>>' icon. Drawn WHITE (untinted), rotated
+    along the path tangent by the scene."""
+    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    drw = ImageDraw.Draw(img)
+    pw = 40.0 / 118.0 * size
+    ph = 20.0 / 118.0 * size
+    cx = cy = size / 2.0
+    r = ph / 2.0
+    drw.rounded_rectangle([cx - pw / 2.0, cy - ph / 2.0,
+                           cx + pw / 2.0, cy + ph / 2.0],
+                          radius=r, fill=(255, 255, 255, 255))
+    pill = np.asarray(img, dtype=np.uint8).copy()
+    # dark '>>' chevron (accent.Darken(4) ≈ near-black) baked over the pill
+    chev = _chevron_mask(size, hw=0.045, hh=0.055, thick=0.02, n=2, gap=0.07)
+    dark = np.array([36, 36, 44], dtype=np.float64)
+    out = pill.astype(np.float64)
+    for c in range(3):
+        out[..., c] = out[..., c] * (1.0 - chev) + dark[c] * chev
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
+def _over(dst_rgb, dst_a, src_rgb, src_a):
+    """Straight-alpha 'over' composite (float arrays), returns (rgb, a)."""
+    out_a = src_a + dst_a * (1.0 - src_a)
+    safe = np.where(out_a > 1e-6, out_a, 1.0)
+    out_rgb = (src_rgb * src_a[..., None]
+               + dst_rgb * dst_a[..., None] * (1.0 - src_a[..., None])) / safe[..., None]
+    return out_rgb, out_a
+
+
+def bake_argon_cursor(size: int = 192) -> np.ndarray:
+    """ArgonCursor: the pink→dark-red ring (GradientVertical FC618F→BB1A41,
+    BorderThickness 6) over a faint pink fill (FC618F.Darken(0.6), Alpha 0.4)
+    with an inner white ring (Alpha 0.8). Fixed palette (colored RGBA). The
+    white centre dot + cyan glow are drawn by the scene."""
+    d = _dist_grid(size)
+    R = size / 2.0 - 2.0
+    yn = np.mgrid[0:size, 0:size][0].astype(np.float64) / (size - 1)
+    pink = np.array(ARGON_CURSOR_PINK, dtype=np.float64) / 255.0
+    dark = np.array(ARGON_CURSOR_DARKRED, dtype=np.float64) / 255.0
+    fill_col = pink / 1.6                                # Darken(0.6)
+    rgb = np.zeros((size, size, 3), dtype=np.float64)
+    a = np.zeros((size, size), dtype=np.float64)
+    disc = np.clip((R - d) / _AA_PX, 0.0, 1.0)
+    # faint pink interior fill (bottom layer)
+    rgb, a = _over(rgb, a, np.broadcast_to(fill_col, (size, size, 3)),
+                   0.4 * disc)
+    # outer pink→dark-red ring, thickness ~0.16 R
+    ring = disc * np.clip((d - R * (1.0 - 0.16)) / _AA_PX, 0.0, 1.0)
+    grad = pink[None, None, :] * (1.0 - yn[..., None]) + dark[None, None, :] * yn[..., None]
+    rgb, a = _over(rgb, a, grad, ring)
+    # inner white ring (Alpha 0.8) around r≈0.62
+    winner = (np.clip((R * 0.66 - d) / _AA_PX, 0.0, 1.0)
+              * np.clip((d - R * 0.58) / _AA_PX, 0.0, 1.0))
+    rgb, a = _over(rgb, a, np.ones((size, size, 3)), 0.8 * winner)
+    out = np.empty((size, size, 4), dtype=np.uint8)
+    out[..., :3] = np.round(np.clip(rgb, 0, 1) * 255.0).astype(np.uint8)
+    out[..., 3] = np.round(np.clip(a, 0, 1) * 255.0).astype(np.uint8)
+    return out
+
+
+def bake_argon_spin_ring(size: int = 512,
+                         thickness_frac: float = 0.02) -> np.ndarray:
+    """ArgonSpinnerRingArc pair (top+bottom arcs) → a thin white outer ring."""
+    return bake_ring(size, thickness_frac)
+
+
+def bake_argon_spin_center(size: int = 160) -> np.ndarray:
+    """ArgonSpinnerDisc centre: RingPiece(10)@0.8 + RingPiece(3)@1.0 — a
+    thick inner ring plus a thin outer ring, white."""
+    d = _dist_grid(size)
+    R = size / 2.0 - 2.0
+    thin = (np.clip((R - d) / _AA_PX, 0.0, 1.0)
+            * np.clip((d - R * 0.94) / _AA_PX, 0.0, 1.0))
+    thick = (np.clip((R * 0.80 - d) / _AA_PX, 0.0, 1.0)
+             * np.clip((d - R * 0.60) / _AA_PX, 0.0, 1.0))
+    a = np.maximum(thin, thick)
+    return _grey_rgba(np.ones_like(d), a)
+
+
 class TextureBank:
     """Bakes the procedural set and uploads it into a SpriteRenderer.
 
@@ -619,3 +848,16 @@ class TextureBank:
                                 bake_legacy_ki((255, 80, 80)))
         renderer.upload_texture("lg_io_key", bake_legacy_io_key())
         renderer.upload_texture("lg_io_bg", bake_legacy_io_bg())
+
+        # --- Argon gameplay set (skinless "Argon league" only) ---------------
+        renderer.upload_texture("argon_circle", bake_argon_circle())
+        renderer.upload_texture("argon_border", bake_argon_border())
+        renderer.upload_texture("argon_approach", bake_argon_approach())
+        renderer.upload_texture("argon_ball", bake_argon_ball())
+        renderer.upload_texture("argon_ball_ring", bake_argon_ball_ring())
+        renderer.upload_texture("argon_follow", bake_argon_follow())
+        renderer.upload_texture("argon_tick", bake_argon_tick())
+        renderer.upload_texture("argon_reverse", bake_argon_reverse())
+        renderer.upload_texture("argon_cursor", bake_argon_cursor())
+        renderer.upload_texture("argon_spin_ring", bake_argon_spin_ring())
+        renderer.upload_texture("argon_spin_center", bake_argon_spin_center())

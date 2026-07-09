@@ -32,6 +32,8 @@ MODULES = [
     "tests.test_pp",
     "tests.test_video_bg",
     "tests.test_hud_extras",
+    # Argon league (skinless) gameplay port (2026-07)
+    "tests.test_argon",
 ]
 
 

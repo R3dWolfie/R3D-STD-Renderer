@@ -193,6 +193,14 @@ ERR_ARROW_N = 10               # moving average over the last N hits
 ERR_Y_FROM_BOTTOM = 56.0
 UR_H = 26.0
 
+# Argon league — ArgonHitErrorMeter placement: vertical bars mirrored at the
+# left+right screen edges (delta on the vertical axis, centred).
+ARGON_ERR_MARGIN = 26.0        # bar centre inset from each screen edge (UI px)
+ARGON_ERR_HALF_H = 96.0        # half the bar height (= the 50 window)
+ARGON_ERR_BAR_W = 8.0          # zone bar width
+ARGON_ERR_TICK_LEN = 22.0      # judgement-line length (horizontal)
+ARGON_ERR_TICK_TH = 3.0        # judgement-line thickness
+
 BREAK_FLASH_MS = 220.0
 BREAK_FLASH_MIN_COMBO = 10
 BREAK_FLASH_ALPHA = 0.38
@@ -1040,6 +1048,10 @@ class StdHud:
             self.legacy_health = ships("scorebar-colour", "scorebar-bg")
             self.legacy_keys = ships("inputoverlay-key",
                                      "inputoverlay-background")
+        # skinless "Argon league": the hit-error meter becomes Argon's
+        # vertical SIDE bars (ArgonHitErrorMeter, left+right, mirrored);
+        # any custom skin keeps the bottom-centre house meter unchanged.
+        self.argon_league = sk is None and not self.legacy_defaults
         # -- settings-surface data (mod pills / pp / aim / strain) --------
         self.mods = int(mods)
         self._mod_acrs = (mods_to_acronyms(self.mods)
@@ -2175,6 +2187,9 @@ class StdHud:
             return
         if t < self._first_ev_t:
             return                     # m-8: no hit-error strip pre-gameplay
+        if self.argon_league:          # Argon vertical side bars
+            self._argon_hit_error(out, t)
+            return
         k = self.k
         es = self.es
         cx = self.ui_w / 2.0
@@ -2213,6 +2228,57 @@ class StdHud:
             w = self._run_width(text, uh, mono=True)
             self._run(out, text, cx - w / 2.0,
                       cy + band_h / 2.0 + 10.0 * es, uh,
+                      (0.86, 0.90, 1.0), 0.9 * self.op, mono=True)
+
+    def _argon_hit_error(self, out: list[Sprite], t: float) -> None:
+        """ArgonHitErrorMeter placement: two vertical bars mirrored at the
+        left+right screen edges. Delta maps to the VERTICAL axis (0 centred);
+        nested 300/100/50 zones by height; a judgement line per hit fading
+        over PointFadeOutTime; the moving-average arrow points at the bar."""
+        s, d = self.s, self.data
+        k, es = self.k, self.es
+        meh = self.hw.meh
+        half_h = ARGON_ERR_HALF_H * es
+        bar_w = ARGON_ERR_BAR_W * es
+        tick_len = ARGON_ERR_TICK_LEN * es
+        tick_th = ARGON_ERR_TICK_TH * es
+        cy = UI_HEIGHT / 2.0
+        errs = list(d.errors_in_window(t))
+        ur, avg, n = d.ur_at(t)
+        for side in (-1, 1):                       # left bar, right bar
+            cx = (ARGON_ERR_MARGIN if side < 0
+                  else self.ui_w - ARGON_ERR_MARGIN)
+            for win, color, a in ((meh, BAND_50, 0.55),
+                                  (self.hw.ok, BAND_100, 0.6),
+                                  (self.hw.great, BAND_300, 0.7)):
+                bh = 2.0 * half_h * (win / meh)
+                out.append(Sprite(cx * k, cy * k, bar_w * k, bh * k,
+                                  None, (*color, a * self.op)))
+            out.append(Sprite(cx * k, cy * k, tick_len * k, tick_th * k,
+                              None, (1, 1, 1, 0.9 * self.op)))
+            for age, delta in errs:
+                fade = 1.0 - age / ERR_TICK_FADE_MS
+                if fade <= 0.0:
+                    continue
+                y = cy + max(-1.0, min(1.0, delta / meh)) * half_h
+                mag = abs(delta)
+                color = (BAND_300 if mag <= self.hw.great
+                         else BAND_100 if mag <= self.hw.ok else BAND_50)
+                out.append(Sprite(cx * k, y * k, tick_len * k, tick_th * k,
+                                  None, (*color, 0.85 * fade * self.op)))
+            if n > 0:
+                ay = cy + max(-1.0, min(1.0, avg / meh)) * half_h
+                ax = cx - side * (bar_w / 2.0 + 7.0 * es)
+                rot = -math.pi / 2.0 if side < 0 else math.pi / 2.0
+                out.append(Sprite(ax * k, ay * k, 12.0 * es * k,
+                                  14.0 * es * k, "tri_down",
+                                  (1, 1, 1, 0.9 * self.op), rotation=rot))
+        if s.show_unstable_rate and n >= 2:
+            uh = UR_H * es
+            text = f"UR {ur:.1f}"
+            w = self._run_width(text, uh, mono=True)
+            self._run(out, text, self.ui_w / 2.0 - w / 2.0,
+                      UI_HEIGHT - ERR_Y_FROM_BOTTOM, uh,
                       (0.86, 0.90, 1.0), 0.9 * self.op, mono=True)
 
     def _break_flash(self, out: list[Sprite], t: float) -> None:
