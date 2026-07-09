@@ -28,13 +28,20 @@ from osrparse import Replay
 
 from .lazer_mods import (LAZER_GAME_VERSION,
                          approach_different_from_mods,
+                         barrel_roll_from_mods,
+                         blinds_from_mods,
+                         bloom_from_mods,
+                         bubbles_from_mods,
+                         depth_from_mods,
                          difficulty_adjust_from_mods,
                          freeze_frame_from_mods,
                          mirror_from_mods,
+                         no_scope_from_mods,
                          random_from_mods,
                          rate_adjust_from_mods,
                          rate_ramp_from_mods,
                          read_lazer_mods,
+                         synesthesia_from_mods,
                          traceable_from_mods,
                          transform_from_mods)
 
@@ -201,6 +208,43 @@ class ReplayMeta:
     traceable: bool = False
     approach_scale: float | None = None
     approach_style: str = ""
+    # Screen / cursor-effect visual mods (BR/BM/SY/BL/NS/DP/BU): purely visual —
+    # the beatmap geometry, the cursor and the judgement/reconcile are UNTOUCHED
+    # (see render/screen_mods.py). Each is None/False/default for every replay
+    # that doesn't carry it, so those renders stay byte-identical.
+    #   BR (barrel_roll): the whole gameplay layer spins (spin_speed rev/min +
+    #     direction ±1). BM (bloom_*): the cursor grows with combo. SY
+    #     (synesthesia): combo colours come from each object's beat-snap. BL
+    #     (blinds): health-driven dark panels close from the screen edges. NS
+    #     (no_scope_*): the cursor fades with combo. DP (depth_*): objects
+    #     approach in 3D. BU (bubbles): expanding bubbles spawn on each hit.
+    barrel_roll: "BarrelRoll | None" = None
+    bloom: "Bloom | None" = None
+    synesthesia: bool = False
+    blinds: bool = False
+    no_scope: "NoScope | None" = None
+    depth: "Depth | None" = None
+    bubbles: bool = False
+
+    @property
+    def has_barrel_roll(self) -> bool:
+        """True when the replay carries the Barrel Roll mod (BR)."""
+        return self.barrel_roll is not None
+
+    @property
+    def has_bloom(self) -> bool:
+        """True when the replay carries the Bloom mod (BM)."""
+        return self.bloom is not None
+
+    @property
+    def has_no_scope(self) -> bool:
+        """True when the replay carries the No Scope mod (NS)."""
+        return self.no_scope is not None
+
+    @property
+    def has_depth(self) -> bool:
+        """True when the replay carries the Depth mod (DP)."""
+        return self.depth is not None
 
     @property
     def has_transform(self) -> bool:
@@ -350,6 +394,13 @@ def parse_replay(path: Path) -> tuple[list[StdFrame], ReplayMeta]:
     traceable = False
     approach_scale: float | None = None
     approach_style = ""
+    barrel_roll = None
+    bloom = None
+    synesthesia = False
+    blinds = False
+    no_scope = None
+    depth = None
+    bubbles = False
     if gv >= LAZER_GAME_VERSION:
         mlist = read_lazer_mods(path)
         if mlist is not None:
@@ -408,6 +459,18 @@ def parse_replay(path: Path) -> tuple[list[StdFrame], ReplayMeta]:
             if ad is not None:
                 approach_scale = ad.scale
                 approach_style = ad.style
+            # Screen / cursor-effect visual mods (BR/BM/SY/BL/NS/DP/BU): visual
+            # only, so no geometry/judgement change — the scene reads these to
+            # drive the playfield spin (BR), cursor scale/fade (BM/NS), combo
+            # colour (SY), screen blinds (BL), per-object depth (DP) and the
+            # hit-position bubbles (BU).
+            barrel_roll = barrel_roll_from_mods(mlist)
+            bloom = bloom_from_mods(mlist)
+            synesthesia = synesthesia_from_mods(mlist)
+            blinds = blinds_from_mods(mlist)
+            no_scope = no_scope_from_mods(mlist)
+            depth = depth_from_mods(mlist)
+            bubbles = bubbles_from_mods(mlist)
 
     meta = ReplayMeta(
         mode=int(r.mode.value if hasattr(r.mode, "value") else r.mode),
@@ -450,6 +513,13 @@ def parse_replay(path: Path) -> tuple[list[StdFrame], ReplayMeta]:
         traceable=traceable,
         approach_scale=approach_scale,
         approach_style=approach_style,
+        barrel_roll=barrel_roll,
+        bloom=bloom,
+        synesthesia=synesthesia,
+        blinds=blinds,
+        no_scope=no_scope,
+        depth=depth,
+        bubbles=bubbles,
     )
     return frames, meta
 

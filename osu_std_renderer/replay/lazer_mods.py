@@ -708,3 +708,304 @@ def read_approach_different(osr_path: Path) -> "ApproachDifferent | None":
     if not mods:
         return None
     return approach_different_from_mods(mods)
+
+
+# --- Screen / cursor-effect visual mods: BR/BM/SY/BL/NS/DP/BU ----------------
+# A batch of purely VISUAL osu!std mods that alter the SCREEN, the CURSOR or a
+# per-object DRAW transform without touching object geometry, the replay cursor
+# or the judgement — so every one is reconcile-exact (the ruleset simulates the
+# untouched beatmap + untouched replay frames). Each is cited from
+# osu.Game.Rulesets.Osu/Mods/ (BR/NS also from the osu.Game base) and ported in
+# render/screen_mods.py + the scene. Unlike the transform family these do not
+# share one hook, so each carries its own reader + settings below.
+#
+#   osu.Game.Rulesets.Osu/Mods/OsuModBarrelRoll.cs + osu.Game/Rulesets/Mods/
+#   ModBarrelRoll.cs  (acronym "BR", ModType.Fun)
+#       SpinSpeed BindableDouble(0.5){Min 0.02, Max 12, Precision 0.01} (rev/min,
+#       SettingSource "Roll speed" -> key ``spin_speed``); Direction
+#       Bindable<RotationDirection>() default Clockwise (SettingSource
+#       "Direction" -> key ``direction``; RotationDirection.Clockwise=0 /
+#       Counterclockwise=1). Update: playfield rotation (deg) = CurrentRotation =
+#       (Direction==CCW ? -1 : 1) * 360 * (time/60000 * SpinSpeed); the whole
+#       playfield container spins, the cursor + circle number are counter-rotated
+#       to stay upright. ApplyToDrawableRuleset scales the playfield by
+#       minSide/maxSide so rotated objects stay on-screen. Incompatible w/ BU.
+#
+#   osu.Game.Rulesets.Osu/Mods/OsuModBloom.cs  (acronym "BM", ModType.Fun)
+#       MaxSizeComboCount BindableInt(50){Min 5, Max 100} (SettingSource "Max
+#       size at combo" -> key ``max_size_combo_count``); MaxCursorSize
+#       BindableFloat(10){Min 5, Max 15, Precision 0.5} (SettingSource "Final
+#       size multiplier" -> key ``max_cursor_size``). currentSize = clamp(
+#       MaxCursorSize * combo/MaxSizeComboCount, MIN_SIZE=1, MaxCursorSize); the
+#       cursor's ModScaleAdjust lerps toward it over TRANSITION_DURATION=100ms
+#       (reset to 1 during breaks). Incompatible w/ FL, NS, TouchDevice.
+#
+#   osu.Game/Rulesets/Mods/ModSynesthesia.cs + osu.Game.Rulesets.Osu/Mods/
+#   OsuModSynesthesia.cs  (acronym "SY", ModType.Fun). No settings. Overrides
+#       each object's AccentColour from its beat-snap divisor at StartTime
+#       (slider tail uses its slider's end time): BindableBeatDivisor.
+#       GetColourFor(ControlPointInfo.GetClosestBeatDivisor(t)). Palette ported
+#       in render/screen_mods.py.
+#
+#   osu.Game.Rulesets.Osu/Mods/OsuModBlinds.cs  (acronym "BL",
+#   ModType.DifficultyIncrease). No settings. Two black panels close in from the
+#       left/right screen edges; the covered width is health-driven (higher HP =
+#       MORE closed) with a break/start widening. DrawableOsuBlinds constants +
+#       curve ported in render/screen_mods.py. Incompatible w/ FL.
+#
+#   osu.Game/Rulesets/Mods/ModNoScope.cs + osu.Game.Rulesets.Osu/Mods/
+#   OsuModNoScope.cs  (acronym "NS", ModType.Fun)
+#       HiddenComboCount BindableInt(10){Min 0, Max 50} (SettingSource "Hidden at
+#       combo" -> key ``hidden_combo_count``; 0 = always hidden). ComboBasedAlpha
+#       = max(MIN_ALPHA=0.0002, 1 - combo/HiddenComboCount) fades ONLY the cursor
+#       (lerp over 100ms), forced to 1 during breaks + spinners. Incompatible w/ BM.
+#
+#   osu.Game.Rulesets.Osu/Mods/OsuModDepth.cs  (acronym "DP", ModType.Fun)
+#       MaxDepth BindableFloat(100){Min 50, Max 200, Precision 10} (SettingSource
+#       "Maximum depth" -> key ``max_depth``); ShowApproachCircles
+#       BindableBool(true) (SettingSource "Show Approach Circles" -> key
+#       ``show_approach_circles``). Objects approach from far (small, offset
+#       toward the playfield-centre vanishing point) growing to real size/pos at
+#       the hit. Incompatible w/ MG/RP/FR/other visibility mods.
+#
+#   osu.Game.Rulesets.Osu/Mods/OsuModBubbles.cs  (acronym "BU", ModType.Fun). No
+#       settings. On each successful/missed hit of a circle / slider head /
+#       spinner an expanding, fading bubble spawns at the hit position, tinted by
+#       the object's combo colour; maxSize = min(1.75, 1.25 + 0.005*combo).
+#       Incompatible w/ BR/MG/RP.
+
+BARREL_ROLL_ACRONYM = "BR"
+BLOOM_ACRONYM = "BM"
+SYNESTHESIA_ACRONYM = "SY"
+BLINDS_ACRONYM = "BL"
+NO_SCOPE_ACRONYM = "NS"
+DEPTH_ACRONYM = "DP"
+BUBBLES_ACRONYM = "BU"
+
+
+# --- BR: Barrel Roll ---------------------------------------------------------
+_BR_SPEED_KEY = "spin_speed"
+_BR_DIRECTION_KEY = "direction"
+BARREL_ROLL_SPEED_DEFAULT = 0.5             # BindableDouble(0.5) rev/min
+BARREL_ROLL_SPEED_RANGE = (0.02, 12.0)      # {Min 0.02, Max 12}
+_BR_DIR_CCW = 1                             # RotationDirection.Counterclockwise
+
+
+@dataclass(frozen=True)
+class BarrelRoll:
+    """The BR config read from a .osr. ``spin_speed`` is rev/min (clamped to
+    [0.02, 12]; default 0.5). ``direction`` is +1 for Clockwise (the enum
+    default) or -1 for Counterclockwise — the sign of CurrentRotation in
+    ModBarrelRoll.Update."""
+    spin_speed: float = BARREL_ROLL_SPEED_DEFAULT
+    direction: int = 1     # +1 clockwise, -1 counterclockwise
+
+
+def barrel_roll_from_mods(mods: list[dict]) -> "BarrelRoll | None":
+    """The BR config (spin_speed + direction) from an already-parsed
+    :func:`read_lazer_mods` list, or None when no BR mod is present.
+    ``spin_speed`` is clamped to the SettingSource range; an absent/non-numeric
+    value falls back to the default (0.5). ``direction`` reads the
+    RotationDirection enum (0/"clockwise" -> +1, 1/"counterclockwise" -> -1)."""
+    for m in mods:
+        if isinstance(m, dict) and str(m.get("acronym", "")).upper() == BARREL_ROLL_ACRONYM:
+            s = m.get("settings") or {}
+            raw = _da_num(s, _BR_SPEED_KEY)
+            if raw is None:
+                spin = BARREL_ROLL_SPEED_DEFAULT
+            else:
+                lo, hi = BARREL_ROLL_SPEED_RANGE
+                spin = min(hi, max(lo, raw))
+            dv = s.get(_BR_DIRECTION_KEY)
+            direction = 1
+            if isinstance(dv, bool):
+                direction = 1
+            elif isinstance(dv, (int, float)):
+                direction = -1 if int(dv) == _BR_DIR_CCW else 1
+            elif isinstance(dv, str):
+                k = dv.strip().lower()
+                if k in ("counterclockwise", "ccw", "anticlockwise"):
+                    direction = -1
+            return BarrelRoll(spin_speed=spin, direction=direction)
+    return None
+
+
+def read_barrel_roll(osr_path: Path) -> "BarrelRoll | None":
+    """The BR config from a .osr, or None when the replay carries no Barrel
+    Roll mod (or no ScoreInfo blob). Never raises."""
+    mods = read_lazer_mods(osr_path)
+    if not mods:
+        return None
+    return barrel_roll_from_mods(mods)
+
+
+# --- BM: Bloom ---------------------------------------------------------------
+_BM_COMBO_KEY = "max_size_combo_count"
+_BM_SIZE_KEY = "max_cursor_size"
+BLOOM_COMBO_DEFAULT = 50                    # BindableInt(50)
+BLOOM_COMBO_RANGE = (5, 100)               # {Min 5, Max 100}
+BLOOM_SIZE_DEFAULT = 10.0                  # BindableFloat(10)
+BLOOM_SIZE_RANGE = (5.0, 15.0)            # {Min 5, Max 15}
+
+
+@dataclass(frozen=True)
+class Bloom:
+    """The BM config read from a .osr. ``max_size_combo_count`` is the combo at
+    which the cursor reaches its maximum (default 50, [5,100]).
+    ``max_cursor_size`` is that maximum cursor-scale multiplier (default 10,
+    [5,15])."""
+    max_size_combo_count: int = BLOOM_COMBO_DEFAULT
+    max_cursor_size: float = BLOOM_SIZE_DEFAULT
+
+
+def bloom_from_mods(mods: list[dict]) -> "Bloom | None":
+    """The BM config from an already-parsed :func:`read_lazer_mods` list, or
+    None when no BM mod is present. Both settings clamp to their SettingSource
+    range; an absent/non-numeric value falls back to the default."""
+    for m in mods:
+        if isinstance(m, dict) and str(m.get("acronym", "")).upper() == BLOOM_ACRONYM:
+            s = m.get("settings") or {}
+            rc = _da_num(s, _BM_COMBO_KEY)
+            if rc is None:
+                combo = BLOOM_COMBO_DEFAULT
+            else:
+                lo, hi = BLOOM_COMBO_RANGE
+                combo = int(min(hi, max(lo, rc)))
+            rz = _da_num(s, _BM_SIZE_KEY)
+            if rz is None:
+                size = BLOOM_SIZE_DEFAULT
+            else:
+                lo, hi = BLOOM_SIZE_RANGE
+                size = min(hi, max(lo, rz))
+            return Bloom(max_size_combo_count=combo, max_cursor_size=size)
+    return None
+
+
+def read_bloom(osr_path: Path) -> "Bloom | None":
+    """The BM config from a .osr, or None when the replay carries no Bloom mod
+    (or no ScoreInfo blob). Never raises."""
+    mods = read_lazer_mods(osr_path)
+    if not mods:
+        return None
+    return bloom_from_mods(mods)
+
+
+# --- SY: Synesthesia (no settings) -------------------------------------------
+def synesthesia_from_mods(mods: list[dict]) -> bool:
+    """True when the mod list carries Synesthesia (SY). SY has no settings."""
+    return _has_acronym(mods, SYNESTHESIA_ACRONYM)
+
+
+def read_synesthesia(osr_path: Path) -> bool:
+    """True iff the .osr's lazer mod list contains Synesthesia (SY)."""
+    mods = read_lazer_mods(osr_path)
+    return bool(mods) and synesthesia_from_mods(mods)
+
+
+# --- BL: Blinds (no settings) ------------------------------------------------
+def blinds_from_mods(mods: list[dict]) -> bool:
+    """True when the mod list carries Blinds (BL). BL has no settings."""
+    return _has_acronym(mods, BLINDS_ACRONYM)
+
+
+def read_blinds(osr_path: Path) -> bool:
+    """True iff the .osr's lazer mod list contains Blinds (BL)."""
+    mods = read_lazer_mods(osr_path)
+    return bool(mods) and blinds_from_mods(mods)
+
+
+# --- NS: No Scope ------------------------------------------------------------
+_NS_COMBO_KEY = "hidden_combo_count"
+NO_SCOPE_COMBO_DEFAULT = 10                 # OsuModNoScope BindableInt(10)
+NO_SCOPE_COMBO_RANGE = (0, 50)             # {Min 0, Max 50}
+
+
+@dataclass(frozen=True)
+class NoScope:
+    """The NS config read from a .osr. ``hidden_combo_count`` is the combo at
+    which the cursor becomes fully hidden (default 10, [0,50]); 0 means the
+    cursor is ALWAYS hidden (ModNoScope's ApplyToScoreProcessor early-out)."""
+    hidden_combo_count: int = NO_SCOPE_COMBO_DEFAULT
+
+
+def no_scope_from_mods(mods: list[dict]) -> "NoScope | None":
+    """The NS config from an already-parsed :func:`read_lazer_mods` list, or
+    None when no NS mod is present. ``hidden_combo_count`` clamps to [0,50]; an
+    absent/non-numeric value falls back to the default (10)."""
+    for m in mods:
+        if isinstance(m, dict) and str(m.get("acronym", "")).upper() == NO_SCOPE_ACRONYM:
+            s = m.get("settings") or {}
+            rc = _da_num(s, _NS_COMBO_KEY)
+            if rc is None:
+                combo = NO_SCOPE_COMBO_DEFAULT
+            else:
+                lo, hi = NO_SCOPE_COMBO_RANGE
+                combo = int(min(hi, max(lo, rc)))
+            return NoScope(hidden_combo_count=combo)
+    return None
+
+
+def read_no_scope(osr_path: Path) -> "NoScope | None":
+    """The NS config from a .osr, or None when the replay carries no No Scope
+    mod (or no ScoreInfo blob). Never raises."""
+    mods = read_lazer_mods(osr_path)
+    if not mods:
+        return None
+    return no_scope_from_mods(mods)
+
+
+# --- DP: Depth ---------------------------------------------------------------
+_DP_DEPTH_KEY = "max_depth"
+_DP_APPROACH_KEY = "show_approach_circles"
+DEPTH_MAX_DEFAULT = 100.0                   # BindableFloat(100)
+DEPTH_MAX_RANGE = (50.0, 200.0)           # {Min 50, Max 200}
+
+
+@dataclass(frozen=True)
+class Depth:
+    """The DP config read from a .osr. ``max_depth`` is how far away objects
+    appear (default 100, [50,200]). ``show_approach_circles`` mirrors the
+    BindableBool(true) toggle (approach rings hidden when False)."""
+    max_depth: float = DEPTH_MAX_DEFAULT
+    show_approach_circles: bool = True
+
+
+def depth_from_mods(mods: list[dict]) -> "Depth | None":
+    """The DP config from an already-parsed :func:`read_lazer_mods` list, or
+    None when no DP mod is present. ``max_depth`` clamps to [50,200]; an
+    absent/non-numeric value falls back to the default (100).
+    ``show_approach_circles`` defaults to True (absent -> True)."""
+    for m in mods:
+        if isinstance(m, dict) and str(m.get("acronym", "")).upper() == DEPTH_ACRONYM:
+            s = m.get("settings") or {}
+            rd = _da_num(s, _DP_DEPTH_KEY)
+            if rd is None:
+                depth = DEPTH_MAX_DEFAULT
+            else:
+                lo, hi = DEPTH_MAX_RANGE
+                depth = min(hi, max(lo, rd))
+            av = s.get(_DP_APPROACH_KEY, True)
+            show = av if isinstance(av, bool) else True
+            return Depth(max_depth=depth, show_approach_circles=show)
+    return None
+
+
+def read_depth(osr_path: Path) -> "Depth | None":
+    """The DP config from a .osr, or None when the replay carries no Depth mod
+    (or no ScoreInfo blob). Never raises."""
+    mods = read_lazer_mods(osr_path)
+    if not mods:
+        return None
+    return depth_from_mods(mods)
+
+
+# --- BU: Bubbles (no settings) -----------------------------------------------
+def bubbles_from_mods(mods: list[dict]) -> bool:
+    """True when the mod list carries Bubbles (BU). BU has no settings."""
+    return _has_acronym(mods, BUBBLES_ACRONYM)
+
+
+def read_bubbles(osr_path: Path) -> bool:
+    """True iff the .osr's lazer mod list contains Bubbles (BU)."""
+    mods = read_lazer_mods(osr_path)
+    return bool(mods) and bubbles_from_mods(mods)
