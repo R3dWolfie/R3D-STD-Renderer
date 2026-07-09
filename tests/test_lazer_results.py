@@ -14,8 +14,9 @@ import tempfile
 from osu_std_renderer.render.lazer_results import (
     FOR_RANK, GRADE_SPACING_PERCENTAGE, LazerResultsScreen, RANK_THRESHOLDS,
     ResultsData, VIRTUAL_SS_PERCENTAGE, acc_to_angle_deg, arc_color_at,
-    bake_accuracy_arc, ease_out_quint, grade_bands, rank_ring_bands, query_pb,
-    slider_stats, target_arc_value,
+    avatar_hue, avatar_initials, bake_accuracy_arc, bake_avatar,
+    ease_out_quint, grade_bands, rank_ring_bands, query_pb, slider_stats,
+    target_arc_value,
 )
 from osu_std_renderer.render.pp import component_pct
 from osu_std_renderer.settings import StdRenderSettings
@@ -205,6 +206,40 @@ def test_slider_stats_counts_ticks_and_ends():
     assert (tick_hit, tick_total) == (3, 4)      # 2 tick + 1 repeat hit / 4
     assert (end_hit, end_total) == (1, 2)
     assert slider_stats(None) == (0, 0, 0, 0)
+
+
+# --- procedural avatar (Fix 3) ------------------------------------------------------
+
+def test_avatar_initials():
+    assert avatar_initials("R3D") == "R"
+    assert avatar_initials("mrekk") == "M"
+    assert avatar_initials("R3D wolfie") == "RW"      # two tokens
+    assert avatar_initials("cookie_zi") == "CZ"       # underscore-split
+    assert avatar_initials("nathan on osu") == "NO"   # first two tokens
+    assert avatar_initials("") == "?"
+    assert avatar_initials("   ") == "?"
+
+
+def test_avatar_hue_deterministic_and_process_independent():
+    # deterministic across calls; case/whitespace-insensitive
+    assert avatar_hue("YOASOBI") == avatar_hue("YOASOBI")
+    assert avatar_hue("YOASOBI") == avatar_hue(" yoasobi ")
+    # NOT the collision-prone sum(ord): anagrams get different hues
+    assert avatar_hue("Red") != avatar_hue("Der")
+    assert 0.0 <= avatar_hue("anyone") < 1.0
+
+
+def test_bake_avatar_deterministic_bytes():
+    import numpy as np
+    a = bake_avatar(96, "R3Dwolfie")
+    b = bake_avatar(96, "R3Dwolfie")
+    assert np.array_equal(a, b)                        # byte-identical
+    assert a.shape == (96, 96, 4)
+    # different usernames → different pixels (with overwhelming probability)
+    c = bake_avatar(96, "Green")
+    assert not np.array_equal(a, c)
+    # the disc corners are transparent (clipped to a circle)
+    assert a[0, 0, 3] == 0 and a[0, -1, 3] == 0
 
 
 # --- PB-card DB query ---------------------------------------------------------------

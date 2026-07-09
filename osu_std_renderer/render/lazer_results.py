@@ -326,30 +326,74 @@ def bake_round_panel(w: int, h: int, radius: int, top, bot,
     return _to_rgba(grad)
 
 
-def bake_avatar(px: int, initial: str, seed: int):
-    """Procedural avatar chip: a two-tone disc with the player's initial
-    (no osu!API avatar — honest placeholder)."""
+def _name_hash(name: str) -> int:
+    """Stable, process-independent hash of a username → non-negative int.
+    Uses hashlib (NOT builtin hash(), which is PYTHONHASHSEED-salted, and
+    NOT sum(ord) which collides on anagrams) so an avatar is deterministic
+    across runs/machines."""
+    import hashlib
+    key = (name or "?").strip().lower().encode("utf-8", "ignore")
+    return int(hashlib.md5(key).hexdigest(), 16)
+
+
+def avatar_hue(name: str) -> float:
+    """Deterministic hue in [0,1) derived from the username hash."""
+    return (_name_hash(name) % 360) / 360.0
+
+
+def avatar_initials(name: str) -> str:
+    """1–2 uppercase initials: first letters of the first two word-tokens,
+    else the first character of a single token ('?' when empty)."""
+    import re
+    name = (name or "").strip()
+    if not name:
+        return "?"
+    tokens = [t for t in re.split(r"[\s_.\-]+", name) if t]
+    if len(tokens) >= 2:
+        return (tokens[0][0] + tokens[1][0]).upper()
+    return tokens[0][0].upper()
+
+
+def bake_avatar(px: int, name: str, *_ignored):
+    """Procedural avatar chip (no osu!API): a deterministic username-hued
+    disc with a subtle vertical shade, a soft ring, and the centred
+    initial(s) in the repo font — the osu! default-avatar feel. Deterministic:
+    identical `name` → byte-identical chip. (Extra positional args are
+    accepted and ignored for back-compat with the old (px, initial, seed)
+    signature.)"""
     px = max(int(px), 8)
+    h = _name_hash(name)
+    hue = (h % 360) / 360.0
+    sat = 0.42 + ((h >> 9) % 18) / 100.0            # 0.42..0.59, hash-varied
+    c0 = _hsv(hue, sat, 0.62)                       # top (lighter)
+    c1 = _hsv((hue + 0.06) % 1.0, min(sat + 0.08, 1.0), 0.34)   # bottom (dark)
     img = Image.new("RGBA", (px, px), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
-    hue = (seed % 360) / 360.0
-    c0 = _hsv(hue, 0.45, 0.55)
-    c1 = _hsv((hue + 0.08) % 1.0, 0.5, 0.32)
     for y in range(px):
         f = y / max(px - 1, 1)
         col = tuple(int(round(_lerp(c0[i], c1[i], f) * 255)) for i in range(3))
         d.line([(0, y), (px, y)], fill=(*col, 255))
+    # clip to a disc
     mask = Image.new("L", (px, px), 0)
     ImageDraw.Draw(mask).ellipse([0, 0, px - 1, px - 1], fill=255)
     img.putalpha(mask)
-    ch = (initial or "?")[:1].upper()
-    font = _load_font(int(px * 0.56))
+    d = ImageDraw.Draw(img)
+    # soft ring (a lighter tint of the hue)
+    ring = _hsv(hue, max(sat - 0.16, 0.0), 0.92)
+    rc = tuple(int(round(c * 255)) for c in ring)
+    lw = max(int(px * 0.045), 2)
+    off = lw * 0.5
+    d.ellipse([off, off, px - 1 - off, px - 1 - off],
+              outline=(*rc, 150), width=lw)
+    # centred initial(s)
+    ini = avatar_initials(name)
+    font = _load_font(int(px * (0.46 if len(ini) >= 2 else 0.56)))
     try:
-        x0, y0, x1, y1 = font.getbbox(ch)
+        x0, y0, x1, y1 = font.getbbox(ini)
     except AttributeError:
-        x1, y1 = font.getsize(ch); x0 = y0 = 0     # type: ignore
-    d.text(((px - (x1 - x0)) / 2 - x0, (px - (y1 - y0)) / 2 - y0), ch,
-           font=font, fill=(255, 255, 255, 235))
+        x1, y1 = font.getsize(ini); x0 = y0 = 0     # type: ignore
+    d.text(((px - (x1 - x0)) / 2 - x0, (px - (y1 - y0)) / 2 - y0), ini,
+           font=font, fill=(255, 255, 255, 240))
     return _to_rgba(img)
 
 
@@ -571,8 +615,7 @@ class LazerResultsScreen:
             (0.12, 0.13, 0.17), (0.05, 0.05, 0.07), 0.93,
             border=(0.3, 0.33, 0.4)))
         # avatar + header
-        self.avatar_key = self._put(bake_avatar(
-            int(52 * k), d.player or "?", sum(map(ord, d.player or "?"))))
+        self.avatar_key = self._put(bake_avatar(int(52 * k), d.player or "?"))
         self.name_row = self._text(d.player or "Player", 30, (1, 1, 1))
         self.title_row = self._text(_clip(d.title, 40), 34, (0.95, 0.96, 1.0))
         self.artist_row = self._text(_clip(d.artist, 48), 24,
@@ -682,8 +725,7 @@ class LazerResultsScreen:
                 "rank": self._text("#1", 30, (1.0, 0.82, 0.35)),
                 "label": self._text("PERSONAL BEST", 16, (0.62, 0.66, 0.76)),
                 "avatar": self._put(bake_avatar(
-                    int(40 * k), pb.get("player_name", "?"),
-                    sum(map(ord, pb.get("player_name", "?"))))),
+                    int(40 * k), pb.get("player_name", "?"))),
                 "name": self._text(_clip(pb.get("player_name", ""), 16), 22,
                                    (0.95, 0.96, 1.0)),
                 "grade": self._text(pb_grade, 40,
