@@ -91,6 +91,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 import sys
 import time
 from pathlib import Path
@@ -139,6 +140,11 @@ def build_parser() -> argparse.ArgumentParser:
                     help="§4.10 FadeOutTime: video+audio fade to black "
                          "after the last object (wall seconds; default 1.5)")
     ap.add_argument("--results", action=BA, default=True)
+    ap.add_argument("--results-style", choices=("lazer", "r3d"),
+                    default="lazer",
+                    help="outro: 'lazer' = the ported osu!(lazer) ranking "
+                         "screen (score panel → expanded statistics; std "
+                         "default), 'r3d' = the in-house shared card")
     ap.add_argument("--letterbox-breaks", action=BA, default=True)
     ap.add_argument("--approach-circles", action=BA, default=True)
     ap.add_argument("--combo-numbers", action=BA, default=True)
@@ -309,6 +315,65 @@ def find_osu_file(beatmap: Path, replay_md5: str) -> Path:
     return candidates[0]
 
 
+# the R3D render DB — read-only source for the LOCAL-ONLY PB card (owner
+# decision: no osu!API). Overridable for tests/deployments.
+PB_DB_PATH = os.environ.get("R3D_RENDER_DB",
+                            "/home/red/.local/state/mania-ordr/db.sqlite")
+LAZER_RESULTS_MIN_SECONDS = 4.5   # floor so both stages + a hold fit
+
+
+def _build_lazer_results(spr, settings, beatmap, meta, judgments, hud, fv,
+                         frames, osu_path, args, speed):
+    """Assemble the lazer ranking screen (render/lazer_results.py) — gather
+    stars/pp/perf-breakdown/slider-stats/aim-scatter/PB-card data, size the
+    outro to fit both stages. Returns (screen, duration_wall_ms)."""
+    from .render.hud import build_aim_points
+    from .render.lazer_results import (LazerResultsScreen, ResultsData,
+                                       query_pb, slider_stats)
+    from .render.pp import build_performance_breakdown, star_rating
+
+    counts = (meta.count_300, meta.count_100, meta.count_50, meta.count_miss)
+    stars = star_rating(osu_path, meta.mods)
+    perf = build_performance_breakdown(osu_path, meta.mods, judgments, counts,
+                                       judgments.final_max_combo)
+    pp_val = perf.achieved_pp if perf is not None else None
+    tick_hit, tick_total, end_hit, end_total = slider_stats(judgments)
+    aim_points = build_aim_points(judgments, frames,
+                                  beatmap.diff.circle_radius)
+    # PB card: this player's best PREVIOUS render of the map (exclude the
+    # current replay by its md5), local DB, read-only. None → card omitted.
+    replay_md5 = ""
+    try:
+        if args.osr is not None:
+            replay_md5 = hashlib.md5(Path(args.osr).read_bytes()).hexdigest()
+    except Exception:  # noqa: BLE001
+        replay_md5 = ""
+    pb = query_pb(PB_DB_PATH, meta.player_name, meta.beatmap_md5, replay_md5)
+    if pb is not None:
+        print(f"pb:     {pb['player_name']} {int(pb['score']):,} "
+              f"{pb['grade']} (render DB) — PB card shown", file=sys.stderr)
+    else:
+        print("pb:     no prior render of this map for the player — PB card "
+              "omitted", file=sys.stderr)
+
+    data = ResultsData(
+        player=meta.player_name, grade=meta.grade, acc_pct=meta.accuracy,
+        score=int(meta.score or fv["score"]), max_combo=meta.max_combo,
+        counts=counts, title=beatmap.name, artist=beatmap.artist,
+        diff_name=beatmap.difficulty_name, creator=beatmap.creator,
+        mods=meta.mods, stars=stars, pp=pp_val,
+        date_str=(meta.played_at or "—"), ur=fv["ur"],
+        slider_ticks=(tick_hit, tick_total),
+        slider_ends=(end_hit, end_total),
+        err_deltas=list(hud.data.err_deltas),
+        windows=(hud.hw.great, hud.hw.ok, hud.hw.meh),
+        aim_points=aim_points, perf=perf, pb=pb)
+    dur_wall_ms = max(settings.results_screen_time,
+                      LAZER_RESULTS_MIN_SECONDS) * 1000.0
+    screen = LazerResultsScreen(spr, data, dur_wall_ms, speed=speed)
+    return screen, dur_wall_ms
+
+
 def _render(args, settings: StdRenderSettings, beatmap, frames,
             beatmap_dir: Path, skin_info, judgments=None, meta=None,
             osu_path: Path | None = None) -> int:
@@ -454,24 +519,30 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
     fade_start_ms = last_end + HIT_FADE_OUT
     fade_len_ms = settings.fade_out_time * 1000.0 * speed
     gameplay_end_ms = fade_start_ms + fade_len_ms
-    results = results_start_ms = None
+    results = results_start_ms = results_dur_wall_ms = None
     if settings.show_results and hud is not None and meta is not None:
-        from .render.results import ResultsScreen
         fv = hud.final_values()
         deltas = hud.data.err_deltas
         avg_ms = (sum(deltas) / len(deltas)) if deltas else 0.0
-        results = ResultsScreen(
-            spr, skin_elems,
-            counts=(meta.count_300, meta.count_100, meta.count_50,
-                    meta.count_miss),
-            acc_pct=meta.accuracy, score=(meta.score or fv["score"]),
-            max_combo=meta.max_combo, grade=meta.grade, ur=fv["ur"],
-            avg_ms=avg_ms, err_deltas=deltas, meh_ms=hud.hw.meh,
-            player=meta.player_name,
-            map_line=f"{beatmap.artist} - {beatmap.name}",
-            diff_name=beatmap.difficulty_name, mods=meta.mods,
-            use_skin_ranks=not settings.renderer_default_font_and_ranks)
-        results.set_windows(hud.hw.great, hud.hw.ok)
+        if settings.results_style == "lazer":
+            results, results_dur_wall_ms = _build_lazer_results(
+                spr, settings, beatmap, meta, judgments, hud, fv, frames,
+                osu_path, args, speed)
+        else:
+            from .render.results import ResultsScreen
+            results = ResultsScreen(
+                spr, skin_elems,
+                counts=(meta.count_300, meta.count_100, meta.count_50,
+                        meta.count_miss),
+                acc_pct=meta.accuracy, score=(meta.score or fv["score"]),
+                max_combo=meta.max_combo, grade=meta.grade, ur=fv["ur"],
+                avg_ms=avg_ms, err_deltas=deltas, meh_ms=hud.hw.meh,
+                player=meta.player_name,
+                map_line=f"{beatmap.artist} - {beatmap.name}",
+                diff_name=beatmap.difficulty_name, mods=meta.mods,
+                use_skin_ranks=not settings.renderer_default_font_and_ranks)
+            results.set_windows(hud.hw.great, hud.hw.ok)
+            results_dur_wall_ms = settings.results_screen_time * 1000.0
         results_start_ms = gameplay_end_ms
 
     # §3.5/§4.7 combo colour source: the .osu [Colours] when the preset
@@ -493,9 +564,10 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
     # --- flow: end/start + the §4.10 pre-roll (lead-in + seizure card) ------------
     end_ms = gameplay_end_ms
     if results is not None:
-        # results_screen_time is WALL seconds — scale by the rate mod so
-        # the card holds the same real time under DT/HT
-        end_ms += settings.results_screen_time * 1000.0 * speed
+        # results duration is WALL ms — scale by the rate mod so the outro
+        # holds the same real time under DT/HT (the lazer style floors the
+        # duration so both stages + a hold always fit — see _build_lazer)
+        end_ms += results_dur_wall_ms * speed
     if args.max_seconds is not None:
         end_ms = min(end_ms, args.max_seconds * 1000.0)
     start_ms = (args.start or 0.0) * 1000.0
@@ -764,7 +836,8 @@ def main(argv: list[str] | None = None) -> int:
         encoder_device=args.encoder_device, skin_dir=args.skin,
         default_skin_dir=args.default_skin, skip_intro=args.skip_intro,
         lead_in_time=max(args.lead_in, 0.0),
-        show_results=args.results, letterbox_breaks=args.letterbox_breaks,
+        show_results=args.results, results_style=args.results_style,
+        letterbox_breaks=args.letterbox_breaks,
         draw_approach_circles=args.approach_circles,
         draw_combo_numbers=args.combo_numbers,
         draw_follow_points=args.follow_points,

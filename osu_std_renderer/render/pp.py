@@ -227,3 +227,81 @@ def strain_proxy(starts: list[float], ends: list[float],
           for i in range(n)]
     return StrainSeries(values=sm, section_ms=window_ms, first_t=first,
                         speed=1.0, source="density-proxy")
+
+
+# --- performance breakdown (lazer results screen) ----------------------------------
+
+
+@dataclass
+class PerfBreakdown:
+    """The PerformanceBreakdown row for the lazer results screen
+    (osu.Game/Screens/Ranking/Statistics/PerformanceBreakdown.cs): each
+    rosu pp component as achieved ÷ SS-play, plus the achieved/maximum pp
+    pair for the label."""
+    aim_pct: float                 # achieved pp_aim / SS pp_aim, clamped
+    speed_pct: float
+    acc_pct: float
+    achieved_pp: float
+    max_pp: float
+
+
+def component_pct(achieved, maximum) -> float:
+    """A pp component as a fraction of the SS-play component, clamped to
+    [0,1] (the PerformanceBreakdown bar fill). A zero/absent maximum → 0."""
+    a = float(achieved or 0.0)
+    b = float(maximum or 0.0)
+    return 0.0 if b <= 0.0 else max(0.0, min(1.0, a / b))
+
+
+def build_performance_breakdown(osu_path, mods: int, sim, counts,
+                                final_max_combo: int) -> PerfBreakdown | None:
+    """Achieved-vs-maximum pp components (lazer's PerformanceBreakdown):
+    the achieved play's rosu pp_aim/pp_speed/pp_accuracy over the SAME
+    map+mods SS play's components. The SS reference is rosu's default
+    Performance (no state = a perfect play). lazer slider stats feed the
+    achieved state exactly as build_pp_timeline does. None fail-soft."""
+    if _rosu is None or sim is None:
+        return None
+    try:
+        bm = _rosu.Beatmap(path=str(osu_path))
+        if bm.mode != _rosu.GameMode.Osu:
+            return None
+        lazer = bool(getattr(sim, "lazer", False))
+        n300, n100, n50, miss = counts
+        kwargs = dict(mods=int(mods), lazer=lazer, n300=int(n300),
+                      n100=int(n100), n50=int(n50), misses=int(miss),
+                      combo=int(final_max_combo))
+        if lazer:
+            large_ticks = tails = 0
+            for v in sim.verdicts.values():
+                for p in v.parts:
+                    if p.kind in ("tick", "repeat") and p.hit:
+                        large_ticks += 1
+                    elif p.kind == "tail" and p.hit:
+                        tails += 1
+            kwargs.update(large_tick_hits=large_ticks, small_tick_hits=0,
+                          slider_end_hits=tails, n_geki=0, n_katu=0)
+        achieved = _rosu.Performance(**kwargs).calculate(bm)
+        # SS reference: rosu defaults an empty Performance to a perfect play
+        maximum = _rosu.Performance(mods=int(mods), lazer=lazer).calculate(bm)
+        return PerfBreakdown(
+            aim_pct=component_pct(achieved.pp_aim, maximum.pp_aim),
+            speed_pct=component_pct(achieved.pp_speed, maximum.pp_speed),
+            acc_pct=component_pct(achieved.pp_accuracy, maximum.pp_accuracy),
+            achieved_pp=float(achieved.pp),
+            max_pp=float(maximum.pp))
+    except Exception as e:  # noqa: BLE001 — breakdown is garnish, never fatal
+        print(f"WARNING: performance breakdown failed ({e})", file=sys.stderr)
+        return None
+
+
+def star_rating(osu_path, mods: int) -> float | None:
+    """The map's star rating at these mods (rosu Difficulty.stars) for the
+    results-screen star pill, or None fail-soft."""
+    if _rosu is None:
+        return None
+    try:
+        bm = _rosu.Beatmap(path=str(osu_path))
+        return float(_rosu.Difficulty(mods=int(mods)).calculate(bm).stars)
+    except Exception:  # noqa: BLE001
+        return None

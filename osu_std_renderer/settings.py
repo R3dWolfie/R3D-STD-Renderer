@@ -180,6 +180,13 @@ class StdRenderSettings:
     fade_out_time: float = 1.5            # fade to black, wall SECONDS
     show_results: bool = True
     results_screen_time: float = 5.0
+    # outro style: "lazer" = the ported osu!(lazer) ranking screen
+    # (render/lazer_results.py — the std default, two-stage: score panel
+    # then the expanded statistics view); "r3d" = the in-house shared card
+    # (render/results.py). show_results off skips the outro entirely in
+    # either style. Grade colours stay lazer's under custom skins (the
+    # results screen is client UI, skin-independent).
+    results_style: str = "lazer"
     letterbox_breaks: bool = True
 
     # cursor (§4.7/§4.8). use_skin_cursor defaults TRUE — real osu has no

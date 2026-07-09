@@ -25,6 +25,7 @@ MODULES = [
     "tests.test_spinner",
     "tests.test_hitsounds",
     "tests.test_results",
+    "tests.test_lazer_results",
     # settings-surface phase (2026-07)
     "tests.test_settings",
     "tests.test_effects",

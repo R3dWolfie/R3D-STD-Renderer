@@ -72,6 +72,7 @@ class ReplayMeta:
     grade: str
     game_version: int = 0    # <30000000 = osu!stable, else lazer
     death_ms: int | None = None
+    played_at: str = ""      # .osr timestamp → "Played on <date>" (results)
 
 
 def parse_replay(path: Path) -> tuple[list[StdFrame], ReplayMeta]:
@@ -130,6 +131,15 @@ def parse_replay(path: Path) -> tuple[list[StdFrame], ReplayMeta]:
             except (TypeError, ValueError, AttributeError):
                 continue
 
+    # play date from the .osr timestamp (osrparse → datetime); "" fail-soft
+    played_at = ""
+    ts = getattr(r, "timestamp", None)
+    if ts is not None:
+        try:
+            played_at = ts.strftime("%d %b %Y")
+        except Exception:  # noqa: BLE001 — odd/naive datetime → skip
+            played_at = str(ts)[:10]
+
     meta = ReplayMeta(
         mode=int(r.mode.value if hasattr(r.mode, "value") else r.mode),
         beatmap_md5=str(getattr(r, "beatmap_hash", "") or ""),
@@ -147,6 +157,7 @@ def parse_replay(path: Path) -> tuple[list[StdFrame], ReplayMeta]:
         grade=_grade(r),
         game_version=int(getattr(r, "game_version", 0) or 0),
         death_ms=death_ms,
+        played_at=played_at,
     )
     return frames, meta
 

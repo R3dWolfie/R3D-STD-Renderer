@@ -26,5 +26,13 @@ LegacyDefaultComboCounter.cs, LegacyHealthDisplay.cs,
 LegacyKeyCounter(Display).cs, LegacySongProgress.cs, LegacySpriteText.cs
 — attribution in the module docstring. osu_std_renderer/ruleset/health.py
 ports osu.Game/Rulesets/Scoring/DrainingHealthProcessor.cs and
-osu.Game.Rulesets.Osu/Scoring/OsuHealthProcessor.cs (MIT, ppy/osu). All
-default textures remain procedurally baked in-repo (no ppy asset files).
+osu.Game.Rulesets.Osu/Scoring/OsuHealthProcessor.cs (MIT, ppy/osu).
+
+osu_std_renderer/render/lazer_results.py ports the layout/animation
+semantics of the MIT-licensed ppy/osu ranking screen: ScorePanel.cs,
+Expanded/ExpandedPanelMiddleContent.cs, Expanded/Accuracy/AccuracyCircle.cs,
+Expanded/StarRatingDisplay.cs, Screens/Ranking/Statistics/
+PerformanceBreakdown.cs, and osu.Game.Rulesets.Osu/Statistics/
+{HitEventTimingDistribution,AccuracyHeatmap}.cs — attribution in the module
+docstring. All default textures remain procedurally baked in-repo (no ppy
+asset files).
