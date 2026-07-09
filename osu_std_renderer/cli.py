@@ -747,7 +747,7 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
             p = out_dir / f"{stem}_t{int(round(t))}ms.png"
             Image.fromarray(rgb).save(p)
             print(f"wrote {p}", file=sys.stderr)
-        _print_hud_final_values(hud, judgments, meta)
+        _print_hud_final_values(hud, judgments, meta, frozen=frozen)
         if video_bg is not None:
             video_bg.close()
         spr.release()
@@ -864,8 +864,9 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
         fs_vol = settings.general_volume / 100.0
         mixer.mix_at(t0, synth_failsound(), volume=fs_vol)
         have_audio = True
-        print(f"fail:   music fades {t0:.1f}→{t1:.1f}s (wall), fail sample "
-              f"at {t0:.1f}s (pitch-bend approximated)", file=sys.stderr)
+        print(f"fail:   music fades {t0 / 1000.0:.1f}→{t1 / 1000.0:.1f}s "
+              f"(wall) + fail sample at {t0 / 1000.0:.1f}s "
+              f"(pitch-bend approximated)", file=sys.stderr)
 
     if have_audio:
         audio_path = output.with_suffix(".audio.wav")
@@ -906,7 +907,7 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
             except OSError:
                 pass
     wall = time.monotonic() - t0
-    _print_hud_final_values(hud, judgments, meta)
+    _print_hud_final_values(hud, judgments, meta, frozen=frozen)
     print(f"done: {n_frames} frames in {wall:.1f}s "
           f"({n_frames / wall:.1f} fps render, encoder {encoder}) → {output}",
           file=sys.stderr)
@@ -914,10 +915,20 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
     return 0
 
 
-def _print_hud_final_values(hud, judgments, meta=None) -> None:
+def _print_hud_final_values(hud, judgments, meta=None, frozen=None) -> None:
     """The HUD phase's honesty line: the numbers the LAST frame displays,
-    with the sim-vs-replay score/accuracy checks spelled out."""
+    with the sim-vs-replay score/accuracy checks spelled out.
+
+    A FAILED render freezes the HUD at the death point, so the whole-map
+    end values (all post-death misses) are meaningless and the replay
+    comparison would false-alarm — report the frozen death tally instead."""
     if hud is None:
+        return
+    if frozen is not None:
+        c3, c1, c5, cm = frozen["counts"]
+        print(f"hud[FAIL]: frozen @ death — score {frozen['score']} | "
+              f"acc {frozen['acc_pct']:.2f}% | {c3}/{c1}/{c5}/{cm} | "
+              f"max combo {frozen['max_combo']}x | grade F", file=sys.stderr)
         return
     fv = hud.final_values()
     score_line = f"final score {fv['score']}"
