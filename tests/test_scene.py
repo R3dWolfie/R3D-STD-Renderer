@@ -206,6 +206,50 @@ def test_reverse_arrow_pinned_at_marker_position():
     assert abs(sprites[0].y - marker_y) < 1e-6
 
 
+def test_argon_slider_tail_draws_nothing():
+    """Fix: real Argon has NO slider-tail circle. lazer's DrawableSliderTail
+    wraps a SkinnableDrawable(SliderTailHitCircle, _ => Empty()) ("no default
+    for this; only visible in legacy skins") and OsuArgonSkinTransformer has no
+    SliderTailHitCircle case, so it resolves to that Empty() fallback — the
+    ArgonSliderBody's rounded snake cap IS the visible end ("the body just
+    ends"). Therefore the skinless Argon league (skin is None) must emit ZERO
+    sprites for role="slider_end", while head/hit roles keep the ArgonMain-
+    CirclePiece (accent disc + white border) and custom/legacy skins keep
+    their sliderendcircle byte-for-byte."""
+    import types
+    from types import SimpleNamespace
+    from osu_std_renderer.render.scene import StdScene
+
+    argon = SimpleNamespace(skin=None, radius_px=30.0, circle_k=1.0)
+    # head/hit roles delegate to _argon_circle_sprites (uses self.radius_px)
+    argon._argon_circle_sprites = types.MethodType(
+        StdScene._argon_circle_sprites, argon)
+    col = (1.0, 0.5, 0.0)
+    # Argon slider tail: nothing drawn (was argon_circle + argon_border before)
+    tail = StdScene._plain_circle_sprites(argon, 100.0, 100.0, col, 1.0,
+                                          role="slider_end")
+    assert tail == [], f"Argon slider tail must draw nothing, got {tail}"
+    # Argon slider HEAD is unchanged: accent disc under the white ring
+    head = StdScene._plain_circle_sprites(argon, 100.0, 100.0, col, 1.0,
+                                          role="slider_head")
+    assert [s.texture_key for s in head] == ["argon_circle", "argon_border"]
+    # Argon plain hit circle likewise unchanged
+    hit = StdScene._plain_circle_sprites(argon, 100.0, 100.0, col, 1.0,
+                                         role="hit")
+    assert [s.texture_key for s in hit] == ["argon_circle", "argon_border"]
+
+    # custom/legacy skin: the slider end STILL draws its sliderendcircle
+    fake_skin = SimpleNamespace(
+        empty=set(),
+        size={"sliderendcircle": (128.0, 128.0)},
+        circle_elements=lambda role: ("sliderendcircle", None))
+    skinned = SimpleNamespace(skin=fake_skin, radius_px=30.0, circle_k=1.0)
+    ct = StdScene._plain_circle_sprites(skinned, 100.0, 100.0,
+                                        (1.0, 1.0, 1.0), 1.0,
+                                        role="slider_end")
+    assert len(ct) == 1 and ct[0].texture_key == "sk_sliderendcircle", ct
+
+
 def test_warning_arrows_at_four_corners():
     """CRITICAL-3: break-end warning arrows sit at the FOUR playfield corners
     (skin arrow-warning sprite when shipped, procedural fallback otherwise),
