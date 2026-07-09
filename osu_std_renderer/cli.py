@@ -458,7 +458,8 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
     from .render.gl import SpriteRenderer
     from .render.hud import StdHud, build_aim_points
     from .render.playfield import PlayfieldCamera
-    from .render.scene import FAIL_DURATION_MS, ScenePlayer, StdScene
+    from .render.scene import (FAIL_DURATION_MS, ScenePlayer, StdScene,
+                               ssaa_internal_size)
     from .render.skin_elements import SkinElements
     from .render.slider_body import SliderBodyRenderer
     from .render.textures import TextureBank
@@ -621,14 +622,26 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
               f"score {frozen['score']} grade F", file=sys.stderr)
 
     results = results_start_ms = results_dur_wall_ms = None
+    results_ssaa = None
     if settings.show_results and hud is not None and meta is not None:
         fv = hud.final_values()
         deltas = hud.data.err_deltas
         avg_ms = (sum(deltas) / len(deltas)) if deltas else 0.0
+        # SSAA the results outro: bind the card to a >=1080p offscreen
+        # renderer (shared GL context) and downscale each results frame to
+        # the output res, so text stays crisp at sub-1080p outputs. No-op
+        # at >=1080p (the card renders at output res as before).
+        results_spr = spr
+        iw, ih = ssaa_internal_size(w, h)
+        if (iw, ih) != (w, h):
+            results_spr = SpriteRenderer(iw, ih, ctx=spr.ctx)
+            results_ssaa = results_spr
+            print(f"ssaa:   results supersampled at {iw}x{ih} → {w}x{h}",
+                  file=sys.stderr)
         if settings.results_style == "lazer":
             results, results_dur_wall_ms = _build_lazer_results(
-                spr, settings, beatmap, meta, judgments, hud, fv, frames,
-                osu_path, args, speed, frozen=frozen)
+                results_spr, settings, beatmap, meta, judgments, hud, fv,
+                frames, osu_path, args, speed, frozen=frozen)
         else:
             from .render.results import ResultsScreen
             r_counts = frozen["counts"] if frozen else (
@@ -638,7 +651,7 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
             r_score = frozen["score"] if frozen else (meta.score or fv["score"])
             r_combo = frozen["max_combo"] if frozen else meta.max_combo
             results = ResultsScreen(
-                spr, skin_elems,
+                results_spr, skin_elems,
                 counts=r_counts,
                 acc_pct=r_acc, score=r_score,
                 max_combo=r_combo, grade=r_grade, ur=fv["ur"],
@@ -751,6 +764,7 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
         playfield_borders=settings.playfield_borders,
         results=results,
         results_start_ms=results_start_ms,
+        results_ssaa=results_ssaa,
         mods=scene_mods,
         fail_time_ms=fail_time,
         fail_anim_len_ms=fail_anim_len_ms,

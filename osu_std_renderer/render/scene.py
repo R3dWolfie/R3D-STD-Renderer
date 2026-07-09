@@ -175,6 +175,26 @@ from .spinner import (CLEAR_OFFSET_OSU, GLOW_BLUE, SPIN_OFFSET_OSU,
                       required_rotations, spin_prompt_alpha,
                       spinner_approach_scale, wants_lighting)
 
+
+def ssaa_internal_size(width: int, height: int) -> tuple[int, int]:
+    """Supersample resolution for the results outro (results-1080p-ssaa).
+
+    The results card is laid out in a 1080-virtual space scaled by k=h/1080,
+    so a sub-1080p output bakes/rasterises its text below native and it
+    aliases. We render the results composite at a FIXED internal height of
+    at least 1080 (width scaled to preserve the output aspect ratio) and
+    downscale each results frame to the output res — crisp text at any
+    resolution. A NO-OP at >=1080p (returns the output size unchanged): 4K
+    and 1080p renders already carry native-or-better results detail.
+    """
+    w, h = int(width), int(height)
+    ih = max(1080, h)
+    if ih == h:
+        return (w, h)
+    iw = max(2, round(w * ih / h))
+    return (iw, ih)
+
+
 EXPLODE_SCALE = 1.5            # §2.5 hit-explosion end scale (skin v2+).
                                # m-5: nudged 1.4→1.5 so the just-hit circle
                                # expands slightly larger, matching danser (the
@@ -830,6 +850,7 @@ class StdScene:
                  playfield_borders: str = "none",
                  results=None,
                  results_start_ms: float | None = None,
+                 results_ssaa=None,
                  mods: int = 0,
                  fail_time_ms: float | None = None,
                  fail_anim_len_ms: float = FAIL_DURATION_MS):
@@ -891,6 +912,11 @@ class StdScene:
         self.miss_fall = miss_fall        # classic falling hit0 (owner: ON)
         self.results = results            # results.ResultsScreen | None
         self.results_start_ms = results_start_ms
+        # SSAA: a high-res SpriteRenderer the results card is bound to (its
+        # w/h/k are the internal supersample size). None → no supersampling
+        # (output already >=1080p, or no results). See ssaa_internal_size /
+        # _frame_rgb_ssaa. The card draws into THIS renderer, not self.spr.
+        self.results_ssaa = results_ssaa
         # FAIL sequence: freeze gameplay at fail_time_ms, run the
         # FailAnimationContainer fall for fail_anim_len_ms, then results (F).
         self.fail_time_ms = fail_time_ms
@@ -1072,9 +1098,12 @@ class StdScene:
 
     # --- frame draw ---------------------------------------------------------------
 
-    def render_frame(self, t: float) -> None:
+    def render_frame(self, t: float, skip_results: bool = False) -> None:
+        # skip_results: draw the scene-behind WITHOUT the results card. The
+        # SSAA outro path (_frame_rgb_ssaa) renders this at output res, then
+        # composites the card on top at the supersample resolution.
         if self.fail_time_ms is not None and t >= self.fail_time_ms:
-            self._render_fail_frame(t)
+            self._render_fail_frame(t, skip_results=skip_results)
             return
         self._advance(t)
         self.spr.begin(clear=self.background)
@@ -1137,7 +1166,8 @@ class StdScene:
             fa = fade_to_black_alpha(t, self.fade_start_ms, self.fade_len_ms)
             if fa > 0.0:              # §4.10 FadeOutTime: over EVERYTHING
                 self.spr.draw([self._full_frame_black(fa)])
-        if self.results is not None and self.results_start_ms is not None \
+        if not skip_results and self.results is not None \
+                and self.results_start_ms is not None \
                 and t >= self.results_start_ms:
             # Red's shared results card (render/results.py) — dims the
             # whole scene (HUD included, the mania draw order) under it
@@ -1147,7 +1177,7 @@ class StdScene:
         if self.seizure_start_ms is not None:
             self._draw_seizure_card(t)     # topmost — it IS the pre-roll
 
-    def _render_fail_frame(self, t: float) -> None:
+    def _render_fail_frame(self, t: float, skip_results: bool = False) -> None:
         """Gameplay is FROZEN at the death frame; the FailAnimationContainer
         sequence (ppy/osu, MIT) plays over it: every alive hit object drops
         off-screen (per-object gravity + random rotation + shrink), the
@@ -1226,7 +1256,8 @@ class StdScene:
                                   float(self.cam.screen_h), None,
                                   (1.0, 0.0, 0.0, red_a), additive=True)])
         # results (grade F + frozen stats) once the fall completes
-        if self.results is not None and self.results_start_ms is not None \
+        if not skip_results and self.results is not None \
+                and self.results_start_ms is not None \
                 and t >= self.results_start_ms:
             self.results.draw(t - self.results_start_ms)
 
@@ -1246,8 +1277,53 @@ class StdScene:
             c_scale, c_rot)
 
     def frame_rgb(self, t: float):
+        if self.results_ssaa is not None and self.results is not None \
+                and self.results_start_ms is not None \
+                and t >= self.results_start_ms:
+            return self._frame_rgb_ssaa(t)
         self.render_frame(t)
         return self.spr.read_rgb()
+
+    def _frame_rgb_ssaa(self, t: float):
+        """SSAA the results outro: render the scene-behind at OUTPUT res,
+        composite the results card on top at the internal supersample res
+        (self.results_ssaa's size), then downscale the whole frame back to
+        output res with LANCZOS. Only results frames take this path — the
+        gameplay portion (t < results_start_ms) renders byte-identically.
+
+        The composite happens in GL exactly as at output res (same painter's
+        order + straight-alpha blend), just with more pixels, so the card's
+        text/panels rasterise crisp and survive the downscale. The scene
+        behind (usually already faded to black by results_start_ms) is drawn
+        once at output res and blitted up as the backdrop, so no gameplay
+        detail is invented — only the card gains resolution."""
+        from PIL import Image
+
+        spr_hi = self.results_ssaa
+        ow, oh = self.spr.width, self.spr.height
+        iw, ih = spr_hi.width, spr_hi.height
+
+        # 1) scene-behind (no card) at output res
+        self.render_frame(t, skip_results=True)
+        base = self.spr.read_rgb()                       # (oh, ow, 3)
+
+        # 2) supersampled composite: base as the backdrop, card on top
+        base_hi = np.asarray(
+            Image.fromarray(base).resize((iw, ih), Image.BILINEAR),
+            dtype=np.uint8)
+        spr_hi.begin(clear=(0.0, 0.0, 0.0))
+        spr_hi.upload_texture("_ssaa_base", base_hi)
+        spr_hi.draw([Sprite(iw / 2.0, ih / 2.0, float(iw), float(ih),
+                            "_ssaa_base", (1.0, 1.0, 1.0, 1.0))])
+        self.results.draw(t - self.results_start_ms)     # into spr_hi
+        hi = spr_hi.read_rgb()                            # (ih, iw, 3)
+
+        # 3) downscale the supersampled frame to the output resolution
+        if (iw, ih) == (ow, oh):
+            return hi
+        return np.asarray(
+            Image.fromarray(hi).resize((ow, oh), Image.LANCZOS),
+            dtype=np.uint8)
 
     # --- background / effect layers (settings-surface phase) ---------------------
 

@@ -13,8 +13,8 @@ from osu_std_renderer.render.scene import (
     MISS_FALL_DISTANCE_OSU, MISS_FALL_ROT_RAD, NUMBER_FADE_OUT, RESULT_HOLD,
     approach_scale_alpha, body_alpha, circle_alpha_scale, fade_in_alpha,
     layout_digits, miss_fall_transform, number_alpha, popup_alpha_scale,
-    playfield_border_rects, snake_end_fraction, trail_times,
-    visible_window,
+    playfield_border_rects, snake_end_fraction, ssaa_internal_size,
+    trail_times, visible_window,
 )
 
 # a typical AR9.4-ish object: preempt 540, fade-in 400
@@ -394,3 +394,19 @@ def test_scene_gpu_smoke():
     finally:
         osu_path.unlink(missing_ok=True)
         spr.release()
+
+
+def test_ssaa_internal_size():
+    # sub-1080p: lift height to 1080, scale width to keep the output aspect
+    assert ssaa_internal_size(1280, 720) == (1920, 1080)
+    assert ssaa_internal_size(854, 480) == (1922, 1080)     # 16:9-ish
+    iw, ih = ssaa_internal_size(640, 360)
+    assert ih == 1080 and iw == 1920
+    # aspect ratio is preserved (within rounding)
+    assert abs(iw / ih - 640 / 360) < 1e-3
+    # no-op at exactly 1080p and above (results already native-or-better)
+    assert ssaa_internal_size(1920, 1080) == (1920, 1080)
+    assert ssaa_internal_size(2560, 1440) == (2560, 1440)
+    assert ssaa_internal_size(3840, 2160) == (3840, 2160)
+    # a >1080p but non-16:9 output is still a pass-through
+    assert ssaa_internal_size(1080, 1080) == (1080, 1080)
