@@ -571,3 +571,140 @@ def read_transform(osr_path: Path) -> "TransformMod | None":
     if not mods:
         return None
     return transform_from_mods(mods)
+
+
+# --- Approach/circle-appearance mods: FR / AD / TC ---------------------------
+# A batch of purely VISUAL osu!std mods that alter the approach circle or the
+# hit-circle appearance without touching object geometry, the replay cursor or
+# the judgement — so a play only needs the acronym (+ AD's two settings). Each
+# is cited from osu.Game.Rulesets.Osu/Mods/ and ported in render/appearance_mods.py.
+#
+#   osu.Game.Rulesets.Osu/Mods/OsuModFreezeFrame.cs  (acronym "FR", ModType.Fun)
+#       No settings. IApplicableToBeatmap extends every non-Spinner object's
+#       TimePreempt by ``StartTime - lastNewComboTime`` (so a whole combo's
+#       objects appear TOGETHER at the combo's first-object appear time and stay
+#       "frozen"), and rescales each hit-circle approach circle to
+#       ``4 * TimePreempt/originalPreempt`` shrinking linearly to 1 over the new
+#       TimePreempt. Incompatible with AD/TR/Depth/HD.
+#
+#   osu.Game.Rulesets.Osu/Mods/OsuModApproachDifferent.cs  (acronym "AD")
+#       ``Scale`` BindableFloat(4){MinValue=1.5, MaxValue=10, Precision=0.1}
+#       (SettingSource "Initial size" → key ``scale``) sets the approach
+#       circle's initial size; ``Style`` Bindable<AnimationStyle>(Gravity)
+#       (SettingSource "Style" → key ``style``) picks the easing the circle
+#       scales Scale→1 with over TimePreempt. AnimationStyle enum (order fixes
+#       the serialised integer): Linear, Gravity, InOut1, InOut2, Accelerate1,
+#       Accelerate2, Accelerate3, Decelerate1, Decelerate2, Decelerate3.
+#
+#   osu.Game.Rulesets.Osu/Mods/OsuModTraceable.cs  (acronym "TC",
+#       ModType.DifficultyIncrease, IRequiresApproachCircles). No settings. Its
+#       ApplyNormalVisibilityState hides each hit circle's whole CirclePiece
+#       ("we only want to see the approach circle" — fill + ring + number all
+#       gone; only the approach circle traces the position), hides the slider
+#       tail, and turns the slider body outline-only (body AccentColour opacity
+#       0, BorderColour = AccentColour). Slider heads (a DrawableHitCircle) and
+#       repeat circle-pieces are hidden too; the repeat ARROW is kept.
+FREEZE_FRAME_ACRONYM = "FR"
+TRACEABLE_ACRONYM = "TC"
+APPROACH_DIFFERENT_ACRONYM = "AD"
+
+
+def _has_acronym(mods: list[dict], acronym: str) -> bool:
+    """True iff ``mods`` (a :func:`read_lazer_mods` list) carries ``acronym``."""
+    return any(isinstance(m, dict)
+               and str(m.get("acronym", "")).upper() == acronym
+               for m in mods)
+
+
+def freeze_frame_from_mods(mods: list[dict]) -> bool:
+    """True when the mod list carries Freeze Frame (FR). FR has no settings."""
+    return _has_acronym(mods, FREEZE_FRAME_ACRONYM)
+
+
+def read_freeze_frame(osr_path: Path) -> bool:
+    """True iff the .osr's lazer mod list contains Freeze Frame (FR)."""
+    mods = read_lazer_mods(osr_path)
+    return bool(mods) and freeze_frame_from_mods(mods)
+
+
+def traceable_from_mods(mods: list[dict]) -> bool:
+    """True when the mod list carries Traceable (TC). TC has no settings."""
+    return _has_acronym(mods, TRACEABLE_ACRONYM)
+
+
+def read_traceable(osr_path: Path) -> bool:
+    """True iff the .osr's lazer mod list contains Traceable (TC)."""
+    mods = read_lazer_mods(osr_path)
+    return bool(mods) and traceable_from_mods(mods)
+
+
+# --- Approach Different (AD) settings ----------------------------------------
+APPROACH_DIFFERENT_SCALE_DEFAULT = 4.0
+APPROACH_DIFFERENT_SCALE_RANGE = (1.5, 10.0)   # BindableFloat(4){Min 1.5, Max 10}
+_AD_SCALE_KEY = "scale"
+_AD_STYLE_KEY = "style"
+# The AnimationStyle enum, in declaration order — the index IS the integer
+# Newtonsoft serialises for a Bindable<AnimationStyle>. Names are lower-cased
+# so a stringified value ("Gravity"/"InOut1"/…) is accepted too.
+APPROACH_DIFFERENT_STYLES = (
+    "linear", "gravity", "inout1", "inout2",
+    "accelerate1", "accelerate2", "accelerate3",
+    "decelerate1", "decelerate2", "decelerate3",
+)
+APPROACH_DIFFERENT_STYLE_DEFAULT = "gravity"   # Bindable<AnimationStyle>(Gravity)
+
+
+@dataclass(frozen=True)
+class ApproachDifferent:
+    """The AD config read from a .osr. ``scale`` is the approach circle's
+    initial size multiplier (clamped to [1.5, 10]; default 4). ``style`` is one
+    of :data:`APPROACH_DIFFERENT_STYLES` — the easing the approach circle
+    shrinks Scale→1 with (default ``"gravity"`` == Easing.InBack)."""
+    scale: float = APPROACH_DIFFERENT_SCALE_DEFAULT
+    style: str = APPROACH_DIFFERENT_STYLE_DEFAULT
+
+
+def _ad_style(settings: dict) -> str:
+    """The AD AnimationStyle from the blob settings. Accepts the serialised
+    enum integer (index into declaration order) or a string name; anything
+    absent/unrecognised falls back to the enum default (Gravity)."""
+    v = settings.get(_AD_STYLE_KEY)
+    if isinstance(v, bool):
+        return APPROACH_DIFFERENT_STYLE_DEFAULT
+    if isinstance(v, (int, float)):
+        i = int(v)
+        if 0 <= i < len(APPROACH_DIFFERENT_STYLES):
+            return APPROACH_DIFFERENT_STYLES[i]
+        return APPROACH_DIFFERENT_STYLE_DEFAULT
+    if isinstance(v, str):
+        key = v.strip().lower()
+        if key in APPROACH_DIFFERENT_STYLES:
+            return key
+    return APPROACH_DIFFERENT_STYLE_DEFAULT
+
+
+def approach_different_from_mods(mods: list[dict]) -> "ApproachDifferent | None":
+    """The AD config (scale + style) from an already-parsed
+    :func:`read_lazer_mods` list, or None when no AD mod is present.
+    ``scale`` is clamped to the SettingSource range; an absent/non-numeric
+    value falls back to the default (4)."""
+    for m in mods:
+        if isinstance(m, dict) and str(m.get("acronym", "")).upper() == APPROACH_DIFFERENT_ACRONYM:
+            s = m.get("settings") or {}
+            raw = _da_num(s, _AD_SCALE_KEY)
+            if raw is None:
+                scale = APPROACH_DIFFERENT_SCALE_DEFAULT
+            else:
+                lo, hi = APPROACH_DIFFERENT_SCALE_RANGE
+                scale = min(hi, max(lo, raw))
+            return ApproachDifferent(scale=scale, style=_ad_style(s))
+    return None
+
+
+def read_approach_different(osr_path: Path) -> "ApproachDifferent | None":
+    """The AD config (scale + style) from a .osr, or None when the replay
+    carries no Approach Different mod (or no ScoreInfo blob). Never raises."""
+    mods = read_lazer_mods(osr_path)
+    if not mods:
+        return None
+    return approach_different_from_mods(mods)

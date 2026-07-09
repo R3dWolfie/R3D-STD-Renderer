@@ -27,12 +27,15 @@ from pathlib import Path
 from osrparse import Replay
 
 from .lazer_mods import (LAZER_GAME_VERSION,
+                         approach_different_from_mods,
                          difficulty_adjust_from_mods,
+                         freeze_frame_from_mods,
                          mirror_from_mods,
                          random_from_mods,
                          rate_adjust_from_mods,
                          rate_ramp_from_mods,
                          read_lazer_mods,
+                         traceable_from_mods,
                          transform_from_mods)
 
 # osrparse seeds the last frame with this sentinel time_delta (RNG seed).
@@ -184,12 +187,31 @@ class ReplayMeta:
     transform_acronym: str = ""
     transform_start_scale: float = 1.0
     transform_strength: float = 1.0
+    # Approach/circle-appearance mods (FR/AD/TC): purely visual — the beatmap
+    # geometry, the cursor and the judgement/reconcile are UNTOUCHED (the scene
+    # never mutates diff.preempt). Each is False/None for every replay that
+    # doesn't carry it, so those renders stay byte-identical. See
+    # lazer_mods.py + render/appearance_mods.py.
+    #   freeze_frame (FR): a whole combo's approach circles appear together.
+    #   traceable (TC): hit circles show only their approach circle; sliders
+    #     become outline-only.
+    #   approach_scale/approach_style (AD): the approach circle's custom initial
+    #     size + shrink-easing (None/"" = no AD).
+    freeze_frame: bool = False
+    traceable: bool = False
+    approach_scale: float | None = None
+    approach_style: str = ""
 
     @property
     def has_transform(self) -> bool:
         """True when the replay carries a GR/DF/SI/WG/TR entrance-animation
         mod (purely visual — judgement/reconcile stay on the real positions)."""
         return bool(self.transform_acronym)
+
+    @property
+    def has_approach_different(self) -> bool:
+        """True when the replay carries the Approach Different mod (AD)."""
+        return self.approach_scale is not None
 
     @property
     def has_mirror(self) -> bool:
@@ -324,6 +346,10 @@ def parse_replay(path: Path) -> tuple[list[StdFrame], ReplayMeta]:
     transform_acronym = ""
     transform_start_scale = 1.0
     transform_strength = 1.0
+    freeze_frame = False
+    traceable = False
+    approach_scale: float | None = None
+    approach_style = ""
     if gv >= LAZER_GAME_VERSION:
         mlist = read_lazer_mods(path)
         if mlist is not None:
@@ -372,6 +398,16 @@ def parse_replay(path: Path) -> tuple[list[StdFrame], ReplayMeta]:
                 transform_acronym = tr.acronym
                 transform_start_scale = tr.start_scale
                 transform_strength = tr.strength
+            # Approach/circle-appearance mods (FR/AD/TC): visual only, so no
+            # geometry/judgement change — the scene reads these flags to drive
+            # the approach-circle scale/timing (FR/AD) and the circle-fill /
+            # slider-outline gate (TC).
+            freeze_frame = freeze_frame_from_mods(mlist)
+            traceable = traceable_from_mods(mlist)
+            ad = approach_different_from_mods(mlist)
+            if ad is not None:
+                approach_scale = ad.scale
+                approach_style = ad.style
 
     meta = ReplayMeta(
         mode=int(r.mode.value if hasattr(r.mode, "value") else r.mode),
@@ -410,6 +446,10 @@ def parse_replay(path: Path) -> tuple[list[StdFrame], ReplayMeta]:
         transform_acronym=transform_acronym,
         transform_start_scale=transform_start_scale,
         transform_strength=transform_strength,
+        freeze_frame=freeze_frame,
+        traceable=traceable,
+        approach_scale=approach_scale,
+        approach_style=approach_style,
     )
     return frames, meta
 
