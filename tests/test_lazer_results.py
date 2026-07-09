@@ -593,3 +593,87 @@ def test_leaderboard_off_matches_pb_only_behaviour():
     LazerResultsScreen(spr, _data(leaderboard=None), total_ms=5000.0)
     # no leaderboard bakes leaked in
     assert spr.textures, "screen baked nothing"
+
+
+# --- played-mod badge row (lazer starAndModDisplay ModDisplay) ----------------------
+
+class _CapSpr(_FakeSpr):
+    """Like _FakeSpr but RETAINS the full rgba so a bake can be pixel-sampled
+    (the plain fake only stores shapes)."""
+
+    def upload_texture(self, key, rgba):
+        self.textures[key] = rgba
+
+
+def test_mod_badges_built_from_lazer_mods():
+    # HD+DT via the full lazer set → one category-coloured pill per mod, in
+    # the .osr display order, and every pill is drawn under the score.
+    spr = _CapSpr()
+    scr = LazerResultsScreen(spr, _data(mods=0, lazer_mods=("HD", "DT")),
+                             total_ms=5000.0)
+    assert scr.mod_pill_texts == ("HD", "DT")
+    assert len(scr.mod_pills) == 2
+    # stage-1 draw includes both baded pill textures (the badge row is drawn)
+    spr.drawn.clear()
+    scr.draw(1900.0)
+    drawn_keys = {s.texture_key for s in spr.drawn}
+    for key, _w, _h in scr.mod_pills:
+        assert key in drawn_keys, "mod badge not drawn on the panel"
+
+
+def test_mod_badges_empty_for_nomod():
+    # nomod → no pills, no row, and the row drawer contributes 0 height so the
+    # nomod panel layout is unchanged from the pre-badge screen.
+    spr = _FakeSpr()
+    scr = LazerResultsScreen(spr, _data(mods=0), total_ms=5000.0)
+    assert scr.mod_pill_texts == ()
+    assert scr.mod_pills == []
+    assert scr._draw_mod_row([], 100.0, 100.0, 1.0) == 0.0
+    # a modded screen draws MORE sprites at the same age (the extra badge row)
+    spr_m = _FakeSpr()
+    scr_m = LazerResultsScreen(spr_m, _data(mods=0, lazer_mods=("HD", "HR")),
+                               total_ms=5000.0)
+    spr.drawn.clear(); spr_m.drawn.clear()
+    scr.draw(1900.0); scr_m.draw(1900.0)
+    assert len(spr_m.drawn) == len(spr.drawn) + 2
+
+
+def test_mod_badges_custom_rate_suffix():
+    # a custom-rate DT (rate_override) carries the compact "DT 1.3×" suffix on
+    # its badge, and that pill is WIDER than the plain default-rate DT badge.
+    spr = _CapSpr()
+    scr = LazerResultsScreen(
+        spr, _data(mods=0, lazer_mods=("HD", "DT"), rate_override=1.3),
+        total_ms=5000.0)
+    assert scr.mod_pill_texts == ("HD", "DT 1.3×")
+    w_custom = scr.mod_pills[1][1]
+    spr2 = _CapSpr()
+    scr2 = LazerResultsScreen(spr2, _data(mods=0, lazer_mods=("HD", "DT")),
+                              total_ms=5000.0)
+    w_plain = scr2.mod_pills[1][1]
+    assert w_custom > w_plain, "custom-rate suffix should widen the DT badge"
+
+
+def test_mod_badge_category_colours():
+    # the badge fill is the HUD's mod_pill_color category colour: a reduction
+    # mod (EZ) bakes green-dominant, a difficulty-increase mod (HR) red-
+    # dominant — proving the pill is coloured by category, end to end.
+    import numpy as np
+    from osu_std_renderer.render.hud import mod_pill_color
+
+    def _fill_rgb(scr, spr, acr):
+        key, _w, _h = scr._bake_mod_pill(acr, mod_pill_color(acr))
+        rgba = spr.textures[key]
+        a = rgba[..., 3]
+        rgb = rgba[..., :3].astype(float)
+        near_white = (rgb[..., 0] > 225) & (rgb[..., 1] > 225) \
+            & (rgb[..., 2] > 225)
+        m = (a > 200) & (~near_white)             # the pill fill, not the text
+        return rgb[m].mean(axis=0)
+
+    spr = _CapSpr()
+    scr = LazerResultsScreen(spr, _data(mods=0), total_ms=5000.0)
+    ez = _fill_rgb(scr, spr, "EZ")               # reduction → green
+    hr = _fill_rgb(scr, spr, "HR")               # increase → red
+    assert ez[1] > ez[0] and ez[1] > ez[2], "EZ badge not green-dominant"
+    assert hr[0] > hr[1] and hr[0] > hr[2], "HR badge not red-dominant"
