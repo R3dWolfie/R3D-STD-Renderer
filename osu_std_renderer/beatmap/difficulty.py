@@ -199,6 +199,29 @@ class Difficulty:
         """§2.4 GetModifiedTime(t) = t / Speed."""
         return t / self.speed
 
+    def apply_difficulty_adjust(self, ar: float | None = None,
+                                cs: float | None = None,
+                                od: float | None = None,
+                                hp: float | None = None,
+                                extended: bool = False) -> None:
+        """OsuModDifficultyAdjust: override the BASE AR/CS/OD/HP with the DA
+        settings (None = keep the beatmap's stat, per lazer's
+        ReadCurrentFromDifficulty baseline). Sets the base stats and
+        re-derives — HR/EZ and rate mods (DT/HT) then apply ON TOP through
+        calculate(), so DA-then-rate matches osu (DA changes the base
+        difficulty; the clock-rate mod scales AR/OD afterwards via `speed`).
+        With ``extended`` (ExtendedLimits) the 0..10 clamp is lifted to 0..11
+        (AR to -10) so beyond-limits stats keep the linear extrapolation."""
+        if ar is not None:
+            self.base_ar = _clamp_da(ar, extended, is_ar=True)
+        if cs is not None:
+            self.base_cs = _clamp_da(cs, extended)
+        if od is not None:
+            self.base_od = _clamp_da(od, extended)
+        if hp is not None:
+            self.base_hp = _clamp_da(hp, extended)
+        self.calculate()
+
     def get_radius(self) -> float:
         """§2.4 GetRadius(): Lazer→CircleRadiusL; Autopilot→100; else CircleRadius.
 
@@ -212,4 +235,16 @@ class Difficulty:
 
 def _clamp01_10(v: float) -> float:
     """§2.2 parseDifficulty: AR/CS/OD/HP clamped to [0,10]."""
+    return max(0.0, min(10.0, v))
+
+
+def _clamp_da(v: float, extended: bool, is_ar: bool = False) -> float:
+    """OsuModDifficultyAdjust bounds. Normally [0,10]; with ExtendedLimits the
+    upper bound rises to 11 (ExtendedMaxValue) and, for AR only, the lower to
+    -10 (ExtendedMinValue). Bypassing the 0..10 clamp is what lets AR/OD/CS>10
+    keep osu's linear extrapolation past the anchors (e.g. AR11 preempt 300ms
+    < AR10 450ms)."""
+    if extended:
+        lo = -10.0 if is_ar else 0.0
+        return max(lo, min(11.0, v))
     return max(0.0, min(10.0, v))

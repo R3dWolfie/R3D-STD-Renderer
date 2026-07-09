@@ -40,6 +40,9 @@ MODULES = [
     "tests.test_mods",
     # osu!(lazer) Classic mod (CL) switchboard (2026-07)
     "tests.test_classic_mod",
+    # osu!(lazer) Difficulty Adjust mod (DA): AR/CS/OD/HP override + extended
+    # limits (2026-07)
+    "tests.test_difficulty_adjust",
     # Relax auto-tap synthesis (RX) + Autopilot path (2026-07)
     "tests.test_relax",
     # FAIL/DEATH handling: detection + animation transforms + F grade (2026-07)

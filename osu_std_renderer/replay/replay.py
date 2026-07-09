@@ -26,7 +26,9 @@ from pathlib import Path
 
 from osrparse import Replay
 
-from .lazer_mods import LAZER_GAME_VERSION, read_lazer_mod_acronyms
+from .lazer_mods import (LAZER_GAME_VERSION,
+                         difficulty_adjust_from_mods,
+                         read_lazer_mods)
 
 # osrparse seeds the last frame with this sentinel time_delta (RNG seed).
 _SEED_DELTA = -12345
@@ -133,11 +135,36 @@ class ReplayMeta:
     # has_classic_mod = the Classic mod ("CL") is in that list.
     lazer_mods: tuple[str, ...] = ()
     has_classic_mod: bool = False
+    # Difficulty Adjust (DA) overrides read from the ScoreInfo blob (lazer
+    # only). Each is the custom AR/CS/OD/HP or None (= keep the beatmap's
+    # value). da_extended_limits mirrors the mod's ExtendedLimits toggle
+    # (allows AR/CS/OD/HP beyond 0..10). See lazer_mods.read_difficulty_adjust.
+    da_ar: float | None = None
+    da_cs: float | None = None
+    da_od: float | None = None
+    da_hp: float | None = None
+    da_extended_limits: bool = False
 
     @property
     def fail_time(self) -> float | None:
         """Death point in MAP ms, or None for a pass (alias of death_ms)."""
         return None if self.death_ms is None else float(self.death_ms)
+
+    @property
+    def has_difficulty_adjust(self) -> bool:
+        """True when the replay carries DA overrides that actually change a
+        stat (an all-absent DA is a no-op and leaves the beatmap untouched)."""
+        return (self.da_ar is not None or self.da_cs is not None
+                or self.da_od is not None or self.da_hp is not None)
+
+    @property
+    def difficulty_adjust(self) -> dict | None:
+        """The DA override mapping for load_full, or None when absent (the
+        gate that keeps non-DA renders on the untouched beatmap path)."""
+        if not self.has_difficulty_adjust:
+            return None
+        return {"ar": self.da_ar, "cs": self.da_cs, "od": self.da_od,
+                "hp": self.da_hp, "extended": self.da_extended_limits}
 
 
 def parse_replay(path: Path) -> tuple[list[StdFrame], ReplayMeta]:
@@ -204,11 +231,19 @@ def parse_replay(path: Path) -> tuple[list[StdFrame], ReplayMeta]:
     gv = int(getattr(r, "game_version", 0) or 0)
     lazer_mods: tuple[str, ...] = ()
     has_classic = False
+    da_ar = da_cs = da_od = da_hp = None
+    da_ext = False
     if gv >= LAZER_GAME_VERSION:
-        acs = read_lazer_mod_acronyms(path)
-        if acs is not None:
-            lazer_mods = tuple(acs)
-            has_classic = any(a.upper() == "CL" for a in acs)
+        mlist = read_lazer_mods(path)
+        if mlist is not None:
+            lazer_mods = tuple(m["acronym"] for m in mlist)
+            has_classic = any(a.upper() == "CL" for a in lazer_mods)
+            # Difficulty Adjust: the legacy `mods` bitmask can't encode DA, so
+            # its custom AR/CS/OD/HP live only in the ScoreInfo blob settings.
+            da = difficulty_adjust_from_mods(mlist)
+            if da is not None:
+                da_ar, da_cs, da_od, da_hp = da.ar, da.cs, da.od, da.hp
+                da_ext = da.extended_limits
 
     meta = ReplayMeta(
         mode=int(r.mode.value if hasattr(r.mode, "value") else r.mode),
@@ -230,6 +265,11 @@ def parse_replay(path: Path) -> tuple[list[StdFrame], ReplayMeta]:
         played_at=played_at,
         lazer_mods=lazer_mods,
         has_classic_mod=has_classic,
+        da_ar=da_ar,
+        da_cs=da_cs,
+        da_od=da_od,
+        da_hp=da_hp,
+        da_extended_limits=da_ext,
     )
     return frames, meta
 

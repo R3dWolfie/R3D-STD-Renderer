@@ -1071,7 +1071,8 @@ def main(argv: list[str] | None = None) -> int:
     else:
         frames, meta = parse_replay(args.osr)
         osu_path = find_osu_file(args.beatmap, meta.beatmap_md5)
-        beatmap = load_full(osu_path, mods=meta.mods)
+        beatmap = load_full(osu_path, mods=meta.mods,
+                            difficulty_adjust=meta.difficulty_adjust)
         # Relax (RX): the .osr has cursor motion but NO key presses (the
         # mod auto-taps). Synthesize the presses OsuModRelax injects so the
         # judgment sim, combo, popups, key overlay, slider-follow tracking
@@ -1098,6 +1099,15 @@ def main(argv: list[str] | None = None) -> int:
         print(f"replay: {meta.player_name} {meta.count_300}/{meta.count_100}/"
               f"{meta.count_50}/{meta.count_miss} {meta.accuracy}% {meta.grade} "
               f"mods={meta.mods:#x} frames={len(frames)}", file=sys.stderr)
+        _da = meta.difficulty_adjust
+        if _da is not None:
+            _parts = " ".join(f"{k.upper()}{_da[k]:g}"
+                              for k in ("ar", "cs", "od", "hp")
+                              if _da[k] is not None)
+            print(f"DA:     override {_parts}"
+                  f"{' [extended-limits]' if _da['extended'] else ''} "
+                  f"-> CS{beatmap.diff.cs:g} AR{beatmap.diff.ar:g} "
+                  f"OD{beatmap.diff.od:g} HP{beatmap.diff.hp:g}", file=sys.stderr)
     else:
         print("replay: (none — --no-replay perfect play)", file=sys.stderr)
     print(f"skin:   \"{skin_info.name or 'default'}\" v{skin_info.version:g}",

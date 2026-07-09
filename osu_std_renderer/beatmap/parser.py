@@ -308,12 +308,27 @@ def parse_objects(path: Path, beatmap: Beatmap, *,
 
 # --- one-call convenience for tools/tests ----------------------------------------
 
-def load_full(path: Path, mods: int = 0) -> Beatmap:
-    """parse_beatmap + parse_objects with mods applied (the render entry)."""
+def load_full(path: Path, mods: int = 0, difficulty_adjust=None) -> Beatmap:
+    """parse_beatmap + parse_objects with mods applied (the render entry).
+
+    ``difficulty_adjust`` (a mapping with keys ar/cs/od/hp/extended, e.g.
+    ReplayMeta.difficulty_adjust) overrides the beatmap's AR/CS/OD/HP for the
+    Difficulty Adjust (DA) mod. Applied AFTER set_mods so DA is the base and
+    DT/HT scale on top, and BEFORE parse_objects so CS-derived stacking uses
+    the DA circle size. None/absent = plain beatmap difficulty (non-DA path is
+    byte-identical)."""
     path = Path(path)
     beatmap = parse_beatmap_file(path)
     if mods:
         beatmap.diff.set_mods(mods)
+    if difficulty_adjust:
+        beatmap.diff.apply_difficulty_adjust(
+            ar=difficulty_adjust.get("ar"),
+            cs=difficulty_adjust.get("cs"),
+            od=difficulty_adjust.get("od"),
+            hp=difficulty_adjust.get("hp"),
+            extended=bool(difficulty_adjust.get("extended", False)),
+        )
     parse_objects(path, beatmap)
     return beatmap
 
