@@ -1295,8 +1295,10 @@ class StdScene:
         order + straight-alpha blend), just with more pixels, so the card's
         text/panels rasterise crisp and survive the downscale. The scene
         behind (usually already faded to black by results_start_ms) is drawn
-        once at output res and blitted up as the backdrop, so no gameplay
-        detail is invented — only the card gains resolution."""
+        once at output res and stretched up by the GPU as the backdrop, so
+        no gameplay detail is invented — only the card gains resolution. The
+        one CPU cost is the final LANCZOS downscale of the supersampled
+        composite (the base upscale rides the GPU blit for free)."""
         from PIL import Image
 
         spr_hi = self.results_ssaa
@@ -1307,12 +1309,12 @@ class StdScene:
         self.render_frame(t, skip_results=True)
         base = self.spr.read_rgb()                       # (oh, ow, 3)
 
-        # 2) supersampled composite: base as the backdrop, card on top
-        base_hi = np.asarray(
-            Image.fromarray(base).resize((iw, ih), Image.BILINEAR),
-            dtype=np.uint8)
+        # 2) supersampled composite: blit the output-res base up as the
+        #    backdrop (GPU LINEAR stretch — it sits under the card's dim
+        #    wash / behind a fully-faded scene, so a mip chain is waste),
+        #    then draw the card on top at the internal res
         spr_hi.begin(clear=(0.0, 0.0, 0.0))
-        spr_hi.upload_texture("_ssaa_base", base_hi)
+        spr_hi.upload_texture("_ssaa_base", base, mipmaps=False)
         spr_hi.draw([Sprite(iw / 2.0, ih / 2.0, float(iw), float(ih),
                             "_ssaa_base", (1.0, 1.0, 1.0, 1.0))])
         self.results.draw(t - self.results_start_ms)     # into spr_hi

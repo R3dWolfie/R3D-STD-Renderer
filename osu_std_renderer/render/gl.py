@@ -112,19 +112,22 @@ class SpriteRenderer:
     # --- texture management ---------------------------------------------------
 
     def upload_texture(self, key: str, rgba: np.ndarray,
-                       clamp: bool = False) -> None:
+                       clamp: bool = False, mipmaps: bool = True) -> None:
         """rgba: HxWx4 uint8 array (top-left origin). Re-uploading a key
         releases the previous texture (the HUD hp bar re-uploads per
         frame — without the release that's a VRAM leak). clamp=True sets
         clamp-to-edge wrapping (the flashlight overlay samples uv beyond
-        [0,1] and needs the edge texel, not a repeat)."""
+        [0,1] and needs the edge texel, not a repeat). mipmaps=False skips
+        the mipmap build + uses plain LINEAR — for a texture drawn at ~1:1
+        every frame (the SSAA base blit) building a full mip chain each
+        frame is pure waste."""
         if rgba.dtype != np.uint8:
             rgba = rgba.astype("u1")
         if rgba.shape[2] == 3:
             a = np.full(rgba.shape[:2] + (1,), 255, dtype="u1")
             rgba = np.concatenate([rgba, a], axis=2)
         old = self._textures.get(key)
-        tex = self._make_texture_rgba(rgba)
+        tex = self._make_texture_rgba(rgba, mipmaps=mipmaps)
         if clamp:
             tex.repeat_x = False
             tex.repeat_y = False
@@ -138,11 +141,15 @@ class SpriteRenderer:
     def has_texture(self, key: str) -> bool:
         return key in self._textures
 
-    def _make_texture_rgba(self, rgba: np.ndarray) -> "moderngl.Texture":
+    def _make_texture_rgba(self, rgba: np.ndarray,
+                           mipmaps: bool = True) -> "moderngl.Texture":
         h, w = rgba.shape[:2]
         tex = self.ctx.texture((w, h), 4, rgba.tobytes())
-        tex.build_mipmaps()
-        tex.filter = (moderngl.LINEAR_MIPMAP_LINEAR, moderngl.LINEAR)
+        if mipmaps:
+            tex.build_mipmaps()
+            tex.filter = (moderngl.LINEAR_MIPMAP_LINEAR, moderngl.LINEAR)
+        else:
+            tex.filter = (moderngl.LINEAR, moderngl.LINEAR)
         return tex
 
     # --- drawing --------------------------------------------------------------
