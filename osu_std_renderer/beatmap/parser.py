@@ -19,6 +19,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .beatmap import Beatmap
+from .mods_position import apply_mirror, apply_random
 from .objects.base import (TYPE_CIRCLE, TYPE_LONGNOTE, TYPE_SLIDER,
                            TYPE_SPINNER, create_object)
 from .objects.slider import Slider
@@ -230,8 +231,18 @@ def parse_timing_points_and_pauses(path: Path, beatmap: Beatmap) -> None:
 def parse_objects(path: Path, beatmap: Beatmap, *,
                   diff_calc_only: bool = False,
                   parse_colors: bool = True,
-                  stack_enabled: bool = True) -> None:
-    """Play/render pass: real hit objects, combos, slider paths, stacking."""
+                  stack_enabled: bool = True,
+                  mirror_reflection: str = "",
+                  random_seed: int | None = None,
+                  random_angle_sharpness: float = 7.0) -> None:
+    """Play/render pass: real hit objects, combos, slider paths, stacking.
+
+    ``mirror_reflection`` (MR) reflects every object about the playfield centre
+    BEFORE slider paths + stacking are built (lazer runs MR as
+    IApplicableToHitObject, before PostProcess). ``random_seed`` (RD) is the
+    .NET Random seed that repositions the objects AFTER stacking (lazer runs RD
+    as IApplicableToBeatmap, after PostProcess) — the pre-RD stack indices are
+    kept. Both default to no-op so a non-MR/RD parse is byte-identical."""
     path = Path(path)
     section = ""
     beatmap.combo_colors = []
@@ -291,6 +302,12 @@ def parse_objects(path: Path, beatmap: Beatmap, *,
     if beatmap.hit_objects:
         beatmap.hit_objects[-1].set_last_in_combo(True)
 
+    # --- MR (Mirror): reflect positions BEFORE slider paths + stacking ----------
+    # lazer applies OsuModMirror as IApplicableToHitObject, i.e. before
+    # PostProcess/stacking, so the mirrored geometry is what stacking sees.
+    if mirror_reflection:
+        apply_mirror(beatmap.hit_objects, mirror_reflection)
+
     # --- SetTiming: slider path/tick generation (parser.go step 6) --------------
     invalid: list = []
     for obj in beatmap.hit_objects:
@@ -305,11 +322,24 @@ def parse_objects(path: Path, beatmap: Beatmap, *,
     if stack_enabled or diff_calc_only:
         beatmap.calculate_stack_leniency(beatmap.diff)
 
+    # --- RD (Random): reposition AFTER stacking ---------------------------------
+    # lazer applies OsuModRandom as IApplicableToBeatmap, i.e. AFTER PostProcess
+    # (stacking): stacking is computed on the ORIGINAL positions, then RD moves
+    # the objects while the pre-RD StackHeight is kept. Skipped for diff-calc
+    # (no stable score path is built there for apply_random to rebuild).
+    if random_seed is not None and not diff_calc_only:
+        apply_random(beatmap.hit_objects, random_seed, beatmap.diff,
+                     beatmap.timings, beatmap.version,
+                     angle_sharpness=random_angle_sharpness)
+
 
 # --- one-call convenience for tools/tests ----------------------------------------
 
 def load_full(path: Path, mods: int = 0, difficulty_adjust=None,
-              speed_override: float | None = None) -> Beatmap:
+              speed_override: float | None = None,
+              mirror_reflection: str = "",
+              random_seed: int | None = None,
+              random_angle_sharpness: float = 7.0) -> Beatmap:
     """parse_beatmap + parse_objects with mods applied (the render entry).
 
     ``difficulty_adjust`` (a mapping with keys ar/cs/od/hp/extended, e.g.
@@ -323,7 +353,12 @@ def load_full(path: Path, mods: int = 0, difficulty_adjust=None,
     rate from a DT/NC/HT/DC speed_change. Applied AFTER set_mods so it replaces
     the bitmask's fixed 1.5/0.75 — the whole timeline + ar_real/od_real +
     GetModifiedTime then follow the real rate. None = the bitmask rate
-    (byte-identical legacy path)."""
+    (byte-identical legacy path).
+
+    ``mirror_reflection`` (MR, e.g. ReplayMeta.mirror_reflection) and
+    ``random_seed`` (RD, e.g. ReplayMeta.random_seed) are the position mods,
+    threaded to parse_objects — MR reflects before stacking, RD repositions
+    after. Empty/None (the default) leaves the geometry untouched."""
     path = Path(path)
     beatmap = parse_beatmap_file(path)
     if mods:
@@ -338,7 +373,10 @@ def load_full(path: Path, mods: int = 0, difficulty_adjust=None,
         )
     if speed_override is not None:
         beatmap.diff.set_custom_speed(speed_override)
-    parse_objects(path, beatmap)
+    parse_objects(path, beatmap,
+                  mirror_reflection=mirror_reflection,
+                  random_seed=random_seed,
+                  random_angle_sharpness=random_angle_sharpness)
     return beatmap
 
 

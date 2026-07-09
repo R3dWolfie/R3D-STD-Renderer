@@ -28,6 +28,8 @@ from osrparse import Replay
 
 from .lazer_mods import (LAZER_GAME_VERSION,
                          difficulty_adjust_from_mods,
+                         mirror_from_mods,
+                         random_from_mods,
                          rate_adjust_from_mods,
                          rate_ramp_from_mods,
                          read_lazer_mods)
@@ -163,6 +165,26 @@ class ReplayMeta:
     ramp_initial: float | None = None
     ramp_final: float | None = None
     ramp_pitch: bool = False
+    # Position mods (lazer-only). Mirror (MR): the reflection axis
+    # ("horizontal"/"vertical"/"both", "" = no MR) — objects are flipped about
+    # the playfield centre. Random (RD): the .NET System.Random seed that
+    # scatters the objects (None = no RD) plus its AngleSharpness. Both are
+    # empty/None for every non-MR/RD replay, so those renders are byte-identical.
+    # See beatmap/mods_position.py.
+    mirror_reflection: str = ""
+    random_seed: int | None = None
+    random_angle_sharpness: float = 7.0
+
+    @property
+    def has_mirror(self) -> bool:
+        """True when the replay carries a Mirror mod (objects reflected)."""
+        return bool(self.mirror_reflection)
+
+    @property
+    def has_random(self) -> bool:
+        """True when the replay carries a reproducible Random mod (a seed is
+        present). The gate that keeps every non-RD render byte-identical."""
+        return self.random_seed is not None
 
     @property
     def fail_time(self) -> float | None:
@@ -280,6 +302,9 @@ def parse_replay(path: Path) -> tuple[list[StdFrame], ReplayMeta]:
     ramp_initial: float | None = None
     ramp_final: float | None = None
     ramp_pitch = False
+    mirror_reflection = ""
+    random_seed: int | None = None
+    random_angle_sharpness = 7.0
     if gv >= LAZER_GAME_VERSION:
         mlist = read_lazer_mods(path)
         if mlist is not None:
@@ -309,6 +334,17 @@ def parse_replay(path: Path) -> tuple[list[StdFrame], ReplayMeta]:
                 ramp_initial = rr.initial
                 ramp_final = rr.final
                 ramp_pitch = rr.adjust_pitch
+            # Mirror (MR): the reflection axis the objects are flipped about.
+            mr = mirror_from_mods(mlist)
+            if mr is not None:
+                mirror_reflection = mr
+            # Random (RD): the .NET Random seed that repositions the objects.
+            # A replay persists the actual seed used; without one the positions
+            # can't be reproduced, so leave random_seed None (renders untouched).
+            rd = random_from_mods(mlist)
+            if rd is not None and rd.seed is not None:
+                random_seed = rd.seed
+                random_angle_sharpness = rd.angle_sharpness
 
     meta = ReplayMeta(
         mode=int(r.mode.value if hasattr(r.mode, "value") else r.mode),
@@ -341,6 +377,9 @@ def parse_replay(path: Path) -> tuple[list[StdFrame], ReplayMeta]:
         ramp_initial=ramp_initial,
         ramp_final=ramp_final,
         ramp_pitch=ramp_pitch,
+        mirror_reflection=mirror_reflection,
+        random_seed=random_seed,
+        random_angle_sharpness=random_angle_sharpness,
     )
     return frames, meta
 

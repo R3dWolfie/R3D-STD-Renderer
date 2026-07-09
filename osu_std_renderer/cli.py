@@ -1160,7 +1160,17 @@ def main(argv: list[str] | None = None) -> int:
         osu_path = find_osu_file(args.beatmap, meta.beatmap_md5)
         beatmap = load_full(osu_path, mods=meta.mods,
                             difficulty_adjust=meta.difficulty_adjust,
-                            speed_override=meta.rate_override)
+                            speed_override=meta.rate_override,
+                            mirror_reflection=meta.mirror_reflection,
+                            random_seed=meta.random_seed,
+                            random_angle_sharpness=meta.random_angle_sharpness)
+        if meta.has_mirror:
+            print(f"mirror: MR reflection={meta.mirror_reflection} "
+                  f"(objects flipped about the playfield centre)", file=sys.stderr)
+        if meta.has_random:
+            print(f"random: RD seed={meta.random_seed} "
+                  f"angle_sharpness={meta.random_angle_sharpness:g} "
+                  f"(objects repositioned)", file=sys.stderr)
         # Relax (RX): the .osr has cursor motion but NO key presses (the
         # mod auto-taps). Synthesize the presses OsuModRelax injects so the
         # judgment sim, combo, popups, key overlay, slider-follow tracking

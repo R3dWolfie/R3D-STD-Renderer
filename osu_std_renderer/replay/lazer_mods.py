@@ -398,3 +398,90 @@ def read_rate_ramp(osr_path: Path) -> "RateRamp | None":
     if not mods:
         return None
     return rate_ramp_from_mods(mods)
+
+
+# --- Position mods: Mirror (MR) and Random (RD) ------------------------------
+# osu.Game.Rulesets.Osu/Mods/OsuModMirror.cs — ``Reflection`` is a
+# ``Bindable<MirrorType>()`` whose default (enum value 0) is Horizontal, so an
+# ABSENT setting means Horizontal. The SettingSource "Flipped axes" serialises
+# under the snake_case key ``reflection``; MirrorType.Horizontal=0 / Vertical=1
+# / Both=2 (Newtonsoft writes the enum's integer value; a stringified name is
+# tolerated too). Handled in beatmap/mods_position.apply_mirror.
+MIRROR_ACRONYM = "MR"
+_MIRROR_KEY = "reflection"
+_MIRROR_BY_INT = {0: "horizontal", 1: "vertical", 2: "both"}
+
+
+def mirror_from_mods(mods: list[dict]) -> "str | None":
+    """The MR reflection axis (``"horizontal"``/``"vertical"``/``"both"``) from
+    an already-parsed :func:`read_lazer_mods` list, or None when no MR mod is
+    present. An absent/unrecognised ``reflection`` falls back to the enum
+    default, Horizontal."""
+    for m in mods:
+        if isinstance(m, dict) and str(m.get("acronym", "")).upper() == MIRROR_ACRONYM:
+            s = m.get("settings") or {}
+            v = s.get(_MIRROR_KEY)
+            if isinstance(v, bool):
+                v = None
+            if isinstance(v, (int, float)):
+                return _MIRROR_BY_INT.get(int(v), "horizontal")
+            if isinstance(v, str):
+                key = v.strip().lower()
+                if key in ("horizontal", "vertical", "both"):
+                    return key
+            return "horizontal"   # setting absent -> enum default (Horizontal)
+    return None
+
+
+def read_mirror(osr_path: Path) -> "str | None":
+    """The MR reflection axis from a .osr, or None when the replay carries no
+    Mirror mod (or no ScoreInfo blob). Never raises."""
+    mods = read_lazer_mods(osr_path)
+    if not mods:
+        return None
+    return mirror_from_mods(mods)
+
+
+# osu.Game.Rulesets.Osu/Mods/OsuModRandom.cs + osu.Game/Rulesets/Mods/ModRandom.cs
+# RD seeds .NET's ``System.Random`` with the ``Seed`` setting (Bindable<int?>);
+# a replay ALWAYS persists the actual seed used (``Seed.Value ??= RNG.Next()``),
+# so it can be reproduced. ``AngleSharpness`` (BindableFloat, default 7, [1,10])
+# tunes the jump-angle distribution. Both live under the snake_case keys
+# ``seed`` / ``angle_sharpness`` in the ScoreInfo blob settings.
+RANDOM_ACRONYM = "RD"
+_RANDOM_SEED_KEY = "seed"
+_RANDOM_ANGLE_KEY = "angle_sharpness"
+RANDOM_ANGLE_DEFAULT = 7.0
+
+
+@dataclass(frozen=True)
+class RandomMod:
+    """The RD mod read from a .osr. ``seed`` is the .NET Random seed (None only
+    when a replay somehow omitted it — then the positions can't be reproduced).
+    ``angle_sharpness`` mirrors the AngleSharpness setting (default 7)."""
+    seed: int | None
+    angle_sharpness: float = RANDOM_ANGLE_DEFAULT
+
+
+def random_from_mods(mods: list[dict]) -> "RandomMod | None":
+    """The RD mod (seed + angle_sharpness) from an already-parsed
+    :func:`read_lazer_mods` list, or None when no RD mod is present."""
+    for m in mods:
+        if isinstance(m, dict) and str(m.get("acronym", "")).upper() == RANDOM_ACRONYM:
+            s = m.get("settings") or {}
+            sv = s.get(_RANDOM_SEED_KEY)
+            seed = (int(sv) if isinstance(sv, (int, float))
+                    and not isinstance(sv, bool) else None)
+            av = _da_num(s, _RANDOM_ANGLE_KEY)
+            angle = av if av is not None else RANDOM_ANGLE_DEFAULT
+            return RandomMod(seed=seed, angle_sharpness=angle)
+    return None
+
+
+def read_random(osr_path: Path) -> "RandomMod | None":
+    """The RD mod (seed + angle_sharpness) from a .osr, or None when the replay
+    carries no Random mod (or no ScoreInfo blob). Never raises."""
+    mods = read_lazer_mods(osr_path)
+    if not mods:
+        return None
+    return random_from_mods(mods)
