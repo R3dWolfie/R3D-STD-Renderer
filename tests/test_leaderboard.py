@@ -48,8 +48,11 @@ def _row(replay, player, did, score, deleted=0, md5="MAP", grade="A", acc=95.0):
 
 def test_query_best_per_player_dedups_and_orders():
     path = _make_db([
-        _row("a1", "R3D", "111", 56717),
-        _row("a2", "R3D", "111", 4527),          # R3D's lower render — dropped
+        # R3D's LOWER render is inserted FIRST — a plain GROUP BY (no MAX)
+        # would return this arbitrary first row; best-per-player must still
+        # surface 56717 (this is the exact bug the proof render caught).
+        _row("a2", "R3D", "111", 4527),
+        _row("a1", "R3D", "111", 56717),          # the actual best
         _row("b1", "Mayulody", "222", 6888),
         _row("c1", "VI0", "osu_30196342", 2086),
         _row("z1", "R3D", "111", 900, md5="OTHER"),   # different map — excluded
@@ -199,12 +202,17 @@ def test_is_fetchable_id():
 
 
 def test_resolve_avatar_no_token_returns_none(monkeypatch=None):
-    # no token in env → no fetch → None (caller draws the procedural chip)
+    # no token in env → no fetch → None (caller draws the procedural chip).
+    # Uses a fresh, UNCACHED id so a real cached avatar can't mask the path.
     import osu_std_renderer.render.leaderboard as lb
+    fresh = "990000000000000001"
+    p = avatar_cache_path(fresh)
+    if os.path.exists(p):
+        os.unlink(p)
     old_tok = os.environ.pop("DISCORD_BOT_TOKEN", None)
     old_tok2 = os.environ.pop("R3D_DISCORD_BOT_TOKEN", None)
     try:
-        assert resolve_avatar_bytes("111166802121281536") is None
+        assert resolve_avatar_bytes(fresh) is None
         # a non-fetchable placeholder is always None regardless of token
         assert resolve_avatar_bytes("osu_30196342") is None
         assert resolve_avatar_bytes(None) is None

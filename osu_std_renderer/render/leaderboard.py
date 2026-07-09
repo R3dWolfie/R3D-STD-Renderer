@@ -81,7 +81,13 @@ def query_leaderboard(db_path, beatmap_md5: str,
         return []
     try:
         cur = con.cursor()
-        sql = (f"SELECT {', '.join(_LB_COLUMNS)} FROM renders "
+        # MAX(score) drives SQLite's bare-column rule: the other columns then
+        # take their values from each player's MAX-score row (a real render).
+        # (A plain GROUP BY without the aggregate would return an ARBITRARY
+        # row per player — NOT their best.)
+        select_cols = ", ".join("MAX(score) AS score" if c == "score" else c
+                                for c in _LB_COLUMNS)
+        sql = (f"SELECT {select_cols} FROM renders "
                "WHERE beatmap_md5 = ? AND deleted = 0")
         params: list = [beatmap_md5]
         if exclude_replay_md5:
