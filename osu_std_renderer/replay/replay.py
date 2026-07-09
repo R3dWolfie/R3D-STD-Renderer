@@ -36,9 +36,62 @@ KEY_K1 = 4
 KEY_K2 = 8
 KEY_SMOKE = 16
 
+# mod bits (osu! wiki / .osr Mods) relevant to fail immunity. A play under a
+# mod that overrides failing NEVER reaches the fail screen — these implement
+# osu.Game IApplicableFailOverride with PerformFail() => false:
+#   * OsuModNoFail    (ModNoFail)        — bit 1
+#   * OsuModAutopilot (Relax2)           — bit 8192
+# (Relax does NOT override failing — you can still fail while relaxing, so it
+# is deliberately absent. Cinema/Autoplay don't submit replays.)
+MOD_NOFAIL = 0x1
+MOD_AUTOPILOT = 0x2000
+_FAIL_IMMUNE_MODS = MOD_NOFAIL | MOD_AUTOPILOT
+
+# life-bar health at/under this counts as "dead" (osrparse LifeBarState.life
+# is 0..1; use a tiny epsilon so float noise near 0 still trips).
+_DEAD_HEALTH_EPS = 0.001
+
 
 class ReplayParseError(RuntimeError):
     pass
+
+
+def detect_fail_time(replay) -> float | None:
+    """The death point of a replay, or None for a PASS.
+
+    Ported from the osu! fail model: a play fails the instant its health
+    (HP bar) reaches zero (osu.Game/Rulesets/Scoring/HealthProcessor.cs —
+    ``HasFailed => Health.Value == HealthProcessor.MinimumHealth`` where the
+    minimum is 0). We read the AUTHORITATIVE record of that curve — the
+    .osr's life-bar graph (osrparse ``Replay.life_bar_graph`` = a list of
+    ``LifeBarState(time, life)`` with life in 0..1) — and return the FIRST
+    state whose life hits 0.
+
+    Safeguards:
+      * FAIL-IMMUNE MODS: NoFail / Autopilot override failing in osu!
+        (IApplicableFailOverride.PerformFail() => false), so the play can
+        never fail regardless of the HP curve — return None.
+      * EMPTY / MISSING life-bar graph (some lazer .osr omit it): be
+        CONSERVATIVE and return None (PASS). We NEVER fail a replay off our
+        own HP simulation — a submitted replay demonstrably *finished the
+        map* unless the lifebar explicitly records a zero, so only that
+        explicit evidence trips a fail. This keeps false-fails impossible on
+        the pass path.
+    """
+    try:
+        mods = int(replay.mods)
+    except (TypeError, ValueError, AttributeError):
+        mods = 0
+    if mods & _FAIL_IMMUNE_MODS:
+        return None
+    graph = getattr(replay, "life_bar_graph", None) or []
+    for state in graph:
+        try:
+            if float(state.life) <= _DEAD_HEALTH_EPS:
+                return float(int(state.time))
+        except (TypeError, ValueError, AttributeError):
+            continue
+    return None
 
 
 @dataclass(frozen=True)
@@ -73,6 +126,11 @@ class ReplayMeta:
     game_version: int = 0    # <30000000 = osu!stable, else lazer
     death_ms: int | None = None
     played_at: str = ""      # .osr timestamp → "Played on <date>" (results)
+
+    @property
+    def fail_time(self) -> float | None:
+        """Death point in MAP ms, or None for a pass (alias of death_ms)."""
+        return None if self.death_ms is None else float(self.death_ms)
 
 
 def parse_replay(path: Path) -> tuple[list[StdFrame], ReplayMeta]:
@@ -119,17 +177,10 @@ def parse_replay(path: Path) -> tuple[list[StdFrame], ReplayMeta]:
     else:
         acc = 1.0
 
-    # fail detection from the life-bar graph (NoFail exempt) — catch-proven
-    death_ms: int | None = None
-    NF = 0x1
-    if not (int(r.mods) & NF):
-        for e in (getattr(r, "life_bar_graph", None) or []):
-            try:
-                if float(e.life) <= 0.001:
-                    death_ms = int(e.time)
-                    break
-            except (TypeError, ValueError, AttributeError):
-                continue
+    # fail detection from the life-bar graph — NoFail/Autopilot exempt,
+    # empty-lifebar conservative (see detect_fail_time).
+    _ft = detect_fail_time(r)
+    death_ms: int | None = None if _ft is None else int(_ft)
 
     # play date from the .osr timestamp (osrparse → datetime); "" fail-soft
     played_at = ""

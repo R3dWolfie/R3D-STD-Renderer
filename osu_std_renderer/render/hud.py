@@ -217,6 +217,9 @@ GRADE_COLORS = {
     "B": (0.43, 0.71, 0.86),
     "C": (0.78, 0.51, 0.86),
     "D": (0.86, 0.43, 0.43),
+    # F = FAIL: osu!stable's red fail grade (lazer's ScoreRank bottoms at D,
+    # but the owner wants the stable red F). Reuse the D/ForRank fail red.
+    "F": (1.0, 0.353, 0.353),      # ff5a5a
 }
 GRADE_RANKING_ELEMENT = {      # grade → legacy small badge element
     "SS": "ranking-X-small", "S": "ranking-S-small", "A": "ranking-A-small",
@@ -778,6 +781,18 @@ class HudData:
         """(300s, 100s, 50s, misses) judged so far — the hit counter."""
         i = bisect.bisect_right(self.ev_times, t) - 1
         return self.ev_counts[i] if i >= 0 else (0, 0, 0, 0)
+
+    def score_upto(self, t: float) -> int:
+        """Raw (un-rolled) judged score at/before t — the frozen score for
+        a FAILED play (the tally as it stood at the death point)."""
+        i = bisect.bisect_right(self.ev_times, t) - 1
+        return self.ev_scores[i] if i >= 0 else 0
+
+    def max_combo_upto(self, t: float) -> int:
+        """Peak combo reached at/before t — max combo AT the death point for
+        a failed play (not the whole-map peak)."""
+        i = bisect.bisect_right(self.ct_times, t)
+        return max(self.ct_combos[:i], default=0)
 
     def combo_at(self, t: float) -> tuple[int, float]:
         """(combo, ms since it last changed)."""

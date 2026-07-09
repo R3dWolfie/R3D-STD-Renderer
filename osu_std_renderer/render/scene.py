@@ -141,6 +141,7 @@ from __future__ import annotations
 
 import bisect
 import math
+from dataclasses import replace
 
 import numpy as np
 
@@ -217,6 +218,23 @@ POPUP_SKIN_ELEMENT = {         # judgment kind → skin sprite element
 # hit0 popup falls + slightly rotates while fading (miss_fall_transform)
 MISS_FALL_DISTANCE_OSU = 100.0     # MoveToOffset (0, 100) over the fade
 MISS_FALL_ROT_RAD = math.radians(8.6)   # RotateTo(RNG ±8.6°) stand-in
+
+# --- FAIL animation (port of ppy/osu FailAnimationContainer.cs, MIT) -----------------
+# The whole sequence runs `duration = 2500` ms of WALL time from the death
+# point; the CLI scales it by the rate mod into map-ms. Values quoted from
+# the source (Start()/dropOffScreen()); see render_fail_frame().
+FAIL_DURATION_MS = 2500.0          # const float duration = 2500
+FAIL_FALL_OSU = 400.0              # MoveTo(originalPosition + (0, 400))
+FAIL_ROT_RANGE_DEG = 90.0          # RNG.NextSingle(-90, 90)  (degrees)
+FAIL_OBJ_SCALE_TO = 0.5            # ScaleTo(originalScale * 0.5f)
+FAIL_CONTENT_SCALE_TO = 0.85       # Content.ScaleTo(0.85, OutQuart)
+FAIL_CONTENT_ROT_DEG = 1.0         # Content.RotateTo(1, OutQuart)  (degrees)
+FAIL_GRAY = 0.5                    # Content.FadeColour(Color4.Gray) → ×0.5 rgb
+FAIL_BG_GRAY = 0.3                 # Background.FadeColour(OsuColour.Gray(0.3))
+FAIL_BG_FADE_MS = 60.0             #   … over 60 ms
+FAIL_OBJ_FADE_MS = FAIL_DURATION_MS / 2.0   # HitObjectContainer.FadeOut(dur/2)
+FAIL_RED_ALPHA = 0.6               # redFlashLayer Color4.Red.Opacity(0.6f)
+FAIL_RED_FADE_MS = 1000.0          # redFlashLayer.FadeOutFromOne(1000)
 
 # playfield borders (--playfield-borders none|edges|full): subtle
 # low-alpha white outline of the playfield bounds
@@ -468,6 +486,101 @@ def miss_fall_transform(age_ms: float,
     return MISS_FALL_DISTANCE_OSU * ease, rot_final * ease
 
 
+# --- FAIL animation transforms (pure; FailAnimationContainer.cs port) ----------------
+
+def _ease_out_quart(p: float) -> float:
+    return 1.0 - (1.0 - _clamp01(p)) ** 4
+
+
+def fail_progress(age_ms: float, duration_ms: float = FAIL_DURATION_MS) -> float:
+    """[0,1] progress of the fail animation, `age_ms` after the death point."""
+    if duration_ms <= 0.0:
+        return 1.0
+    return _clamp01(age_ms / duration_ms)
+
+
+def fail_object_alpha(age_ms: float,
+                      fade_ms: float = FAIL_OBJ_FADE_MS) -> float:
+    """HitObjectContainer.FadeOut(duration / 2): objects fade 1→0 over the
+    first half of the sequence, then stay gone."""
+    return 1.0 - _clamp01(age_ms / fade_ms) if fade_ms > 0 else 0.0
+
+
+def fail_red_alpha(age_ms: float) -> float:
+    """redFlashLayer (Color4.Red.Opacity(0.6f), additive) FadeOutFromOne
+    (1000): effective additive-red alpha = 0.6 × (1→0 over 1000 ms)."""
+    return FAIL_RED_ALPHA * (1.0 - _clamp01(age_ms / FAIL_RED_FADE_MS))
+
+
+def fail_gray_factor(prog: float) -> float:
+    """Content.FadeColour(Color4.Gray) over the duration: the playfield's
+    vertex colour lerps white(1)→gray(0.5) linearly → an rgb multiplier."""
+    return 1.0 - (1.0 - FAIL_GRAY) * _clamp01(prog)
+
+
+def fail_bg_gray(age_ms: float) -> float:
+    """Background.FadeColour(OsuColour.Gray(0.3f), 60): the bg brightness
+    multiplier drops 1→0.3 over 60 ms."""
+    return 1.0 - (1.0 - FAIL_BG_GRAY) * _clamp01(age_ms / FAIL_BG_FADE_MS)
+
+
+def fail_object_scale(prog: float) -> float:
+    """ScaleTo(originalScale * 0.5f, duration): 1→0.5 linear."""
+    return 1.0 - (1.0 - FAIL_OBJ_SCALE_TO) * _clamp01(prog)
+
+
+def fail_content_scale(prog: float) -> float:
+    """Content.ScaleTo(0.85f, duration, Easing.OutQuart)."""
+    return 1.0 - (1.0 - FAIL_CONTENT_SCALE_TO) * _ease_out_quart(prog)
+
+
+def fail_content_rotation(prog: float) -> float:
+    """Content.RotateTo(1, duration, Easing.OutQuart) → radians."""
+    return math.radians(FAIL_CONTENT_ROT_DEG) * _ease_out_quart(prog)
+
+
+def fail_rotation_deg(seed: float) -> float:
+    """Deterministic stand-in for RNG.NextSingle(-90, 90): a golden-ratio
+    hash of a per-object seed (its start time) so the same replay drops the
+    same way every render. osu re-seeds per play; we key on the object."""
+    frac = (seed * 0.618033988749895) % 1.0
+    return (2.0 * frac - 1.0) * FAIL_ROT_RANGE_DEG
+
+
+def _rot2(dx: float, dy: float, a: float) -> tuple[float, float]:
+    c, s = math.cos(a), math.sin(a)
+    return dx * c - dy * s, dx * s + dy * c
+
+
+def fail_transform_point(x: float, y: float, pivot: tuple[float, float],
+                         center: tuple[float, float], obj_scale: float,
+                         obj_rot: float, fall_px: float, content_scale: float,
+                         content_rot: float) -> tuple[float, float]:
+    """Rigid FailAnimation transform of a screen point: the object scales +
+    rotates about its own anchor `pivot`, drops `fall_px` down, then the
+    whole playfield Content scales + rotates about `center`."""
+    dx, dy = (x - pivot[0]) * obj_scale, (y - pivot[1]) * obj_scale
+    dx, dy = _rot2(dx, dy, obj_rot)
+    x, y = pivot[0] + dx, pivot[1] + dy + fall_px
+    dx, dy = (x - center[0]) * content_scale, (y - center[1]) * content_scale
+    dx, dy = _rot2(dx, dy, content_rot)
+    return center[0] + dx, center[1] + dy
+
+
+def fail_transform_sprite(sp: Sprite, *, pivot, center, obj_scale, obj_rot,
+                          fall_px, content_scale, content_rot, gray,
+                          obj_alpha) -> Sprite:
+    """Apply the FailAnimation transform to one sprite: rigid fall + gray
+    tint (Content.FadeColour) + object fade (HitObjectContainer.FadeOut)."""
+    x, y = fail_transform_point(sp.x, sp.y, pivot, center, obj_scale, obj_rot,
+                                fall_px, content_scale, content_rot)
+    s = obj_scale * content_scale
+    r, g, b, a = sp.color
+    return replace(sp, x=x, y=y, w=sp.w * s, h=sp.h * s,
+                   rotation=sp.rotation + obj_rot + content_rot,
+                   color=(r * gray, g * gray, b * gray, a * obj_alpha))
+
+
 def playfield_border_rects(x0: float, y0: float, x1: float, y1: float,
                            mode: str, thickness: float,
                            corner_len: float) -> list[tuple[float, float,
@@ -717,7 +830,9 @@ class StdScene:
                  playfield_borders: str = "none",
                  results=None,
                  results_start_ms: float | None = None,
-                 mods: int = 0):
+                 mods: int = 0,
+                 fail_time_ms: float | None = None,
+                 fail_anim_len_ms: float = FAIL_DURATION_MS):
         self.beatmap = beatmap
         self.diff = beatmap.diff
         self.frames = frames
@@ -776,6 +891,14 @@ class StdScene:
         self.miss_fall = miss_fall        # classic falling hit0 (owner: ON)
         self.results = results            # results.ResultsScreen | None
         self.results_start_ms = results_start_ms
+        # FAIL sequence: freeze gameplay at fail_time_ms, run the
+        # FailAnimationContainer fall for fail_anim_len_ms, then results (F).
+        self.fail_time_ms = fail_time_ms
+        self.fail_anim_len_ms = max(float(fail_anim_len_ms), 1.0)
+        # per-object screen-point transform for the slider BODY pass (which
+        # bypasses spr.post_xform); set/cleared per object in a fail frame.
+        self._fail_body_xform = None
+        self._fail_body_alpha = 1.0
 
         # --- mod visuals: OsuModHidden fades + OsuModFlashlight overlay -----
         self.mods = mods
@@ -950,6 +1073,9 @@ class StdScene:
     # --- frame draw ---------------------------------------------------------------
 
     def render_frame(self, t: float) -> None:
+        if self.fail_time_ms is not None and t >= self.fail_time_ms:
+            self._render_fail_frame(t)
+            return
         self._advance(t)
         self.spr.begin(clear=self.background)
         brightness = self._draw_background(t)
@@ -1020,6 +1146,104 @@ class StdScene:
             self._draw_logo(t)        # intro splash over the idle scene
         if self.seizure_start_ms is not None:
             self._draw_seizure_card(t)     # topmost — it IS the pre-roll
+
+    def _render_fail_frame(self, t: float) -> None:
+        """Gameplay is FROZEN at the death frame; the FailAnimationContainer
+        sequence (ppy/osu, MIT) plays over it: every alive hit object drops
+        off-screen (per-object gravity + random rotation + shrink), the
+        playfield fades toward gray, and an additive red flash pulses. After
+        fail_anim_len_ms the results (F) screen takes over."""
+        ft = self.fail_time_ms
+        self._advance(ft)                 # spawn/retire frozen at death
+        # wall-time age (the FailAnimation constants are WALL ms; the render
+        # clock is map-ms, so divide out the rate mod folded into anim_len)
+        age = max(0.0, t - ft)
+        age_wall = age * FAIL_DURATION_MS / self.fail_anim_len_ms
+        prog = fail_progress(age_wall)
+        obj_alpha = fail_object_alpha(age_wall)
+        gray = fail_gray_factor(prog)
+        c_scale = fail_content_scale(prog)
+        c_rot = fail_content_rotation(prog)
+        o_scale = fail_object_scale(prog)
+        fall_px = self.cam.len_to_screen(FAIL_FALL_OSU) * prog
+        center = self.cam.to_screen(256.0, 192.0)   # playfield centre
+
+        self.spr.begin(clear=self.background)
+        self.spr.post_xform = None
+        self._draw_background(ft)
+        # Background.FadeColour(OsuColour.Gray(0.3f), 60): darken the bg fast
+        bg_dark = 1.0 - fail_bg_gray(age_wall)
+        if bg_dark > 0.0:
+            self.spr.draw([self._full_frame_black(bg_dark)])
+
+        # every alive object drops off-screen with its own gravity + rotation
+        for obj in reversed(self._active):
+            if isinstance(obj, Spinner):
+                pivot = center
+            else:
+                pivot = self.cam.to_screen(
+                    *obj.get_stacked_start_position(self.diff))
+            o_rot = math.radians(fail_rotation_deg(obj.get_start_time()) * prog)
+            self.spr.post_xform = self._fail_sprite_xform(
+                pivot, center, o_scale, o_rot, fall_px, c_scale, c_rot,
+                gray, obj_alpha)
+            self._fail_body_xform = self._fail_point_xform(
+                pivot, center, o_scale, o_rot, fall_px, c_scale, c_rot)
+            self._fail_body_alpha = obj_alpha
+            approach: list[Sprite] = []
+            if isinstance(obj, Spinner):
+                self._draw_spinner(obj, ft)
+            elif isinstance(obj, Slider):
+                self._draw_slider(obj, ft, approach)
+            else:
+                self._draw_circle(obj, ft, approach)
+            if approach:
+                self.spr.draw(approach)   # falls with this object's seed
+        self._fail_body_xform = None
+
+        # judgment popups: the last verdicts, carried by the whole-playfield
+        # Content transform only (gray + shrink/tilt), no per-object gravity
+        self.spr.post_xform = self._fail_sprite_xform(
+            center, center, 1.0, 0.0, 0.0, c_scale, c_rot, gray, obj_alpha)
+        if self.draw_judgment_popups and self._popups:
+            popups = self._popup_sprites(ft)
+            if popups:
+                self.spr.draw(popups)
+        self.spr.post_xform = None
+
+        # cursor frozen at the death position (no fall — you died there)
+        if self.draw_cursor and self.frames:
+            self.spr.draw(self._cursor_sprites(ft))
+        # HUD frozen at death → the score/combo/acc/hits AS THEY WERE
+        if self.hud is not None:
+            self.hud.draw(ft)
+        # redFlashLayer (Color4.Red.Opacity(0.6), additive) FadeOutFromOne
+        red_a = fail_red_alpha(age_wall)
+        if red_a > 0.0:
+            self.spr.draw([Sprite(self.cam.screen_w / 2.0,
+                                  self.cam.screen_h / 2.0,
+                                  float(self.cam.screen_w),
+                                  float(self.cam.screen_h), None,
+                                  (1.0, 0.0, 0.0, red_a), additive=True)])
+        # results (grade F + frozen stats) once the fall completes
+        if self.results is not None and self.results_start_ms is not None \
+                and t >= self.results_start_ms:
+            self.results.draw(t - self.results_start_ms)
+
+    @staticmethod
+    def _fail_sprite_xform(pivot, center, o_scale, o_rot, fall_px,
+                           c_scale, c_rot, gray, obj_alpha):
+        return lambda sp: fail_transform_sprite(
+            sp, pivot=pivot, center=center, obj_scale=o_scale, obj_rot=o_rot,
+            fall_px=fall_px, content_scale=c_scale, content_rot=c_rot,
+            gray=gray, obj_alpha=obj_alpha)
+
+    @staticmethod
+    def _fail_point_xform(pivot, center, o_scale, o_rot, fall_px,
+                          c_scale, c_rot):
+        return lambda p: fail_transform_point(
+            p[0], p[1], pivot, center, o_scale, o_rot, fall_px,
+            c_scale, c_rot)
 
     def frame_rgb(self, t: float):
         self.render_frame(t)
@@ -1479,24 +1703,32 @@ class StdScene:
                                      self.snaking_in, self.snaking_out)
         sprites: list[Sprite] = []
         tip = None
+        # FAIL: the body pass bypasses spr.post_xform, so rigid-transform the
+        # body polyline here (same per-object fall) and fade with the object.
+        body_pts = pts
+        body_fade = 1.0
+        if pts and self._fail_body_xform is not None:
+            body_pts = [self._fail_body_xform(p) for p in pts]
+            body_fade = self._fail_body_alpha
         if b_alpha > 0.0 and pts:
             if not self.slider_merge:      # merged bodies drew already
                 if self.skin is None:      # Argon league (ArgonSliderBody)
                     body = self.bodies.build_body(
-                        pts, ARGON_OUTER_GRAD_R * self.radius_px,
+                        body_pts, ARGON_OUTER_GRAD_R * self.radius_px,
                         self._argon_body_style(color, b_alpha),
                         snake=(snake_a, snake))
-                    self.bodies.draw_body(body, self.spr.fbo, alpha=1.0)
+                    self.bodies.draw_body(body, self.spr.fbo, alpha=body_fade)
                 else:
                     body_base = (self.track_override
                                  if self.track_override is not None
                                  else color)   # skin.ini SliderTrackOverride
                     body = self.bodies.build_body(
-                        pts, self.radius_px,
+                        body_pts, self.radius_px,
                         BodyStyle(body_color=body_base,
                                   border_color=self.border_color),
                         snake=(snake_a, snake))
-                    self.bodies.draw_body(body, self.spr.fbo, alpha=b_alpha)
+                    self.bodies.draw_body(body, self.spr.fbo,
+                                          alpha=b_alpha * body_fade)
             # ticks of the ACTIVE span: above the body, under the circles
             sprites.extend(self._tick_sprites(t, ticks, obj, spawn, fade_in,
                                               snake_a, snake))

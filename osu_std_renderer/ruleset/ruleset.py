@@ -370,10 +370,17 @@ class StdRuleset:
     FOLLOW_CIRCLE_RADIUS_MULT = FOLLOW_CIRCLE_RADIUS_MULT
     LAZER_GAME_VERSION = 30_000_000     # .osr game_version threshold
 
-    def __init__(self, beatmap, frames, meta=None, lazer: bool | None = None):
+    def __init__(self, beatmap, frames, meta=None, lazer: bool | None = None,
+                 reconcile: bool = True):
         self.beatmap = beatmap
         self.frames = frames
         self.meta = meta
+        # reconcile=False for a FAILED replay: the .osr's counts are the
+        # partial tally AT the death point, not full-map totals, so snapping
+        # the whole-map sim to them would be nonsense — the raw sim (frames
+        # end at death → post-death objects miss) is what actually happened,
+        # and the HUD reads counts_at(fail_time) for the frozen results.
+        self.do_reconcile = reconcile
         self.diff = beatmap.diff
         self.hw = OsuHitWindows(self.diff.od)
         self.radius = self.diff.get_radius()
@@ -397,7 +404,8 @@ class StdRuleset:
             real_counts = (self.meta.count_300, self.meta.count_100,
                            self.meta.count_50, self.meta.count_miss)
             real_max_combo = self.meta.max_combo
-            relabeled = self.reconcile_to_counts(sims, real_counts)
+            if self.do_reconcile:
+                relabeled = self.reconcile_to_counts(sims, real_counts)
         final_counts = self._tally(sims)
         events, final_max_combo, timeline = (
             self._build_events(sims) if relabeled

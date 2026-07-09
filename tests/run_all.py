@@ -38,6 +38,8 @@ MODULES = [
     "tests.test_argon",
     # mod visuals: OsuModHidden fades + OsuModFlashlight overlay (2026-07)
     "tests.test_mods",
+    # FAIL/DEATH handling: detection + animation transforms + F grade (2026-07)
+    "tests.test_fail",
 ]
 
 
