@@ -57,6 +57,9 @@ MODULES = [
     # position mods: Mirror (MR) + Random (RD), with the .NET Random port
     # verified vs dotnet/runtime vectors (2026-07)
     "tests.test_pos_mods",
+    # transform-family "fun" mods: GR/DF/SI/WG/TR — per-object entrance
+    # animation (visual only; reconcile/geometry untouched) (2026-07)
+    "tests.test_transform_mods",
 ]
 
 
