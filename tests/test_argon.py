@@ -333,11 +333,13 @@ def test_argon_circle_bands_are_lazer_exact_darken_stack():
     assert mid < outer - 40                # ...clearly below the outer band
 
 
-def test_argon_approach_is_thin_hairline():
-    """Fidelity pass 3 REVERT: the Argon approach circle is a THIN hairline
-    ring (~0.06 R, base DrawableHitCircle default approachcircle), NOT the
-    pass-2 0.115 bold ring. Ground truth frame_26 (real lazer) confirms."""
-    assert abs(T.ARGON_APPROACH_THICKNESS - 0.06) < 1e-9
+def test_argon_approach_matches_measured_lazer_ring():
+    """MEASURED from frame_26 (real lazer, Argon): the approach ring's radial
+    FWHM is 18.3 px against a 165.7 px outer radius = 0.111 (equal-ink 0.107),
+    at a_scale 2.00 off the 82.8 px hit circle. Our hard solid ring (bloom OFF)
+    reproduces that VISIBLE width, NOT the bare 0.064 legacy-texture proportion
+    that pass-3's 0.06 mistook for it (owner-flagged as too thin)."""
+    assert abs(T.ARGON_APPROACH_THICKNESS - 0.11) < 1e-9
     a = T.bake_argon_approach(512)[..., 3].astype(float)
     R = 512 / 2.0 - 2.0
     c = 256
@@ -345,7 +347,7 @@ def test_argon_approach_is_thin_hairline():
     right = right[right > c]               # ring band on the right half
     assert right.size > 0
     band = (right.max() - right.min()) / R
-    assert 0.03 < band < 0.09              # thin (~0.06), not 0.115 bold
+    assert 0.09 < band < 0.13              # measured ~0.11, not the 0.06 hairline
 
 
 # --- item 3: ArgonFollowPoint (pink chevrons) ---------------------------------

@@ -748,13 +748,26 @@ def bake_argon_border(size: int = ARGON_CIRCLE_SIZE,
     return bake_ring(size, thickness_frac)
 
 
-ARGON_APPROACH_THICKNESS = 0.06    # fidelity pass 3 (owner: EXACT lazer —
-                                   # REVERT the pass-2 0.115 push). The base
-                                   # DrawableHitCircle ApproachCircle uses the
-                                   # default approachcircle texture (Argon ships
-                                   # no bespoke one): a THIN hairline ring.
-                                   # Ground truth frame_26 (real lazer) confirms
-                                   # a hairline, not a bold ring.
+ARGON_APPROACH_THICKNESS = 0.11    # MEASURED from frame_26 (real lazer, Argon
+                                   # HUD). Radial FWHM of the approach ring
+                                   # around the combo-"1" circle: stroke 18.3 px
+                                   # / outer radius 165.7 px = 0.111 (equal-ink
+                                   # 17.8/165.7 = 0.107); a_scale = 2.00 off the
+                                   # 82.8 px hit circle — i.e. the ring is exactly
+                                   # mid-contraction, so this is a clean approach
+                                   # ring, not merged with the border.
+                                   # SOURCE cross-check: Argon has no bespoke
+                                   # approach circle; DefaultApproachCircle draws
+                                   # the legacy Gameplay/osu/approachcircle
+                                   # (scaled 128/118) — a SOLID ~8 px ring = 0.064
+                                   # of its 126 px outer. But on-screen lazer
+                                   # renders it ~1.75x thicker (bright ~9 px core
+                                   # + glow shoulders). Our bake is a HARD solid
+                                   # ring with bloom OFF by default, so we match
+                                   # the VISIBLE lazer width (0.11), NOT the bare
+                                   # 0.064 texture proportion. Pass-2's 0.115 was
+                                   # ~right; pass-3's 0.06 (guessed from the bare
+                                   # texture) read too thin — owner-flagged.
 
 
 def bake_argon_approach(size: int = APPROACH_SIZE,
