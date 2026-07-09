@@ -855,21 +855,31 @@ def bake_argon_approach(size: int = APPROACH_SIZE,
 # --- ArgonFollowPoint (chevrons) + RingExplosion (kiai bubbles) ----------------
 ARGON_FP_PINK = (0xFC, 0x61, 0x8F)      # ArgonFollowPoint gradient top
 ARGON_FP_DARKRED = (0xBB, 0x1A, 0x41)   # ArgonFollowPoint gradient bottom
+ARGON_FP_GRAY = (51, 51, 51)            # OsuColour.Gray(0.2) → LEADING chevron
 
 
 def bake_argon_followpoint(size: int = 96) -> np.ndarray:
-    """ArgonFollowPoint: a right-pointing double '>' chevron with the
-    vertical pink→dark-red gradient (FromHex FC618F→BB1A41), additive.
-    Coloured RGBA (fixed palette, not combo-tinted); the scene rotates it
-    along the connection direction and draws it additive."""
-    mask = _chevron_mask(size, hw=0.15, hh=0.28, thick=0.095, n=2, gap=0.26)
+    """ArgonFollowPoint (lazer): TWO ChevronRight (each Size 8), the second
+    offset X=4 so they half-overlap, additive. The LEADING (left) chevron is
+    OsuColour.Gray(0.2); the trailing (right) one carries the vertical pink→
+    dark-red gradient (FromHex FC618F→BB1A41) — a subtle two-tone '>>' rather
+    than pass-3's uniform pink pair. Fixed palette (not combo-tinted); the
+    scene rotates it along the connection direction and draws it additive."""
+    off = int(round(0.075 * size))                  # X=4 of Size-8 ≈ half a chevron
+    base = _chevron_mask(size, hw=0.15, hh=0.26, thick=0.105, n=1)
+    left = np.roll(base, -off, axis=1)              # leading chevron (gray)
+    right = np.roll(base, off, axis=1)              # trailing chevron (pink)
     yn = np.mgrid[0:size, 0:size][0].astype(np.float64) / (size - 1)
-    pink = np.array(ARGON_FP_PINK, dtype=np.float64)
-    dark = np.array(ARGON_FP_DARKRED, dtype=np.float64)
-    grad = pink[None, None, :] * (1.0 - yn[..., None]) + dark[None, None, :] * yn[..., None]
+    pink = np.array(ARGON_FP_PINK, dtype=np.float64) / 255.0
+    dark = np.array(ARGON_FP_DARKRED, dtype=np.float64) / 255.0
+    grad = (pink[None, None, :] * (1.0 - yn[..., None])
+            + dark[None, None, :] * yn[..., None])
+    gray = np.broadcast_to(np.array(ARGON_FP_GRAY, np.float64) / 255.0,
+                           (size, size, 3))
+    rgb, a = _over(gray, left, grad, right)         # pink chevron over gray one
     rgba = np.zeros((size, size, 4), dtype=np.uint8)
-    rgba[..., :3] = np.round(grad).astype(np.uint8)
-    rgba[..., 3] = np.round(np.clip(mask, 0.0, 1.0) * 255.0).astype(np.uint8)
+    rgba[..., :3] = np.round(np.clip(rgb, 0.0, 1.0) * 255.0).astype(np.uint8)
+    rgba[..., 3] = np.round(np.clip(a, 0.0, 1.0) * 255.0).astype(np.uint8)
     return rgba
 
 
