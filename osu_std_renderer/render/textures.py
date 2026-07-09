@@ -941,8 +941,12 @@ def bake_argon_reverse(size: int = 256) -> np.ndarray:
                            cx + pw / 2.0, cy + ph / 2.0],
                           radius=r, fill=(255, 255, 255, 255))
     pill = np.asarray(img, dtype=np.uint8).copy()
-    # dark '>>' chevron (accent.Darken(4) ≈ near-black) baked over the pill
-    chev = _chevron_mask(size, hw=0.045, hh=0.055, thick=0.02, n=2, gap=0.07)
+    # dark AngleDoubleRight '>>' chevron (accent.Darken(4) ≈ near-black) baked
+    # over the pill. lazer ArgonReverseArrow: SpriteIcon Size(16) inside the
+    # Circle(40,20) pill → the glyph fills ~0.8 of the 20-tall pill and ~0.5
+    # of its 40 width. Pass-3's chevron (hh 0.055 ≈ 0.65 pill-height, narrow)
+    # read too small/bent against the game's bold '>>'; scale it up to match.
+    chev = _chevron_mask(size, hw=0.052, hh=0.068, thick=0.028, n=2, gap=0.095)
     dark = np.array([36, 36, 44], dtype=np.float64)
     out = pill.astype(np.float64)
     for c in range(3):

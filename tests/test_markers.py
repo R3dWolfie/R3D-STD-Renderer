@@ -81,6 +81,15 @@ def test_arrow_rotation_points_inward():
     # vertical path, screen y-down: tail at (0,50) → inward is -y
     vert = [(0.0, 0.0), (0.0, 50.0)]
     assert abs(arrow_rotation(vert, at_tail=True) + math.pi / 2) < 1e-9
+    # diagonal path: the arrow angle equals the path tangent at the repeat
+    # (DrawableSliderRepeat: rotation toward the next distinct curve point).
+    diag = [(0.0, 0.0), (30.0, 40.0)]
+    # tail arrow points back toward the head → tangent of (head-tail)
+    assert abs(arrow_rotation(diag, at_tail=True)
+               - math.atan2(-40.0, -30.0)) < 1e-9
+    # head arrow points along the path toward the tail → tangent of (tail-head)
+    assert abs(arrow_rotation(diag, at_tail=False)
+               - math.atan2(40.0, 30.0)) < 1e-9
 
 
 def test_arrow_pulse_version_gate():
