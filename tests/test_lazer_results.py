@@ -490,3 +490,36 @@ def test_pb_card_only_drawn_when_present():
               max_combo=1305, mods_str="NM")
     LazerResultsScreen(spr_yes, _data(pb=pb), total_ms=5000.0)
     assert len(spr_yes.textures) > len(spr_no.textures)
+
+
+# --- long title/artist/name auto-scale to fit the panel -----------------------------
+
+def test_long_title_auto_scales_to_fit_panel():
+    # A too-long title used to be HARD-clipped at 40 chars (content dropped
+    # off the panel — the "El Sonidito x Athletic Theme (DitzyFlam..." bug).
+    # Now the font auto-scales down until the FULL title fits the panel
+    # content width (ellipsis only as a last resort at the min size).
+    long_title = ("El Sonidito x Athletic Theme (DitzyFlamingo's Extra "
+                  "Special Ultra-Wide Marathon Collab Difficulty)")
+    long_artist = ("Hechizeros Band x Koji Kondo x A Very Long Featured "
+                   "Artist Name That Would Overflow")
+    long_name = "xX_a_ridiculously_long_player_username_that_overflows_Xx"
+    spr = _FakeSpr()
+    scr = LazerResultsScreen(
+        spr, _data(title=long_title, artist=long_artist, player=long_name),
+        total_ms=5000.0)
+    content_w = (scr.PANEL_W - 48.0) * scr.k
+    _tk, tw, th = scr.title_row
+    _ak, aw, ah = scr.artist_row
+    _nk, nw, nh = scr.name_row
+    assert tw <= content_w + 0.5 and th > 0          # title fits the panel
+    assert aw <= content_w + 0.5 and ah > 0          # artist fits the panel
+    # the name shares its row with the 52px avatar + gap → tighter budget
+    # (64 virtual px, scaled by k); the whole avatar+name group still fits.
+    assert nw <= content_w - 64.0 * scr.k + 0.5 and nh > 0
+    assert 52.0 * scr.k + 12.0 * scr.k + nw <= content_w + 0.5
+    # a normal short title is left at full size and still fits
+    scr2 = LazerResultsScreen(_FakeSpr(),
+                              _data(title="Yoru ni Kakeru"), total_ms=5000.0)
+    _tk2, tw2, _th2 = scr2.title_row
+    assert tw2 <= (scr2.PANEL_W - 48.0) * scr2.k + 0.5

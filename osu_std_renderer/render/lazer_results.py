@@ -843,6 +843,35 @@ class LazerResultsScreen:
                                self._font_loader)
         return (self._put(rgba), float(w), float(h))
 
+    def _fit_text(self, text: str, px_virtual: float, color,
+                  max_w_virtual: float, min_px_virtual: float | None = None):
+        """Bake a text row SIZED TO FIT `max_w_virtual`: scale the font down
+        from `px_virtual` toward `min_px_virtual` until the rendered width
+        fits, and only if it STILL overflows at the min size, ellipsis-
+        truncate to fit. Replaces the old hard char-clip that dropped long
+        title/artist/name content off the edge of the panel. Width is
+        measured with the exact metrics bake_text() uses, so the returned
+        row is guaranteed to fit."""
+        text = text or ""
+        if min_px_virtual is None:
+            min_px_virtual = max(px_virtual * 0.62, 12.0)
+        max_w = max_w_virtual * self.k
+        px = float(px_virtual)
+        step = max((px_virtual - min_px_virtual) / 12.0, 1.0)
+        chosen = min_px_virtual
+        while px >= min_px_virtual:
+            fpx = max(int(round(px * self.k)), 6)
+            if _bake_width(self._font_loader(fpx), text, fpx) <= max_w:
+                chosen = px
+                break
+            px -= step
+        fpx = max(int(round(chosen * self.k)), 6)
+        font = self._font_loader(fpx)
+        if _bake_width(font, text, fpx) > max_w:
+            text = _ellipsize(font, text, max_w, fpx)
+        rgba, w, h = bake_text(text, fpx, color, self._font_loader)
+        return (self._put(rgba), float(w), float(h))
+
     def _bake_star_pill(self):
         """The StarRatingDisplay pill: a rounded ForStarDifficulty-coloured
         pill with the procedural star icon + the star number. Text/star flip
@@ -908,12 +937,18 @@ class LazerResultsScreen:
             int(self.PANEL_W * k), int(self.PANEL_H * k), int(26 * k),
             (0.12, 0.13, 0.17), (0.05, 0.05, 0.07), 0.93,
             border=(0.3, 0.33, 0.4)))
-        # avatar + header
+        # avatar + header — auto-scale to fit the panel width (never a hard
+        # char-clip that would drop title/artist/name content off the edge).
+        # Title/artist span the panel content width; the name shares its row
+        # with the 52px avatar + a 12px gap, so it gets a tighter budget.
         self.avatar_key = self._put(bake_avatar(int(52 * k), d.player or "?"))
-        self.name_row = self._text(d.player or "Player", 30, (1, 1, 1))
-        self.title_row = self._text(_clip(d.title, 40), 34, (0.95, 0.96, 1.0))
-        self.artist_row = self._text(_clip(d.artist, 48), 24,
-                                     (0.72, 0.75, 0.85))
+        content_w = self.PANEL_W - 48.0                 # panel inner width
+        self.name_row = self._fit_text(d.player or "Player", 30, (1, 1, 1),
+                                       content_w - 64.0)   # avatar+gap budget
+        self.title_row = self._fit_text(d.title or "", 34, (0.95, 0.96, 1.0),
+                                        content_w)
+        self.artist_row = self._fit_text(d.artist or "", 24,
+                                         (0.72, 0.75, 0.85), content_w)
         # accuracy circle
         self.ACC_DISP = 380.0                 # canvas display size (virtual)
         cbake = int(self.ACC_DISP * k)
@@ -1351,3 +1386,32 @@ class LazerResultsScreen:
 def _clip(s: str, n: int) -> str:
     s = s or ""
     return s if len(s) <= n else s[:n - 1] + "…"
+
+
+def _bake_width(font, text: str, px: int) -> int:
+    """The exact pixel width bake_text() produces for `text` at screen `px`
+    with `font` (glyph bbox + the same symmetric padding) — used by
+    _fit_text to size the font without a full rasterise."""
+    if not text:
+        return 1
+    try:
+        x0, _y0, x1, _y1 = font.getbbox(text)
+    except AttributeError:
+        w0, _h0 = font.getsize(text)          # type: ignore[attr-defined]
+        x0, x1 = 0, w0
+    pad = max(int(px) // 12, 2)
+    return max(x1 - x0, 1) + 2 * pad
+
+
+def _ellipsize(font, text: str, max_w: float, px: int) -> str:
+    """Last-resort trim: drop characters from the end and append … until the
+    result fits `max_w` (only reached when the font is already at its minimum
+    size and the string is still too long)."""
+    if _bake_width(font, text, px) <= max_w:
+        return text
+    while len(text) > 1:
+        text = text[:-1]
+        cand = text.rstrip() + "…"
+        if _bake_width(font, cand, px) <= max_w:
+            return cand
+    return "…"
