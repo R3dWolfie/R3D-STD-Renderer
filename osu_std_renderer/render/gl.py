@@ -76,9 +76,13 @@ _VERT_FLOATS = 17
 _SPRITE_BYTES = 4 * _VERT_FLOATS * 4          # 4 corners × 17 f4
 
 
-@dataclass
+@dataclass(slots=True)
 class Sprite:
-    """A single textured/coloured quad to draw this frame (back-to-front)."""
+    """A single textured/coloured quad to draw this frame (back-to-front).
+
+    slots=True: ~444 of these are created per frame; slots cut the
+    per-instance dict alloc + speed up the 13 attribute reads the batch
+    serialiser does per sprite. dataclasses.replace works unchanged."""
     x: float                 # screen px, center
     y: float                 # screen px, center
     w: float
