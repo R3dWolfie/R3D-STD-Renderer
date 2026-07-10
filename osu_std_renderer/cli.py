@@ -75,9 +75,10 @@ cursor trail-scale/rainbow/ripples, slider snaking-out + merge, beatmap
 [Colours] vs skin combo colours, and -skip intro trimming.
 StdRenderSettings.from_preset(dict) consumes the bot preset JSON
 wholesale — the future std_renderer.py service adapter calls that.
-Accepted + NO-OP (documented): load_storyboard (deferred subsystem,
-danser fallback), show_scoreboard/scoreboard_avatars (render/
-scoreboard.py holds the osu!API JSON hand-off stub).
+Accepted + NO-OP (documented): show_scoreboard/scoreboard_avatars
+(render/scoreboard.py holds the osu!API JSON hand-off stub).
+load_storyboard now RENDERS (render/storyboard_render.py, phase 3);
+the service still gates it off on the free tier.
 
 Debug extras:
     --parse-only            parse map+replay+skin, print a summary, exit 0
@@ -283,9 +284,9 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--bg-triangles", action=BA, default=False,
                     help="the osu triangles deco drifting up over the bg")
     ap.add_argument("--storyboard", action=BA, default=False,
-                    help="§4.10 LoadStoryboards: ACCEPTED + NO-OP — "
-                         "storyboards are a deferred subsystem (the "
-                         "service keeps its danser fallback for SB maps)")
+                    help="§4.10 LoadStoryboards: parse the .osu/.osb and "
+                         "render the storyboard (in-house engine); free "
+                         "tier gates it off service-side")
     ap.add_argument("--video", action=BA, default=False,
                     help="§4.10 LoadVideos: play the map's [Events] Video "
                          "behind gameplay (fail-soft to the bg image)")
@@ -797,6 +798,34 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
     scene_mods = (meta.mods if meta is not None else 0) | getattr(
         args, "add_mods", 0)
 
+    # --- storyboard (phase-3 renderer; auto-discovers the map .osb) -------------
+    storyboard_renderer = None
+    if settings.load_storyboard and osu_path is not None:
+        from .beatmap.storyboard import parse_storyboard
+        from .render.storyboard_engine import StoryboardEngine
+        from .render.storyboard_render import StoryboardRenderer
+        try:
+            sb_data = parse_storyboard(osu_path)
+            sb_engine = StoryboardEngine(sb_data)
+            if sb_engine.sprites:
+                storyboard_renderer = StoryboardRenderer(
+                    spr, sb_engine, beatmap_dir, w, h, sb_data.widescreen)
+                c = sb_data.counts()
+                print(f"storyboard: {len(sb_engine.sprites)} drawable sprites"
+                      f" ({c['sprites']} sprite / {c['animations']} anim,"
+                      f" {c['commands']} cmds), widescreen={sb_data.widescreen}",
+                      file=sys.stderr)
+                if c['samples']:
+                    print(f"storyboard: NOTE {c['samples']} sample event(s) NOT "
+                          "played (storyboard audio deferred to a later phase)",
+                          file=sys.stderr)
+            else:
+                print("storyboard: no drawable sprites — nothing to render",
+                      file=sys.stderr)
+        except Exception as e:  # noqa: BLE001 — never fail a render over the SB
+            print(f"WARNING: storyboard load failed ({e!r}) — rendering "
+                  "without storyboard", file=sys.stderr)
+
     scene = StdScene(
         beatmap, frames, cam, spr, bodies, bank,
         combo_colors=combo_colors,
@@ -866,6 +895,7 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
         health=health,
         fail_time_ms=fail_time,
         fail_anim_len_ms=fail_anim_len_ms,
+        storyboard=storyboard_renderer,
     )
 
     # --- keyframe dump mode -----------------------------------------------------
@@ -1071,6 +1101,11 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
     print(f"done: {n_frames} frames in {wall:.1f}s "
           f"({n_frames / wall:.1f} fps render, encoder {encoder}) → {output}",
           file=sys.stderr)
+    if storyboard_renderer is not None:
+        s = storyboard_renderer.stats()
+        print(f"storyboard cache: {s['uploads']} uploads, "
+              f"{s['evictions']} evictions, {s['resident']} resident, "
+              f"peak {s['peak_mb']:.0f} MB", file=sys.stderr)
     spr.release()
     return 0
 
@@ -1184,10 +1219,6 @@ def main(argv: list[str] | None = None) -> int:
         settings.fade_out_time = max(args.fade_out, 0.0)
     if args.results_seconds is not None:
         settings.results_screen_time = args.results_seconds
-    if settings.load_storyboard:
-        print("note: load_storyboard is accepted but NOT rendered "
-              "(deferred subsystem — the service keeps its danser "
-              "fallback for storyboard maps)", file=sys.stderr)
 
     if args.no_replay:
         frames, meta = [], None

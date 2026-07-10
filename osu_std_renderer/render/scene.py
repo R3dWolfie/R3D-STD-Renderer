@@ -957,9 +957,11 @@ class StdScene:
                  repel_magnet_strength: float = 0.5,
                  health=None,
                  fail_time_ms: float | None = None,
-                 fail_anim_len_ms: float = FAIL_DURATION_MS):
+                 fail_anim_len_ms: float = FAIL_DURATION_MS,
+                 storyboard=None):
         self.beatmap = beatmap
         self.diff = beatmap.diff
+        self.storyboard = storyboard   # render/storyboard_render.StoryboardRenderer | None
         self.frames = frames
         self.cam = camera
         self.spr = sprites
@@ -1774,6 +1776,10 @@ class StdScene:
             self.spr.draw([Sprite(cx, cy, w, h, None,
                                   (1.0, 1.0, 1.0, BORDER_ALPHA))
                            for cx, cy, w, h in self._border_rects])
+        # storyboard underlay (Background/Fail/Pass/Foreground): under the
+        # playfield, above the map background (Player.createUnderlayComponents).
+        if self.storyboard is not None:
+            self.storyboard.draw_underlay(t, self._sb_dim(t))
         # BR: install the global playfield spin (+ scale) as the base
         # post_xform / body xform so objects, deferred approach rings, popups
         # and the cursor all ride it. Background/borders above stay fixed.
@@ -1841,6 +1847,10 @@ class StdScene:
             # OsuModFlashlight: dark overlay + cursor-following cutout, OVER
             # the gameplay layer but UNDER the HUD (lazer draw order)
             self.spr.draw([self._flashlight_sprite(t)])
+        if self.storyboard is not None:
+            # Overlay storyboard layer: over the gameplay, under the HUD
+            # (Player proxies it into createOverlayComponents).
+            self.storyboard.draw_overlay(t, self._sb_dim(t))
         if self.hud is not None:
             self.hud.draw(t)          # §5.3 draw order: … → cursors → HUD
         if self.fade_start_ms is not None and self.fade_len_ms > 0.0:
@@ -2108,6 +2118,11 @@ class StdScene:
         return Sprite(cx, cy, 2.0 * half, 2.0 * half, "flashlight",
                       (1.0, 1.0, 1.0, 1.0),
                       uv_off=(off, off), uv_scale=(k, k))
+
+    def _sb_dim(self, t: float) -> float:
+        """Storyboard brightness = 1 - background dim (DimmableStoryboard
+        shares the §4.10 dim envelope; the beat-flash is bg-only)."""
+        return 1.0 - (self.dim.level(t) if self.dim is not None else 0.0)
 
     def _draw_background(self, t: float) -> float:
         """§4.10 background: the map video frame when live (fail-soft to
