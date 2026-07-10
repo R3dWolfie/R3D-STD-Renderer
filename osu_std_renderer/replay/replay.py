@@ -41,6 +41,7 @@ from .lazer_mods import (LAZER_GAME_VERSION,
                          rate_adjust_from_mods,
                          rate_ramp_from_mods,
                          read_lazer_mods,
+                         repel_magnet_from_mods,
                          synesthesia_from_mods,
                          traceable_from_mods,
                          transform_from_mods)
@@ -225,6 +226,17 @@ class ReplayMeta:
     no_scope: "NoScope | None" = None
     depth: "Depth | None" = None
     bubbles: bool = False
+    # Cursor-driven object-movement mods Magnetised (MG) / Repel (RP): every
+    # alive object EASES toward (MG) / away from (RP) the recorded cursor each
+    # frame (render/repel_magnet.py; the scene integrates it statefully). Visual
+    # only — the beatmap geometry, the cursor and the judgement/reconcile are
+    # UNTOUCHED (the object's own drawable rides the eased offset; the judgement
+    # popup stays at the original position, matching lazer). Both hide follow
+    # points. repel_magnet_acronym is "" for every non-MG/RP replay, so those
+    # renders stay byte-identical; repel_magnet_strength is the Attraction /
+    # Repulsion strength (0.5 default). See lazer_mods.repel_magnet_from_mods.
+    repel_magnet_acronym: str = ""
+    repel_magnet_strength: float = 0.5
 
     @property
     def has_barrel_roll(self) -> bool:
@@ -267,6 +279,12 @@ class ReplayMeta:
         """True when the replay carries a reproducible Random mod (a seed is
         present). The gate that keeps every non-RD render byte-identical."""
         return self.random_seed is not None
+
+    @property
+    def has_repel_magnet(self) -> bool:
+        """True when the replay carries Magnetised (MG) or Repel (RP) — the
+        cursor-driven object-movement mods (objects ease to/from the cursor)."""
+        return bool(self.repel_magnet_acronym)
 
     @property
     def fail_time(self) -> float | None:
@@ -401,6 +419,8 @@ def parse_replay(path: Path) -> tuple[list[StdFrame], ReplayMeta]:
     no_scope = None
     depth = None
     bubbles = False
+    repel_magnet_acronym = ""
+    repel_magnet_strength = 0.5
     if gv >= LAZER_GAME_VERSION:
         mlist = read_lazer_mods(path)
         if mlist is not None:
@@ -471,6 +491,14 @@ def parse_replay(path: Path) -> tuple[list[StdFrame], ReplayMeta]:
             no_scope = no_scope_from_mods(mlist)
             depth = depth_from_mods(mlist)
             bubbles = bubbles_from_mods(mlist)
+            # Magnetised (MG) / Repel (RP): cursor-driven object movement. The
+            # scene reads the acronym + strength to integrate the per-frame
+            # easeTo (render/repel_magnet.py). Visual only — no geometry or
+            # judgement change; "" keeps every non-MG/RP render byte-identical.
+            rm = repel_magnet_from_mods(mlist)
+            if rm is not None:
+                repel_magnet_acronym = rm.acronym
+                repel_magnet_strength = rm.strength
 
     meta = ReplayMeta(
         mode=int(r.mode.value if hasattr(r.mode, "value") else r.mode),
@@ -520,6 +548,8 @@ def parse_replay(path: Path) -> tuple[list[StdFrame], ReplayMeta]:
         no_scope=no_scope,
         depth=depth,
         bubbles=bubbles,
+        repel_magnet_acronym=repel_magnet_acronym,
+        repel_magnet_strength=repel_magnet_strength,
     )
     return frames, meta
 

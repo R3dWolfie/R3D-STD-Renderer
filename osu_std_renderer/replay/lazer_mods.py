@@ -1009,3 +1009,70 @@ def read_bubbles(osr_path: Path) -> bool:
     """True iff the .osr's lazer mod list contains Bubbles (BU)."""
     mods = read_lazer_mods(osr_path)
     return bool(mods) and bubbles_from_mods(mods)
+
+
+# --- MG / RP: Magnetised + Repel (cursor-driven object movement) -------------
+# osu.Game.Rulesets.Osu/Mods/OsuModMagnetised.cs / OsuModRepel.cs — the two
+# "fun" mods that EASE every alive object toward (MG) / away from (RP) the
+# cursor each frame. Each carries a single strength setting:
+#   * MG: ``AttractionStrength`` (SettingSource "Attraction strength") →
+#     snake_case key ``attraction_strength``.
+#   * RP: ``RepulsionStrength``  (SettingSource "Repulsion strength")  →
+#     snake_case key ``repulsion_strength``.
+# Both BindableFloat(0.5){MinValue 0.05, MaxValue 1.0, Precision 0.05}. An
+# absent/non-numeric setting falls back to the default (clamped to the range),
+# exactly like the DA / rate / transform helpers above. MG and RP are mutually
+# incompatible, so a play carries at most one. The per-frame easing math is
+# ported in render/repel_magnet.py; the scene integrates it statefully.
+MAGNETISED_ACRONYM = "MG"
+REPEL_ACRONYM = "RP"
+REPEL_MAGNET_MODS = frozenset({MAGNETISED_ACRONYM, REPEL_ACRONYM})
+
+_MG_STRENGTH_KEY = "attraction_strength"
+_RP_STRENGTH_KEY = "repulsion_strength"
+REPEL_MAGNET_STRENGTH_DEFAULT = 0.5             # BindableFloat(0.5)
+REPEL_MAGNET_STRENGTH_RANGE = (0.05, 1.0)       # {Min 0.05, Max 1.0}
+# acronym -> the setting key its strength serialises under
+_REPEL_MAGNET_KEY = {MAGNETISED_ACRONYM: _MG_STRENGTH_KEY,
+                     REPEL_ACRONYM: _RP_STRENGTH_KEY}
+
+
+@dataclass(frozen=True)
+class RepelMagnet:
+    """The MG/RP mod read from a .osr. ``acronym`` is ``"MG"`` (Magnetised —
+    objects pulled TO the cursor) or ``"RP"`` (Repel — objects pushed AWAY).
+    ``strength`` is the Attraction/Repulsion strength (default 0.5, clamped to
+    [0.05, 1.0]); higher = a stronger, snappier pull/push."""
+    acronym: str
+    strength: float = REPEL_MAGNET_STRENGTH_DEFAULT
+
+
+def repel_magnet_from_mods(mods: list[dict]) -> "RepelMagnet | None":
+    """The MG/RP mod from an already-parsed :func:`read_lazer_mods` list, or
+    None when neither is present. MG and RP are mutually incompatible, so the
+    first match wins. ``strength`` is clamped to [0.05, 1.0]; an absent or
+    non-numeric value falls back to the default (0.5)."""
+    for m in mods:
+        if not isinstance(m, dict):
+            continue
+        ac = str(m.get("acronym", "")).upper()
+        if ac not in REPEL_MAGNET_MODS:
+            continue
+        s = m.get("settings") or {}
+        raw = _da_num(s, _REPEL_MAGNET_KEY[ac])     # numeric-or-None (bools->None)
+        if raw is None:
+            strength = REPEL_MAGNET_STRENGTH_DEFAULT
+        else:
+            lo, hi = REPEL_MAGNET_STRENGTH_RANGE
+            strength = min(hi, max(lo, raw))
+        return RepelMagnet(acronym=ac, strength=strength)
+    return None
+
+
+def read_repel_magnet(osr_path: Path) -> "RepelMagnet | None":
+    """The MG/RP mod (acronym + strength) from a .osr, or None when the replay
+    carries neither Magnetised nor Repel (or no ScoreInfo blob). Never raises."""
+    mods = read_lazer_mods(osr_path)
+    if not mods:
+        return None
+    return repel_magnet_from_mods(mods)
