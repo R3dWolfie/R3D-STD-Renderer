@@ -12,13 +12,14 @@ import sqlite3
 import tempfile
 
 from osu_std_renderer.render.lazer_results import (
-    FOR_RANK, GRADE_SPACING_PERCENTAGE, LazerResultsScreen, RANK_THRESHOLDS,
-    RESULTS_SCORE_WEIGHT, RESULTS_TEXT_WEIGHT, TEXT_SS, ResultsData,
-    VIRTUAL_SS_PERCENTAGE, acc_to_angle_deg, arc_color_at, avatar_hue,
-    avatar_initials, bake_accuracy_arc, bake_avatar, bake_grade_letter,
-    bake_star, bake_text, ease_out_quint, for_star_difficulty, grade_bands,
-    rank_badge_positions, rank_ring_bands, query_pb, slider_stats,
-    target_arc_value,
+    FOR_RANK, GRADE_SPACING_PERCENTAGE, LB_SLIDE_MS, LB_SLIDE_OFFSET,
+    LB_SLIDE_STAGGER_MS, LB_SLIDE_START_MS, LazerResultsScreen,
+    RANK_THRESHOLDS, RESULTS_SCORE_WEIGHT, RESULTS_TEXT_WEIGHT, TEXT_SS,
+    ResultsData, VIRTUAL_SS_PERCENTAGE, acc_to_angle_deg, arc_color_at,
+    avatar_hue, avatar_initials, bake_accuracy_arc, bake_avatar,
+    bake_grade_letter, bake_star, bake_text, ease_out_quint,
+    for_star_difficulty, grade_bands, rank_badge_positions, rank_ring_bands,
+    query_pb, slider_stats, target_arc_value,
 )
 from osu_std_renderer.render.textures import _load_argon_font
 from osu_std_renderer.render.pp import component_pct
@@ -657,6 +658,75 @@ def test_featured_avatar_bytes_resolves_and_is_graceful():
         assert scr._featured_avatar_bytes() is None
     finally:
         lb.resolve_avatar_bytes = orig
+
+
+# --- flank-card staggered slide-in entrance -----------------------------------------
+
+def test_flank_slide_offset_and_alpha_over_its_window():
+    scr = LazerResultsScreen(_FakeSpr(), _data(), total_ms=5000.0)
+    # before its start: fully OUT (max offset) and invisible
+    off0, a0 = scr._lb_slide(0, LB_SLIDE_START_MS - 1.0)
+    assert off0 == LB_SLIDE_OFFSET and a0 == 0.0
+    # at its start (t=0): OutQuint(0)=0 → still fully out, alpha 0
+    off_s, a_s = scr._lb_slide(0, LB_SLIDE_START_MS)
+    assert off_s == LB_SLIDE_OFFSET and a_s == 0.0
+    # after its full window: settled at rest (offset 0, alpha 1)
+    off_e, a_e = scr._lb_slide(0, LB_SLIDE_START_MS + LB_SLIDE_MS)
+    assert abs(off_e) < 1e-9 and a_e == 1.0
+    # mid-window: partway in (OutQuint monotone — offset shrinks, alpha grows)
+    off_m, a_m = scr._lb_slide(0, LB_SLIDE_START_MS + LB_SLIDE_MS * 0.5)
+    assert 0.0 < off_m < LB_SLIDE_OFFSET and 0.0 < a_m < 1.0
+
+
+def test_flank_slide_staggered_by_rank_within_stage1():
+    from osu_std_renderer.render.lazer_results import STAGE1_MS
+    scr = LazerResultsScreen(_FakeSpr(), _data(), total_ms=5000.0)
+    # at one instant the inner card (i=0) leads the next-out (i=1) leads i=2:
+    # the board unfurls outward, not all at once
+    t = LB_SLIDE_START_MS + LB_SLIDE_STAGGER_MS + LB_SLIDE_MS * 0.4
+    a = [scr._lb_slide(i, t)[1] for i in range(3)]
+    assert a[0] > a[1] > a[2]
+    # each card is delayed exactly LB_SLIDE_STAGGER_MS: at its own start it is
+    # still fully out
+    for i in range(3):
+        off, al = scr._lb_slide(i, LB_SLIDE_START_MS + i * LB_SLIDE_STAGGER_MS)
+        assert off == LB_SLIDE_OFFSET and al == 0.0
+    # the whole entrance (last of 3 cards) finishes INSIDE the stage-1 hold, so
+    # the outro's total length is unchanged
+    last_done = LB_SLIDE_START_MS + 2 * LB_SLIDE_STAGGER_MS + LB_SLIDE_MS
+    assert last_done <= STAGE1_MS
+
+
+def test_flank_slide_in_draws_outward_then_settles_inward():
+    spr = _FakeSpr()
+    left = [_entry(1, "Froslass", 983320, "S")]
+    right = [_entry(3, "nuxx", 921143, "A")]
+    screen = LazerResultsScreen(
+        spr, _data(leaderboard=_board(left, right, rank=2)), total_ms=6000.0)
+    cw = screen.LB_CARD_W * screen.k
+
+    def _cards(sprites):
+        return [s for s in sprites
+                if s.texture_key is not None and abs(s.w - cw) < 1.0]
+
+    # mid-entrance: flank cards are fading up (alpha < 1) and pushed outward
+    spr.drawn.clear()
+    screen.draw(LB_SLIDE_START_MS + 40.0)
+    mid = _cards(spr.drawn)
+    assert mid, "no flank cards drawn mid-entrance"
+    assert any(s.color[3] < 0.99 for s in mid)
+    mid_xs = sorted(s.x for s in mid)
+
+    # settled (still stage 1, panel not yet sliding): full alpha, cards pulled
+    # inward toward the panel edges
+    spr.drawn.clear()
+    screen.draw(1900.0)
+    settled = _cards(spr.drawn)
+    assert len(settled) == 2 and all(s.color[3] > 0.99 for s in settled)
+    set_xs = sorted(s.x for s in settled)
+    # left flank slid IN from further left; right flank IN from further right
+    assert set_xs[0] > mid_xs[0]
+    assert set_xs[-1] < mid_xs[-1]
 
 
 # --- played-mod badge row (lazer starAndModDisplay ModDisplay) ----------------------

@@ -89,6 +89,20 @@ OPEN_MS = 900.0                # panel slide + stats unfold (OutQuint)
 STAGGER_MS = 160.0             # per-stats-panel unfold stagger
 MIN_TOTAL_MS = 3800.0         # floor so both stages + a hold always fit
 
+# map-leaderboard flank-card entrance — a lazer-style staggered slide-in, so
+# the ranked cards unfurl outward from the featured panel rather than popping
+# in with it (osu.Game/Screens/Ranking/ScorePanelList.cs: panels flow/settle
+# in sequence). Card i (0 = nearest the centre panel) begins at
+# LB_SLIDE_START_MS + i*LB_SLIDE_STAGGER_MS and eases in over LB_SLIDE_MS
+# (OutQuint), travelling LB_SLIDE_OFFSET virtual px inward from an outer start
+# while fading up. With max_per_side=3 the last card finishes at
+# 300 + 2*80 + 460 = 920ms — well inside the STAGE1 hold (2000ms), so the
+# outro's total length is unchanged.
+LB_SLIDE_START_MS = 300.0      # entrance begins just after the panel fades in
+LB_SLIDE_STAGGER_MS = 80.0     # per-rank stagger (outer cards arrive later)
+LB_SLIDE_MS = 460.0            # per-card slide-in duration (OutQuint)
+LB_SLIDE_OFFSET = 96.0         # virtual px each card travels inward (outer→rest)
+
 DIM_ALPHA = 0.72               # scene dim under the results screen
 
 # mod badges (the played-mods row under the score — lazer's starAndModDisplay
@@ -1466,7 +1480,7 @@ class LazerResultsScreen:
                                           / (OPEN_MS * 0.6)))
         if stage1_a > 0.003:
             if self._lb_left or self._lb_right:
-                self._draw_leaderboard(out, panel_cx, stage1_a)
+                self._draw_leaderboard(out, panel_cx, stage1_a, age_ms)
             elif self.pb_parts is not None:
                 self._draw_pb(out, panel_cx, stage1_a)
             self._draw_lb_banner(out, panel_cx, stage1_a)
@@ -1736,12 +1750,30 @@ class LazerResultsScreen:
         out.append(Sprite(cx + self.STATS_W * k * 0.26, hcy, stw, sth, stk,
                           (1, 1, 1, a)))
 
-    def _draw_leaderboard(self, out, panel_cx, a) -> None:
+    def _lb_slide(self, i: int, age_ms: float) -> tuple[float, float]:
+        """Staggered slide-in state for the flank card at outward index `i`
+        (0 = the card nearest the centre panel). The board unfurls outward:
+        card `i` starts at LB_SLIDE_START_MS + i*LB_SLIDE_STAGGER_MS and eases
+        in over LB_SLIDE_MS (OutQuint), travelling LB_SLIDE_OFFSET virtual px
+        inward from an outer start while fading up — lazer's ScorePanelList
+        entrance, where panels flow/settle in sequence rather than popping in
+        together (osu.Game/Screens/Ranking/ScorePanelList.cs). Returns
+        (outward_offset_virtual_px, alpha_mul); both settle to (0.0, 1.0), so
+        once the entrance completes every card sits at rest and the draw is
+        identical to the static board. All cards finish inside the stage-1
+        hold, so the outro's total length is unchanged."""
+        t = age_ms - LB_SLIDE_START_MS - i * LB_SLIDE_STAGGER_MS
+        p = ease_out_quint(t / LB_SLIDE_MS)         # clamps to [0, 1]
+        return (1.0 - p) * LB_SLIDE_OFFSET, p
+
+    def _draw_leaderboard(self, out, panel_cx, a, age_ms) -> None:
         """The flanking ranked cards, centred vertically on the featured panel
         and marching outward from its two edges — higher ranks to the LEFT,
         lower to the RIGHT (owner mockup). The card nearest each edge is the
         rank closest in score to the current play, so the board reads
-        contiguously across the centre panel."""
+        contiguously across the centre panel. Each card slides in from further
+        OUTWARD and fades up, staggered by its distance from the centre (see
+        _lb_slide) so the board unfurls rather than popping in with the panel."""
         k = self.k
         cy = self.panel_cy * k
         cw = self.LB_CARD_W * k
@@ -1749,13 +1781,17 @@ class LazerResultsScreen:
         gap = 22.0 * k
         pl = (panel_cx - self.PANEL_W / 2.0) * k
         pr = (panel_cx + self.PANEL_W / 2.0) * k
-        # left group drawn reversed so the innermost card is rank R-1
+        # left group drawn reversed so the innermost card is rank R-1; the
+        # slide offset pushes each card further LEFT (outward) during entrance
         for i, (key, _e) in enumerate(reversed(self._lb_left)):
-            ccx = pl - gap - cw / 2.0 - i * (cw + gap)
-            out.append(Sprite(ccx, cy, cw, ch, key, (1, 1, 1, a)))
+            off, ca = self._lb_slide(i, age_ms)
+            ccx = pl - gap - cw / 2.0 - i * (cw + gap) - off * k
+            out.append(Sprite(ccx, cy, cw, ch, key, (1, 1, 1, a * ca)))
+        # right group: the slide offset pushes each card further RIGHT (outward)
         for i, (key, _e) in enumerate(self._lb_right):
-            ccx = pr + gap + cw / 2.0 + i * (cw + gap)
-            out.append(Sprite(ccx, cy, cw, ch, key, (1, 1, 1, a)))
+            off, ca = self._lb_slide(i, age_ms)
+            ccx = pr + gap + cw / 2.0 + i * (cw + gap) + off * k
+            out.append(Sprite(ccx, cy, cw, ch, key, (1, 1, 1, a * ca)))
 
     def _draw_lb_banner(self, out, panel_cx, a) -> None:
         """The rank-moment ribbon above the featured panel: '#X on <map>' with
