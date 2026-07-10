@@ -83,6 +83,12 @@ MODULES = [
     # storyboard engine phase 1: the .osu[Events]+.osb PARSER (data model only;
     # command execution + rendering are later phases) (2026-07)
     "tests.test_storyboard",
+    # storyboard engine phase 2: the COMMAND ENGINE (time -> per-sprite transform
+    # state). Ports the ~36 osu.Framework easings + Interpolation.ValueAt
+    # (scalar/vector/linear-colour), per-property transform-overwrite timeline
+    # semantics, loop unrolling, sprite lifetime (alpha-0 opt), alpha flicker,
+    # flip/additive params; trigger FIRING is stubbed (machinery only) (2026-07)
+    "tests.test_storyboard_engine",
 ]
 
 
