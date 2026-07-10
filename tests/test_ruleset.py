@@ -591,3 +591,90 @@ def test_stable_replay_slider_parts_untouched():
     # perfect tracking → every tick/tail hit, unmodified by any reconcile
     assert all(p.hit for o in bm.hit_objects
                for p in sim.verdict_for(o).parts)
+
+
+# --- general max-combo position pass (all engines) ------------------------------------
+# reconcile_to_counts snaps the 300/100/50/miss COUNTS exactly but scatters the
+# resulting combo-breaks by cursor-quality rank, so the longest run (the shown
+# max combo) can drift from — or break — the replay's real max combo. The general
+# position pass relocates object-level (circle/spinner, lazer slider-head) misses,
+# count-preserving, until the longest run equals the real value, on BOTH engines.
+
+def _circle_map(n: int, spacing: int = 500, start: int = 1000) -> object:
+    """n circles, spacing ms apart (>> the meh window, so a skipped circle
+    misses cleanly without notelocking its neighbour)."""
+    return _map("\n".join(f"256,192,{start + i * spacing},1,0,0:0:0:0:"
+                          for i in range(n)) + "\n")
+
+
+def _click_circles(bm, skip=(), late=None):
+    """Click every circle on time (release→press edge each) except `skip`
+    (left to miss); `late` = {idx: +ms} nudges a click's timing (worse quality,
+    still in-window)."""
+    late = late or {}
+    ents = []
+    for i, o in enumerate(bm.hit_objects):
+        if i in skip:
+            continue
+        st = o.get_start_time()
+        ents.append((st - 80, 256, 192, 0))
+        ents.append((st + late.get(i, 0), 256, 192, KEY_K1))
+    return _frames(sorted(ents, key=lambda e: e[0]))
+
+
+def _lazer_meta_nostats(c300, c100, c50, miss, max_combo):
+    """A lazer .osr (game_version ≥ threshold) that carries NO ScoreInfo
+    slider-part stats — the reconcile_slider_parts path is skipped, so only the
+    general max-combo pass shapes combo."""
+    from osu_std_renderer.replay.replay import ReplayMeta
+    return ReplayMeta(
+        mode=0, beatmap_md5="", player_name="t", mods=0, score=0,
+        max_combo=max_combo, count_300=c300, count_100=c100, count_50=c50,
+        count_geki=0, count_katu=0, count_miss=miss, accuracy=0.0, grade="A",
+        game_version=30_000_017, lazer_statistics=None)
+
+
+def test_maxcombo_pass_lands_stable_play_on_real_value():
+    """12 perfectly-clicked circles (raw = 12×300, raw combo 12). The replay
+    records 10/0/0/2 with a real max combo of 6: reconcile alone would drop the
+    two misses on the latest (worst-ranked) circles → a run of 10, but the
+    general pass relocates them so the longest run is EXACTLY 6, counts intact."""
+    bm = _circle_map(12)
+    fr = _click_circles(bm)
+    sim = StdRuleset(bm, fr, _meta(10, 0, 0, 2, max_combo=6)).run()
+    assert sim.lazer is False
+    assert sim.sim_counts == (12, 0, 0, 0)          # honesty: raw saw a full FC
+    assert sim.sim_max_combo == 12
+    assert sim.final_counts == (10, 0, 0, 2)        # counts stay exact
+    assert sim.final_max_combo == 6 == sim.real_max_combo
+    assert any("max-combo position pass" in ln for ln in sim.report_lines())
+
+
+def test_maxcombo_pass_lands_lazer_no_stats_play_on_real_value():
+    """Same play on the LAZER engine with NO ScoreInfo (reconcile_slider_parts
+    can't run) — the general pass still lands the max combo on the real value."""
+    bm = _circle_map(12)
+    fr = _click_circles(bm)
+    sim = StdRuleset(bm, fr, _lazer_meta_nostats(10, 0, 0, 2, max_combo=6)).run()
+    assert sim.lazer is True
+    assert not any("reconciled to ScoreInfo" in ln for ln in sim.report_lines())
+    assert sim.final_counts == (10, 0, 0, 2)
+    assert sim.final_max_combo == 6 == sim.real_max_combo
+
+
+def test_maxcombo_pass_never_breaks_an_already_correct_combo():
+    """Guard for the hard invariant: when the RAW sim's max combo already equals
+    the replay's real max combo, the reconcile must NOT make it worse. Here the
+    raw sim misses circle #3 (raw combo 8 = the real value), but the replay
+    records a SECOND miss (10/0/0/2). Naive count-reconcile drops that miss on
+    the worst-ranked mid-run circle (#8), splitting the run down to 4 — the exact
+    regression this pass exists to prevent. The pass must restore the longest run
+    to 8, never leaving the already-correct combo broken."""
+    bm = _circle_map(12)
+    fr = _click_circles(bm, skip={3}, late={8: 25})
+    sim = StdRuleset(bm, fr, _meta(10, 0, 0, 2, max_combo=8)).run()
+    assert sim.sim_counts == (11, 0, 0, 1)          # raw: one genuine miss (#3)
+    assert sim.sim_max_combo == 8 == sim.real_max_combo   # raw combo already right
+    assert sim.final_counts == (10, 0, 0, 2)        # counts snapped exactly
+    # the invariant: an already-correct raw combo is NOT broken by reconcile
+    assert sim.final_max_combo == 8 == sim.real_max_combo

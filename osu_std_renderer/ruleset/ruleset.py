@@ -414,6 +414,7 @@ class StdRuleset:
         self.lazer_stats = (getattr(meta, "lazer_statistics", None)
                             if meta is not None else None)
         self.slider_reconcile_note: str | None = None
+        self.combo_reconcile_note: str | None = None
 
     # ---- public API ---------------------------------------------------------------
 
@@ -438,9 +439,29 @@ class StdRuleset:
         if (self.do_reconcile and self.lazer
                 and self.lazer_stats is not None):
             parts_reconciled = self.reconcile_slider_parts(sims, real_max_combo)
+        # GENERAL max-combo position pass (all engines): the note reconcile above
+        # snaps the 300/100/50/miss COUNTS exactly but places the resulting
+        # combo-breaks by cursor-quality rank, so the longest unbroken run (the
+        # displayed max combo) drifts from — and sometimes breaks — the replay's
+        # real max combo. reconcile_slider_parts only corrects this for lazer
+        # replays carrying ScoreInfo tick/tail stats (and only via tick breaks,
+        # which a near-FC play has too few of). This generalizes that position
+        # pass to EVERY complete play by relocating object-level (circle/spinner,
+        # and lazer slider-head) misses — count-preserving — until the longest
+        # run equals real_max_combo. No-op when the combo already matches.
+        combo_reconciled = False
+        if (self.do_reconcile and real_counts is not None
+                and real_max_combo is not None and real_max_combo > 0
+                # only when the note reconcile actually ran (same guard as
+                # reconcile_to_counts): an incomplete/quit play whose counts
+                # don't total the object count keeps its RAW sim untouched — the
+                # combo pass must not reshape a partial tally either.
+                and sum(real_counts) == len(sims)):
+            combo_reconciled = self._reconcile_max_combo(sims, real_max_combo)
         final_counts = self._tally(sims)
         events, final_max_combo, timeline = (
-            self._build_events(sims) if (relabeled or parts_reconciled)
+            self._build_events(sims)
+            if (relabeled or parts_reconciled or combo_reconciled)
             else (sim_events, sim_max_combo, sim_timeline))
         verdicts = {id(s.obj): self._verdict(s) for s in sims}
         return SimResult(
@@ -464,6 +485,8 @@ class StdRuleset:
         lines: list[str] = []
         if self.slider_reconcile_note:
             lines.append(self.slider_reconcile_note)
+        if self.combo_reconcile_note:
+            lines.append(self.combo_reconcile_note)
         for s in sims:
             if s.kind == "slider":
                 if not s.head_hit:
@@ -1080,6 +1103,232 @@ class StdRuleset:
             f"large-tick miss {tick_miss_final} (replay {stats.large_tick_miss}), "
             f"slider-tail hit {tail_hit_final} (replay {stats.slider_tail_hit}); "
             "break positions cursor-quality-ranked")
+        return True
+
+    # ---- general max-combo position pass (all engines) ---------------------------------
+
+    def _reconcile_max_combo(self, sims: list[_ObjSim],
+                             real_max_combo: int) -> bool:
+        """Count-preserving position pass that relocates OBJECT-level misses so
+        the longest unbroken combo run equals the replay's real max combo.
+
+        Generalizes reconcile_slider_parts' combo shaping — which only moves
+        slider tick/tail breaks, and only for lazer replays carrying ScoreInfo —
+        to EVERY complete play. After reconcile_to_counts has fixed the exact
+        300/100/50/miss totals, WHICH objects carry the miss is only ranked by
+        cursor quality, so the longest run (the displayed max combo) drifts from,
+        and sometimes BREAKS, the replay's real max combo even though every count
+        is perfect. Holding all slider ticks/tails (already reconciled) and — for
+        stable — slider heads FIXED, we re-choose which movable objects are the
+        misses (same count) to land the longest run on T, preferring the
+        worst-tracked objects as the misses where position is free.
+
+        MOVABLE = circles + spinners (both engines) + slider HEADS on the lazer
+        path only (a lazer slider's tick/tail results are scored independently of
+        its head, so toggling the head never disturbs the tick/tail counts that
+        reconcile_slider_parts snapped to ScoreInfo; a stable slider's parts are
+        coupled to its aggregate tier, so stable heads stay fixed).
+
+        Counts stay EXACT — the movable objects' tier multiset is preserved; only
+        WHICH object holds each tier changes. Break POSITIONS remain a
+        cursor-quality-ranked approximation (the replay carries no per-object
+        combo truth), but the headline max-combo NUMBER now matches. No-op when
+        the combo already equals T, so an already-correct trajectory (including
+        the lazer-with-stats path and a clean FC) is never disturbed."""
+        T = real_max_combo
+        if T <= 0:
+            return False
+
+        # authoritative current max combo (same lattice the result reports) —
+        # never touch a trajectory that already matches.
+        _ev, cur_combo, _tl = self._build_events(sims)
+        if cur_combo == T:
+            return False
+
+        lazer_slider_movable = self.lazer
+
+        def movable(s: _ObjSim) -> bool:
+            return (s.kind in ("circle", "spinner")
+                    or (lazer_slider_movable and s.kind == "slider"))
+
+        movables = [s for s in sims if movable(s)]
+        if not movables:
+            return False
+
+        # combo-affecting event lattice, mirroring _lattice's combo subset.
+        # FIX_BRK = fixed break (stable slider head miss, tick/repeat miss);
+        # FIX_INC = fixed +1 (fixed slider head hit, tick hit, tail hit); MOVE =
+        # one movable object (break if chosen a miss, else +1). Slider aggregate
+        # + inert tail miss contribute nothing → omitted. CRITICAL: a MISS's
+        # combo effect fires at its window CLOSE (deadline / spinner end — the
+        # judgment-time _lattice uses), NOT its start, so a hit that lands inside
+        # a miss's window is counted in the run BEFORE the break. The movable
+        # event time therefore depends on whether it is a chosen break, so the
+        # ordering is rebuilt per candidate set. To match _build_events EXACTLY
+        # (including tie-breaks), the emitters are built in _lattice's own
+        # per-sim / per-part order and the per-candidate sort is Python's STABLE
+        # sort, so equal-time events resolve identically to the real lattice.
+        FIX_BRK, FIX_INC, MOVE = 0, 1, 2
+        emitters: list[tuple] = []      # ('fix', time, ty) | ('move', sim)
+        for s in sims:
+            if s.kind == "slider":
+                for p in s.parts:
+                    if p.kind == "head":
+                        if movable(s):
+                            emitters.append(("move", s))
+                        elif p.hit:
+                            t = s.hit_time if s.hit_time is not None else p.time
+                            emitters.append(("fix", t, FIX_INC))
+                        else:
+                            emitters.append(("fix", s.deadline, FIX_BRK))
+                    elif p.kind == "tail":
+                        if p.hit:                       # tail miss is inert
+                            emitters.append(("fix", p.time, FIX_INC))
+                    else:                               # tick / repeat
+                        emitters.append(("fix", p.time,
+                                         FIX_INC if p.hit else FIX_BRK))
+            else:                                       # circle / spinner
+                emitters.append(("move", s))
+
+        def _move_time(s: _ObjSim, is_break: bool) -> float:
+            if is_break:                                # miss registers at close
+                return s.end if s.kind == "spinner" else s.deadline
+            return s.hit_time if s.hit_time is not None else s.start
+
+        def ordered(chosen: set[int]):
+            ev = []
+            for e in emitters:
+                if e[0] == "fix":
+                    ev.append((e[1], e[2], None))
+                else:
+                    s = e[1]
+                    brk = s.idx in chosen
+                    ev.append((_move_time(s, brk),
+                               FIX_BRK if brk else MOVE, s))
+            ev.sort(key=lambda x: x[0])                 # stable → ties match _lattice
+            return ev
+
+        # miss budget among movable objects (preserved exactly). With no movable
+        # misses there is no combo-break to relocate (adding one would break the
+        # count invariant), so the pass cannot help — e.g. a play whose only
+        # combo break is a stable slider tick, which this object-miss pass does
+        # not own. Leave it untouched rather than emit a no-op note.
+        B = sum(1 for s in movables if s.final is JudgmentKind.MISS)
+        if B == 0:
+            return False
+
+        def segments(chosen: set[int]):
+            """Runs delimited by fixed breaks + chosen movable breaks. Each run
+            = (length, [(incs_before, movable_sim) ...] of its unchosen movable
+            split points)."""
+            segs = []
+            run = 0
+            slots: list = []
+            for _t, ty, ref in ordered(chosen):
+                if ty == FIX_BRK:
+                    segs.append((run, slots))
+                    run = 0
+                    slots = []
+                else:                                   # MOVE (unchosen) or INC
+                    if ty == MOVE:
+                        slots.append((run, ref))
+                    run += 1
+            segs.append((run, slots))
+            return segs
+
+        # place exactly B movable breaks: split the longest run at the movable
+        # slot nearest (but not past) T so a run lands on T; once every run <= T,
+        # spend the remaining budget on the worst-tracked movable OUTSIDE the
+        # peak run(s) (quality preference — never lowering the peak below T).
+        chosen: set[int] = set()
+        for _ in range(B):
+            segs = segments(chosen)
+            ln, slots = max(segs, key=lambda sg: sg[0])
+            if ln > T and slots:
+                le = [x for x in slots if x[0] <= T]
+                pick = (max(le, key=lambda x: x[0]) if le
+                        else min(slots, key=lambda x: x[0]))
+                chosen.add(pick[1].idx)
+            else:
+                peak = ln
+                protect = {rp.idx for (rl, rs) in segs if rl == peak
+                           for (_ib, rp) in rs}
+                pool = [s for s in movables
+                        if s.idx not in chosen and s.idx not in protect]
+                if not pool:
+                    pool = [s for s in movables if s.idx not in chosen]
+                if not pool:
+                    break
+                pool.sort(key=lambda s: -s.quality)     # worst-tracked first
+                chosen.add(pool[0].idx)
+
+        # exact-target correction: the greedy lands the peak within ~1 of T, but
+        # a FIXED slider break sitting inside the peak run can leave it a hair
+        # short (no movable slot falls exactly on T). A bounded first-improvement
+        # local search over single-break relocations — scored on the exact ordered
+        # lattice (identical tie-breaks to _build_events) — nails T whenever one
+        # move can, so an already-correct raw combo is restored EXACTLY, not left
+        # off by one. Monotone-safe (only ever accepts a strictly-closer
+        # arrangement) and hard-capped so it can never dominate a run.
+        def peak_len(sel: set[int]) -> int:
+            run = mx = 0
+            for _t, ty, _ref in ordered(sel):
+                if ty == FIX_BRK:
+                    run = 0
+                else:
+                    run += 1
+                    if run > mx:
+                        mx = run
+            return mx
+
+        best_dist = abs(peak_len(chosen) - T)
+        # cap total trial evaluations so this can never dominate a render; sized
+        # to let the exhaustive single-move scan complete for realistic complete
+        # plays (miss-count × free-slot pairs), only a handful of which ever
+        # reach this correction at all.
+        budget = 40000
+        while best_dist and budget > 0:
+            # deterministic order (stable .idx, never id()) so the search is
+            # reproducible run-to-run and matches the renderer exactly.
+            free = [s.idx for s in movables if s.idx not in chosen]
+            improved = False
+            for c in sorted(chosen):
+                for d in free:
+                    budget -= 1
+                    if budget <= 0:
+                        break
+                    trial = set(chosen)
+                    trial.discard(c)
+                    trial.add(d)
+                    dist = abs(peak_len(trial) - T)
+                    if dist < best_dist:
+                        chosen, best_dist, improved = trial, dist, True
+                        break
+                if improved or budget <= 0:
+                    break
+            if not improved:
+                break
+
+        # apply: preserve the movable tier multiset — the B misses go to the
+        # chosen slots, the non-miss tiers are re-handed to the remaining movable
+        # objects best-quality-first (reconcile_to_counts' ordering philosophy).
+        m300 = sum(1 for s in movables if s.final is JudgmentKind.HIT300)
+        m100 = sum(1 for s in movables if s.final is JudgmentKind.HIT100)
+        m50 = sum(1 for s in movables if s.final is JudgmentKind.HIT50)
+        non_miss = sorted((s for s in movables if s.idx not in chosen),
+                          key=lambda s: (s.quality, s.start))
+        want = ([JudgmentKind.HIT300] * m300 + [JudgmentKind.HIT100] * m100
+                + [JudgmentKind.HIT50] * m50)
+        for s, w in zip(non_miss, want):
+            self._relabel(s, w)
+        for s in movables:
+            if s.idx in chosen:
+                self._relabel(s, JudgmentKind.MISS)
+
+        self.combo_reconcile_note = (
+            "ruleset: max-combo position pass — relocated object misses so the "
+            f"longest run targets replay max combo {T} (was {cur_combo}); "
+            "break positions cursor-quality-ranked, counts unchanged")
         return True
 
     # ---- events: popups + combo/acc/score timeline -------------------------------------
