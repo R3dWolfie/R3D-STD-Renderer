@@ -1387,37 +1387,47 @@ class StdHud:
             return
         out: list[Sprite] = []
         # strain graph first — UNDER every other HUD element
-        self._strain_graph(out, t)
+        with perf.T("hud_strain"):
+            self._strain_graph(out, t)
         # per-element skin-else-Argon (module docstring hybrid rule;
         # legacy_defaults flips every flag legacy)
-        if self.legacy_score:
-            self._legacy_score_block(out, t)   # includes the legacy pie
-        else:
-            self._argon_score_block(out, t)
-            self._argon_accuracy(out, t)
-            self._argon_progress(out, t)
-        if self.legacy_combo:
-            self._legacy_combo(out, t)
-        else:
-            self._argon_combo(out, t)
-        if not self.legacy_health:
-            self._argon_health(out, t)
-        if self.legacy_keys:
-            self._legacy_key_overlay(out, t)
-        else:
-            self._argon_key_overlay(out, t)
-        self._hit_error(out, t)
+        with perf.T("hud_score_acc"):
+            if self.legacy_score:
+                self._legacy_score_block(out, t)   # includes the legacy pie
+            else:
+                self._argon_score_block(out, t)
+                self._argon_accuracy(out, t)
+        with perf.T("hud_progress"):
+            if not self.legacy_score:
+                self._argon_progress(out, t)
+        with perf.T("hud_combo"):
+            if self.legacy_combo:
+                self._legacy_combo(out, t)
+            else:
+                self._argon_combo(out, t)
+        with perf.T("hud_health"):
+            if not self.legacy_health:
+                self._argon_health(out, t)
+        with perf.T("hud_keys"):
+            if self.legacy_keys:
+                self._legacy_key_overlay(out, t)
+            else:
+                self._argon_key_overlay(out, t)
+        with perf.T("hud_hit_error"):
+            self._hit_error(out, t)
         # settings-surface house elements (both component paths)
-        self._mod_pills(out, t)
-        self._hit_counter(out, t)
-        self._pp_counter(out, t)
-        self._aim_error(out, t)
-        self._watermark(out)
-        self._break_flash(out, t)
-        if self.legacy_health:
-            # stable draws the scorebar in FRONT of everything (LegacySkin's
-            # "hacky full screen area health bars" comment) — last.
-            self._legacy_health(out, t)
+        with perf.T("hud_house"):
+            self._mod_pills(out, t)
+            self._hit_counter(out, t)
+            self._pp_counter(out, t)
+            self._aim_error(out, t)
+            self._watermark(out)
+            self._break_flash(out, t)
+            if self.legacy_health:
+                # stable draws the scorebar in FRONT of everything (LegacySkin's
+                # "hacky full screen area health bars" comment) — last.
+                self._legacy_health(out, t)
+        perf.count("hud_sprites", len(out))
         if out:
             self.spr.draw(out)
 
