@@ -234,7 +234,8 @@ def parse_objects(path: Path, beatmap: Beatmap, *,
                   stack_enabled: bool = True,
                   mirror_reflection: str = "",
                   random_seed: int | None = None,
-                  random_angle_sharpness: float = 7.0) -> None:
+                  random_angle_sharpness: float = 7.0,
+                  target_practice_seed: int | None = None) -> None:
     """Play/render pass: real hit objects, combos, slider paths, stacking.
 
     ``mirror_reflection`` (MR) reflects every object about the playfield centre
@@ -332,6 +333,18 @@ def parse_objects(path: Path, beatmap: Beatmap, *,
                      beatmap.timings, beatmap.version,
                      angle_sharpness=random_angle_sharpness)
 
+    # --- TP (Target Practice): replace the map with the generated targets -------
+    # lazer applies OsuModTargetPractice as IApplicableToBeatmap (like RD, AFTER
+    # PostProcess/stacking), then DISCARDS the original objects. The generated
+    # target circles are fresh HitCircles that never stack (StackHeight 0), so
+    # this replaces the (now-consumed) object list as the final beatmap step and
+    # does not re-run stacking. TP is incompatible with RD, so at most one runs.
+    if target_practice_seed is not None and not diff_calc_only:
+        from .target_practice import apply_target_practice
+        beatmap.hit_objects = apply_target_practice(
+            beatmap.hit_objects, target_practice_seed, beatmap.diff,
+            beatmap.timings, beatmap.pauses, beatmap.version)
+
 
 # --- one-call convenience for tools/tests ----------------------------------------
 
@@ -339,7 +352,8 @@ def load_full(path: Path, mods: int = 0, difficulty_adjust=None,
               speed_override: float | None = None,
               mirror_reflection: str = "",
               random_seed: int | None = None,
-              random_angle_sharpness: float = 7.0) -> Beatmap:
+              random_angle_sharpness: float = 7.0,
+              target_practice_seed: int | None = None) -> Beatmap:
     """parse_beatmap + parse_objects with mods applied (the render entry).
 
     ``difficulty_adjust`` (a mapping with keys ar/cs/od/hp/extended, e.g.
@@ -373,10 +387,17 @@ def load_full(path: Path, mods: int = 0, difficulty_adjust=None,
         )
     if speed_override is not None:
         beatmap.diff.set_custom_speed(speed_override)
+    if target_practice_seed is not None:
+        # OsuModTargetPractice.ApplyToDifficulty: ApproachRate *= 0.5f (longer
+        # preempt). Visual only — target POSITIONS/TIMES and the hit windows
+        # (OD-based) are unaffected, so the cursor reconcile is untouched. Halve
+        # the base AR; calculate() re-applies any HR/EZ on top.
+        beatmap.diff.set_ar(beatmap.diff.base_ar * 0.5)
     parse_objects(path, beatmap,
                   mirror_reflection=mirror_reflection,
                   random_seed=random_seed,
-                  random_angle_sharpness=random_angle_sharpness)
+                  random_angle_sharpness=random_angle_sharpness,
+                  target_practice_seed=target_practice_seed)
     return beatmap
 
 

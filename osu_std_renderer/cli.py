@@ -1185,7 +1185,8 @@ def main(argv: list[str] | None = None) -> int:
                             speed_override=meta.rate_override,
                             mirror_reflection=meta.mirror_reflection,
                             random_seed=meta.random_seed,
-                            random_angle_sharpness=meta.random_angle_sharpness)
+                            random_angle_sharpness=meta.random_angle_sharpness,
+                            target_practice_seed=meta.target_practice_seed)
         if meta.has_mirror:
             print(f"mirror: MR reflection={meta.mirror_reflection} "
                   f"(objects flipped about the playfield centre)", file=sys.stderr)
@@ -1193,6 +1194,10 @@ def main(argv: list[str] | None = None) -> int:
             print(f"random: RD seed={meta.random_seed} "
                   f"angle_sharpness={meta.random_angle_sharpness:g} "
                   f"(objects repositioned)", file=sys.stderr)
+        if meta.has_target_practice:
+            print(f"target: TP seed={meta.target_practice_seed} "
+                  f"(map rebuilt as {len(beatmap.hit_objects)} target circles)",
+                  file=sys.stderr)
         if meta.has_repel_magnet:
             _rmname = ("Magnetised (objects pulled TO the cursor)"
                        if meta.repel_magnet_acronym == "MG"
