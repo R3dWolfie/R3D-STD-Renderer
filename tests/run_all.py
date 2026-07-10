@@ -69,6 +69,11 @@ MODULES = [
     # playfield spin, cursor scale/fade, snap colours, screen blinds, per-object
     # depth + hit-position bubbles (visual only; reconcile/geometry untouched)
     "tests.test_screen_mods",
+    # cursor-driven object-movement mods: MG (Magnetised, objects pulled TO the
+    # cursor) / RP (Repel, objects pushed AWAY) — a stateful per-frame easeTo
+    # (Interpolation.DampContinuously) over the recorded cursor; both hide
+    # follow points (visual only; reconcile/geometry untouched)
+    "tests.test_repel_magnet",
 ]
 
 
