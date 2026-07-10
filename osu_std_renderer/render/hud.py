@@ -176,6 +176,7 @@ import numpy as np
 
 from ..replay.replay import KEY_K1, KEY_K2, KEY_M1, KEY_M2
 from ..ruleset import JudgmentKind, OsuHitWindows
+from . import perf
 from .gl import Sprite
 from .textures import ARGON_GLYPH_CAP_SCALE
 
@@ -1378,6 +1379,10 @@ class StdHud:
     # -- frame draw --------------------------------------------------------------------
 
     def draw(self, t: float) -> None:
+        with perf.T("hud_draw"):
+            self._draw_timed(t)
+
+    def _draw_timed(self, t: float) -> None:
         if self.op <= 0.0:
             return
         out: list[Sprite] = []

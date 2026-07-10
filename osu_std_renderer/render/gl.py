@@ -19,6 +19,7 @@ try:
 except Exception as e:  # noqa: BLE001
     raise RuntimeError("moderngl is required for the std renderer") from e
 
+from . import perf
 from .context import create_context
 
 _VERT = """
@@ -121,6 +122,11 @@ class SpriteRenderer:
         the mipmap build + uses plain LINEAR — for a texture drawn at ~1:1
         every frame (the SSAA base blit) building a full mip chain each
         frame is pure waste."""
+        with perf.T("tex_upload"):
+            self._upload_texture(key, rgba, clamp=clamp, mipmaps=mipmaps)
+
+    def _upload_texture(self, key: str, rgba: np.ndarray,
+                        clamp: bool = False, mipmaps: bool = True) -> None:
         if rgba.dtype != np.uint8:
             rgba = rgba.astype("u1")
         if rgba.shape[2] == 3:
@@ -169,6 +175,11 @@ class SpriteRenderer:
         self.ctx.clear(*clear)
 
     def draw(self, sprites: list[Sprite]) -> None:
+        with perf.T("gl_sprites_draw"):
+            perf.count("sprites", len(sprites))
+            self._draw(sprites)
+
+    def _draw(self, sprites: list[Sprite]) -> None:
         if self.post_xform is not None:
             sprites = [self.post_xform(sp) for sp in sprites]
         add = []
@@ -184,6 +195,7 @@ class SpriteRenderer:
             self.ctx.blend_func = (moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA)
 
     def _draw_one(self, sp: Sprite) -> None:
+        perf.count("draw_calls")
         tex = self._textures.get(sp.texture_key) if sp.texture_key else self._white
         if tex is None:
             tex = self._white
@@ -199,9 +211,11 @@ class SpriteRenderer:
 
     def read_rgb(self) -> np.ndarray:
         """HxWx3 uint8, top-left origin (ready for ffmpeg rgb24)."""
-        data = self.fbo.read(components=3, alignment=1)
-        arr = np.frombuffer(data, dtype="u1").reshape((self.height, self.width, 3))
-        return np.flipud(arr)  # moderngl reads bottom-left origin
+        with perf.T("readback"):
+            data = self.fbo.read(components=3, alignment=1)
+            arr = np.frombuffer(data, dtype="u1").reshape(
+                (self.height, self.width, 3))
+            return np.flipud(arr)  # moderngl reads bottom-left origin
 
     def release(self) -> None:
         try:

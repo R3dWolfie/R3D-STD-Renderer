@@ -168,6 +168,7 @@ from .transform_mods import (DEFLATE, GROW, HIDES_APPROACH, IDENTITY, SPIN_IN,
                              wiggle_offset_at)
 from .appearance_mods import (approach_different_scale, freeze_frame_scale,
                               freeze_preempts)
+from . import perf
 from . import screen_mods as _sm
 from . import repel_magnet as _rm
 from .repel_magnet import MAGNETISED, REPEL
@@ -1760,6 +1761,10 @@ class StdScene:
         # skip_results: draw the scene-behind WITHOUT the results card. The
         # SSAA outro path (_frame_rgb_ssaa) renders this at output res, then
         # composites the card on top at the supersample resolution.
+        with perf.T("frame_render"):
+            self._render_frame(t, skip_results)
+
+    def _render_frame(self, t: float, skip_results: bool = False) -> None:
         if self.fail_time_ms is not None and t >= self.fail_time_ms:
             self._render_fail_frame(t, skip_results=skip_results)
             return
@@ -2129,6 +2134,10 @@ class StdScene:
         the image, then the dark void), dimmed by the envelope, flashed to
         the beat, parallax-shifted opposite the cursor. Returns the
         brightness so the triangles deco can match the dim."""
+        with perf.T("background"):
+            return self._draw_background_inner(t)
+
+    def _draw_background_inner(self, t: float) -> float:
         b = 1.0 - (self.dim.level(t) if self.dim is not None else 0.0)
         if self.flash_to_beat:
             b = min(b * flash_factor(beat_phase(t, self.beatmap.timings)),

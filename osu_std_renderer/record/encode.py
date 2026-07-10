@@ -18,7 +18,10 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
 from pathlib import Path
+
+from ..render import perf
 
 LOUDNORM = "loudnorm=I=-14:TP=-1.5"
 
@@ -83,6 +86,11 @@ class FfmpegPipe:
     def __init__(self, cmd: list[str]):
         self.cmd = cmd
         self.proc: subprocess.Popen | None = None
+        self._hash = None
+        if perf.FRAME_MD5:
+            import hashlib
+            self._hash = hashlib.blake2b(digest_size=16)
+            self._hash_frames = 0
 
     def __enter__(self) -> "FfmpegPipe":
         self.proc = subprocess.Popen(
@@ -92,11 +100,19 @@ class FfmpegPipe:
 
     def push(self, frame_rgb) -> None:
         assert self.proc is not None and self.proc.stdin is not None
-        self.proc.stdin.write(frame_rgb.tobytes())
+        with perf.T("encode_push"):
+            data = frame_rgb.tobytes()
+            if self._hash is not None:
+                self._hash.update(data)
+                self._hash_frames += 1
+            self.proc.stdin.write(data)
 
     def __exit__(self, exc_type, exc, tb) -> None:
         if self.proc is None:
             return
+        if self._hash is not None:
+            print(f"frame-stream-hash: {self._hash.hexdigest()} "
+                  f"({self._hash_frames} frames)", file=sys.stderr, flush=True)
         if self.proc.stdin is not None:
             try:
                 self.proc.stdin.close()
