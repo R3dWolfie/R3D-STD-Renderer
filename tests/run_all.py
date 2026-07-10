@@ -23,6 +23,7 @@ MODULES = [
     "tests.test_skin_elements",
     "tests.test_markers",
     "tests.test_spinner",
+    "tests.test_gameplay_polish",
     "tests.test_hitsounds",
     "tests.test_results",
     "tests.test_lazer_results",

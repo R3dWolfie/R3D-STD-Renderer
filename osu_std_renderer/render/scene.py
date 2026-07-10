@@ -181,10 +181,11 @@ from .slider_body import DEFAULT_COMBO_COLORS, BodyStyle, sub_path
 from .textures import ARGON_DIGIT_CAP_SCALE, ARGON_GLYPH_CAP_SCALE
 from .spinner import (CLEAR_OFFSET_OSU, GLOW_BLUE, SPIN_OFFSET_OSU,
                       SPINNER_CENTRE, SPRITE_SCALE, SpinnerTrack,
-                      clear_alpha_scale, detect_spinner_style,
-                      lighting_alpha_scale, metre_bar_count,
-                      required_rotations, spin_prompt_alpha,
-                      spinner_approach_scale, wants_lighting)
+                      bonus_popup_state, bonus_spin_events, clear_alpha_scale,
+                      detect_spinner_style, lighting_alpha_scale,
+                      metre_bar_count, required_rotations,
+                      spinner_approach_scale, spinner_bonus_thresholds,
+                      spin_prompt_alpha, wants_lighting)
 
 
 def ssaa_internal_size(width: int, height: int) -> tuple[int, int]:
@@ -298,6 +299,11 @@ LIGHTING_LOGICAL_PX = 155.0    # procedural lighting glow size (circle-tied).
                                # the circle diameter now (see _lighting_sprites
                                # alpha too).
 LIGHTING_PROC_ALPHA = 0.34     # M-1: procedural-glow additive peak (was 0.85)
+# ArgonSpinner.bonusCounter: OsuFont.Default size 28 Bold, Y=-100 above centre;
+# FlashColour("FC618F") on MAX. Argon-league only (custom skins unchanged).
+SPINNER_BONUS_FONT_OSU = 28.0  # OsuFont.Default size 28
+SPINNER_BONUS_OFFSET_OSU = 100.0   # bonusCounter Y = -100 (osu!px above centre)
+SPINNER_BONUS_FLASH_MS = 400.0     # MAX FlashColour(FC618F, 400)
 MIDDLE_RED = (1.0, 0.0, 0.0)   # spinner-middle fade target (white→red)
 WARN_SPRITE_OSU = 160.0        # arrow-warning canvas edge in osu!px (≈240 px
                                # at 720p → the ~96 px white diamond danser draws)
@@ -351,6 +357,15 @@ ARGON_FLASH_IN_MS = 150.0
 ARGON_FLASH_LIFE_MS = 300.0            # in 150 + out 150 (non-hit-lighting)
 ARGON_FLASH_CORE_ALPHA = 0.55         # white outerGradient bloom
 ARGON_FLASH_GLOW_ALPHA = 0.5          # accent FlashPiece glow
+# ArgonMainCirclePiece.kiaiContainer child = KiaiFlash (osu.Game.Rulesets.Osu/
+# Skinning/Default/KiaiFlash.cs): an additive white Box masked to the circle,
+# tinted by the accent (combo) colour, that BeatSyncedContainer flashes each
+# red-line beat DURING kiai — FadeTo(0.25, 80, OutQuint) up to the beat (fired
+# EarlyActivationMilliseconds=80 before it), then FadeOut(max(80, beatLength−80),
+# OutSine). A subtle combo-tinted pulse on the circle while it's on screen.
+KIAI_FLASH_OPACITY = 0.25             # KiaiFlash.flash_opacity
+KIAI_FLASH_EARLY_MS = 80.0            # KiaiFlash EarlyActivationMilliseconds
+                                      # (== fade_length, the FadeTo duration)
 # ArgonJudgementPiece: OsuColour.ForHitResult + uppercase result text
 ARGON_JUDGE_TEXT = {
     JudgmentKind.HIT300: "GREAT",
@@ -395,6 +410,50 @@ def _ease_in_quint(p: float) -> float:
 
 def _ease_in_quad(p: float) -> float:
     return _clamp01(p) ** 2
+
+
+def _ease_out_sine(p: float) -> float:
+    return math.sin(_clamp01(p) * (math.pi / 2.0))
+
+
+def argon_kiai_flash_strength(t: float, spawn: float, timings) -> float:
+    """KiaiFlash additive opacity (0..0.25) on the Argon circle at map time t,
+    for a circle piece that spawned (approached) at `spawn`.
+
+    osu.Game.Rulesets.Osu/Skinning/Default/KiaiFlash.cs — a BeatSyncedContainer
+    child of ArgonMainCirclePiece.kiaiContainer. OnNewBeat, only while
+    effectPoint.KiaiMode, it FadeTo(0.25, 80, OutQuint) then FadeOut(max(80,
+    beatLength-80), OutSine); EarlyActivationMilliseconds=80 fires the beat 80 ms
+    early, so the ramp peaks exactly ON the (red-line) beat. Only beats whose
+    activation (beat-80) lands at/after the piece is alive contribute. The two
+    nearest beats (the one we're rising toward, the one we're falling from) are
+    considered; their envelopes meet at ~0, so the max reads as one value."""
+    red = timings.get_original_point_at(t)
+    bl = red.beat_length_base
+    if not (bl > 0.0) or math.isnan(bl):
+        return 0.0
+    n = math.floor((t - red.time) / bl)
+    strength = 0.0
+    for k in (n, n + 1):
+        beat = red.time + k * bl
+        if beat - KIAI_FLASH_EARLY_MS < spawn:      # not alive when it'd fire
+            continue
+        if not timings.get_point_at(beat).kiai:      # beat not in kiai
+            continue
+        if t < beat - KIAI_FLASH_EARLY_MS:
+            continue
+        if t < beat:                                 # FadeTo(0.25, 80, OutQuint)
+            s = KIAI_FLASH_OPACITY * _ease_out_quint(
+                (t - (beat - KIAI_FLASH_EARLY_MS)) / KIAI_FLASH_EARLY_MS)
+        else:                                        # FadeOut(dur, OutSine)
+            dur = max(KIAI_FLASH_EARLY_MS, bl - KIAI_FLASH_EARLY_MS)
+            age = t - beat
+            if age >= dur:
+                continue
+            s = KIAI_FLASH_OPACITY * (1.0 - _ease_out_sine(age / dur))
+        if s > strength:
+            strength = s
+    return strength
 
 
 def argon_judgment_transform(kind, age_ms: float):
@@ -1245,6 +1304,9 @@ class StdScene:
         # spinners: rotation tracks (replay-driven, or the §2.5 auto-spin
         # when there are no cursor frames), built at spawn
         self._spinner_tracks: dict[int, SpinnerTrack] = {}
+        # spinner bonus popups (Argon league only): (time, value, is_max) per
+        # completed bonus spin, built with the track at spawn.
+        self._spinner_bonus: dict[int, list[tuple[float, int, bool]]] = {}
         self.spinner_style = detect_spinner_style(
             skin_elems.loaded if skin_elems is not None else set())
         self.spin_k = camera.len_to_screen(SPRITE_SCALE)  # px per logical px
@@ -1609,7 +1671,11 @@ class StdScene:
                     for p in obj.multi_curve.path]
                 self._slider_marks[id(obj)] = self._build_marks(obj)
             elif isinstance(obj, Spinner):
-                self._spinner_tracks[id(obj)] = self._build_spinner_track(obj)
+                track = self._build_spinner_track(obj)
+                self._spinner_tracks[id(obj)] = track
+                if self.skin is None:      # Argon league bonus popups only
+                    self._spinner_bonus[id(obj)] = self._build_spinner_bonus(
+                        obj, track)
         keep = []
         for obj in self._active:
             if t <= obj.get_end_time() + HIT_FADE_OUT:
@@ -1618,6 +1684,7 @@ class StdScene:
                 self._slider_paths.pop(id(obj), None)
                 self._slider_marks.pop(id(obj), None)
                 self._spinner_tracks.pop(id(obj), None)
+                self._spinner_bonus.pop(id(obj), None)
         self._active = keep
 
     def _build_spinner_track(self, obj) -> SpinnerTrack:
@@ -1626,6 +1693,17 @@ class StdScene:
         if self.frames:
             return SpinnerTrack.from_frames(self.frames, start, end, spins)
         return SpinnerTrack.auto(start, end, spins)   # --no-replay perfect play
+
+    def _build_spinner_bonus(self, obj,
+                             track: SpinnerTrack
+                             ) -> list[tuple[float, int, bool]]:
+        """Bonus popup events for one spinner (ArgonSpinner.bonusCounter): the
+        lazer spin thresholds (difficulty.py lz_spinner_min/max_rps) → each
+        completed bonus spin's crossing time + cumulative value."""
+        req_for_bonus, max_bonus = spinner_bonus_thresholds(
+            self.diff.lz_spinner_min_rps, self.diff.lz_spinner_max_rps,
+            obj.get_end_time() - obj.get_start_time())
+        return bonus_spin_events(track, req_for_bonus, max_bonus)
 
     def _build_marks(self, obj) -> tuple[list, list]:
         """(ticks, arrows) draw records for one spawning slider — screen
@@ -2444,6 +2522,17 @@ class StdScene:
             if alpha > 0.0:
                 sprites = self._circle_sprites(x, y, color, alpha, scale,
                                                obj.combo_number, na, role)
+                # Argon league: KiaiFlash — the kiaiContainer's additive
+                # combo-tinted disc pulsing on each red-line beat during kiai
+                # (visible only while the circle is on screen; rides its alpha).
+                if self.skin is None:
+                    ks = argon_kiai_flash_strength(t, start - preempt,
+                                                   self.beatmap.timings)
+                    if ks > 0.0:
+                        d = 2.0 * self.radius_px * scale
+                        sprites.append(Sprite(x, y, d, d, "disc",
+                                              (*color, ks * alpha),
+                                              additive=True))
             # Argon league: ArgonMainCirclePiece hit flash (outerGradient→white
             # + the additive FlashPiece bloom) — the pale accent bloom on hit.
             if self.skin is None and hit_for_flash is not None:
@@ -2813,8 +2902,44 @@ class StdScene:
 
         self._spinner_overlay_sprites(sprites, t, track, start, end,
                                       cx, cy, alpha)
+        if self.skin is None:                     # Argon league bonus popup
+            self._spinner_bonus_sprites(sprites, id(obj), t, cx, cy, alpha)
         if sprites:
             self.spr.draw(sprites)
+
+    def _spinner_bonus_sprites(self, out: list[Sprite], obj_id: int, t: float,
+                               cx: float, cy: float, alpha: float) -> None:
+        """ArgonSpinner.bonusCounter: the "+N" cumulative bonus number popping
+        (ScaleTo 1.5→1 OutQuint, FadeOutFromOne) 100 osu!px above the centre on
+        each completed bonus spin; "MAX" (bigger 1.5→2.8, pink FC618F flash,
+        faster fade) once every bonus tick is claimed. Value/timing from
+        DrawableSpinner + ArgonSpinner (bundled Argon font)."""
+        events = self._spinner_bonus.get(obj_id)
+        if not events:
+            return
+        # the last popup whose time has passed drives the display (a new pop
+        # replaces the old — Text/alpha/scale reset)
+        idx = bisect.bisect_right([e[0] for e in events], t) - 1
+        if idx < 0:
+            return
+        evt_time, value, is_max = events[idx]
+        st = bonus_popup_state(t - evt_time, is_max)
+        if st is None:
+            return
+        p_alpha, scale = st
+        p_alpha *= alpha
+        if p_alpha <= 0.0:
+            return
+        text = "MAX" if is_max else str(value)
+        color = (1.0, 1.0, 1.0)
+        if is_max and (t - evt_time) < SPINNER_BONUS_FLASH_MS:
+            # FlashColour(FC618F, 400): pink → white over 400 ms (OutQuint)
+            f = _ease_out_quint((t - evt_time) / SPINNER_BONUS_FLASH_MS)
+            color = tuple(ARGON_SPIN_GLOW[i] + (1.0 - ARGON_SPIN_GLOW[i]) * f
+                          for i in range(3))
+        by = cy - self.cam.len_to_screen(SPINNER_BONUS_OFFSET_OSU)
+        h = self.cam.len_to_screen(SPINNER_BONUS_FONT_OSU) * scale
+        self._glyph_run(out, text, cx, by, h, color, p_alpha)
 
     def _old_style_sprites(self, out: list[Sprite], t: float, cx: float,
                            cy: float, rot: float, prog: float,

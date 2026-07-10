@@ -82,6 +82,22 @@ CLEAR_OFFSET_OSU = -105.0           # (osu!px; eyeballed against stable)
 LIGHTING_FADE_MS = 400.0
 LIGHTING_SCALE_MS = 600.0
 
+# --- spinner BONUS popup (ArgonSpinner.bonusCounter) ---------------------------
+# After the required spins, each extra full rotation awards a bonus tick and the
+# Argon spinner pops a counter showing the CUMULATIVE bonus score. Ports of
+# osu.Game.Rulesets.Osu/Objects/Drawables/DrawableSpinner.cs (score_per_tick,
+# CurrentBonusScore, updateBonusScore) + osu.Game.Rulesets.Osu/Skinning/Argon/
+# ArgonSpinner.cs (the bonusCounter transforms) + Spinner.cs (spin thresholds).
+SPINNER_BONUS_SCORE_PER_TICK = 50   # OsuScoreProcessor base score for a
+                                    # SpinnerBonusTick (HitResult.LargeBonus)
+BONUS_SPINS_GAP = 2                 # Spinner.bonus_spins_gap
+BONUS_DURATION_ERROR = 0.0001       # Spinner.ApplyDefaultsToSelf duration_error
+BONUS_LIFE_MS = 1500.0             # non-MAX FadeOutFromOne(1500)
+BONUS_MAX_LIFE_MS = 500.0          # MAX FadeOutFromOne(500)
+BONUS_SCALE_MS = 1000.0           # ScaleTo(target, 1000, OutQuint)
+BONUS_MAX_SCALE = 2.8             # MAX ScaleTo(2.8); non-MAX settles to 1.0
+BONUS_POP_SCALE = 1.5            # ScaleTo(1.5) instant kick before the settle
+
 _HELD_MASK = KEY_K1 | KEY_K2 | KEY_M1 | KEY_M2
 
 OLD_STYLE_ELEMENTS = ("spinner-background", "spinner-metre", "spinner-circle")
@@ -210,19 +226,25 @@ class SpinnerTrack:
         """Map time the requirement is met (spinner-clear pops), or None."""
         return self._clear
 
-    def _find_clear(self) -> float | None:
-        need = self.required_rot
-        if need <= 0.0:
-            return self.start
-        if self.abs_rot[-1] < need:
+    def time_at_rotation(self, target_rad: float) -> float | None:
+        """Map time the accumulated |rotation| first reaches target_rad
+        (linear-interpolated between samples), or None if never reached."""
+        if target_rad <= 0.0:
+            return self.times[0]
+        if self.abs_rot[-1] < target_rad:
             return None
-        i = bisect.bisect_left(self.abs_rot, need)
+        i = bisect.bisect_left(self.abs_rot, target_rad)
         if i == 0:
             return self.times[0]
         a0, a1 = self.abs_rot[i - 1], self.abs_rot[i]
         t0, t1 = self.times[i - 1], self.times[i]
-        w = (need - a0) / (a1 - a0) if a1 > a0 else 1.0
+        w = (target_rad - a0) / (a1 - a0) if a1 > a0 else 1.0
         return t0 + (t1 - t0) * w
+
+    def _find_clear(self) -> float | None:
+        if self.required_rot <= 0.0:
+            return self.start
+        return self.time_at_rotation(self.required_rot)
 
 
 # --- lifecycle curves (pure) --------------------------------------------------
@@ -289,3 +311,65 @@ def lighting_alpha_scale(age_ms: float) -> tuple[float, float] | None:
 def wants_lighting(kind) -> bool:
     """Hit lighting spawns on 300/100/50 object judgments, never a miss."""
     return getattr(kind, "value", kind) in ("300", "100", "50")
+
+
+# --- spinner bonus popup (pure) -----------------------------------------------
+
+def spinner_bonus_thresholds(min_rps: float, max_rps: float,
+                             duration_ms: float) -> tuple[int, int]:
+    """(SpinsRequiredForBonus, MaximumBonusSpins) from the map's OD-derived
+    spin rates — osu.Game.Rulesets.Osu/Objects/Spinner.cs ApplyDefaultsToSelf:
+
+        SpinsRequired   = (int)(minRps * secondsDuration + duration_error)
+        MaximumBonusSpins = max(0, (int)(maxRps*sec + err)
+                                     - SpinsRequired - bonus_spins_gap)
+        SpinsRequiredForBonus = SpinsRequired + bonus_spins_gap
+
+    minRps/maxRps are DifficultyRange(OD, CLEAR/COMPLETE_RPM_RANGE)/60, which
+    difficulty.py already exposes as lz_spinner_min_rps / lz_spinner_max_rps."""
+    sec = max(duration_ms, 0.0) / 1000.0
+    err = BONUS_DURATION_ERROR
+    spins_required = int(min_rps * sec + err)
+    max_bonus = max(0, int(max_rps * sec + err) - spins_required
+                    - BONUS_SPINS_GAP)
+    return spins_required + BONUS_SPINS_GAP, max_bonus
+
+
+def bonus_spin_events(track: "SpinnerTrack", spins_required_for_bonus: int,
+                      max_bonus_spins: int) -> list[tuple[float, int, bool]]:
+    """(time_ms, bonus_value, is_max) for each completed BONUS spin.
+
+    DrawableSpinner.updateBonusScore increments completedFullSpins =
+    floor(TotalRotation/360) on every full rotation; ArgonSpinner's
+    bonusCounter pops on each change whose CurrentBonusScore > 0 (guard),
+    where CurrentBonusScore = SCORE_PER_TICK · clamp(spins −
+    SpinsRequiredForBonus, 0, MaximumBonusSpins). Once the cap is reached the
+    counter re-pops "MAX" (is_max) on every further spin."""
+    if max_bonus_spins <= 0:
+        return []           # no bonus ticks → CurrentBonusScore stays 0
+    two_pi = 2.0 * math.pi
+    total_spins = int(track.abs_rot[-1] // two_pi)
+    events: list[tuple[float, int, bool]] = []
+    for k in range(spins_required_for_bonus + 1, total_spins + 1):
+        tcross = track.time_at_rotation(k * two_pi)
+        if tcross is None:
+            break
+        over = k - spins_required_for_bonus
+        value = SPINNER_BONUS_SCORE_PER_TICK * min(over, max_bonus_spins)
+        events.append((tcross, value, over >= max_bonus_spins))
+    return events
+
+
+def bonus_popup_state(age_ms: float, is_max: bool) -> tuple[float, float] | None:
+    """(alpha, scale) of the bonus counter at `age_ms` since its pop, or None
+    once faded — ArgonSpinner.bonusCounter: ScaleTo(1.5).Then().ScaleTo(target,
+    1000, OutQuint) with FadeOutFromOne(life). Non-MAX target 1.0 / life 1500;
+    MAX target 2.8 / life 500."""
+    life = BONUS_MAX_LIFE_MS if is_max else BONUS_LIFE_MS
+    if age_ms < 0.0 or age_ms >= life:
+        return None
+    alpha = 1.0 - age_ms / life                      # FadeOutFromOne (linear)
+    target = BONUS_MAX_SCALE if is_max else 1.0
+    p = min(age_ms, BONUS_SCALE_MS) / BONUS_SCALE_MS
+    scale = BONUS_POP_SCALE + (target - BONUS_POP_SCALE) * (1.0 - (1.0 - p) ** 5)
+    return alpha, scale
