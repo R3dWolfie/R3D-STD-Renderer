@@ -844,6 +844,9 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
         no_scope=(meta.no_scope if meta is not None else None),
         depth=(meta.depth if meta is not None else None),
         bubbles=(meta.bubbles if meta is not None else False),
+        repel_magnet=(meta.repel_magnet_acronym if meta is not None else ""),
+        repel_magnet_strength=(meta.repel_magnet_strength
+                               if meta is not None else 0.5),
         health=health,
         fail_time_ms=fail_time,
         fail_anim_len_ms=fail_anim_len_ms,
@@ -1190,6 +1193,14 @@ def main(argv: list[str] | None = None) -> int:
             print(f"random: RD seed={meta.random_seed} "
                   f"angle_sharpness={meta.random_angle_sharpness:g} "
                   f"(objects repositioned)", file=sys.stderr)
+        if meta.has_repel_magnet:
+            _rmname = ("Magnetised (objects pulled TO the cursor)"
+                       if meta.repel_magnet_acronym == "MG"
+                       else "Repel (objects pushed AWAY from the cursor)")
+            print(f"move:   {meta.repel_magnet_acronym} {_rmname}; "
+                  f"strength={meta.repel_magnet_strength:g}, follow points "
+                  f"hidden (visual only — judgement/reconcile unchanged)",
+                  file=sys.stderr)
         # Relax (RX): the .osr has cursor motion but NO key presses (the
         # mod auto-taps). Synthesize the presses OsuModRelax injects so the
         # judgment sim, combo, popups, key overlay, slider-follow tracking

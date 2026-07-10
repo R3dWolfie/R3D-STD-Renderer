@@ -169,6 +169,8 @@ from .transform_mods import (DEFLATE, GROW, HIDES_APPROACH, IDENTITY, SPIN_IN,
 from .appearance_mods import (approach_different_scale, freeze_frame_scale,
                               freeze_preempts)
 from . import screen_mods as _sm
+from . import repel_magnet as _rm
+from .repel_magnet import MAGNETISED, REPEL
 from .markers import (arrow_alpha_scale, arrow_pulse, arrow_rotation,
                       beat_phase, followpoint_dots, followpoint_eligible,
                       followpoint_state, reverse_arrow_schedule,
@@ -214,6 +216,10 @@ RESULT_HOLD = 250.0            # M-2: judgment popups hold full opacity this
                                # long after fade-in before ResultFadeOut
 APPROACH_START_SCALE = 4.0     # §2.5 approach circle 4→1
 APPROACH_MAX_ALPHA = 0.9       # stable caps the approach ring alpha
+# MG/RP: a render step larger than this (ms) is treated as a discontinuity and
+# the eased state is re-seeded from each object's spawn (keyframe/seek path);
+# the monotonic render pass steps ~1000/fps << this, so it integrates inline.
+_RM_MAX_STEP_MS = 200.0
 SNAKE_IN_PORTION = 1.0 / 3.0   # lazer: snake-in completes after preempt/3
 TRAIL_WINDOW_MS = 150.0
 TRAIL_STEPS = 12
@@ -888,6 +894,8 @@ class StdScene:
                  no_scope=None,
                  depth=None,
                  bubbles: bool = False,
+                 repel_magnet: str = "",
+                 repel_magnet_strength: float = 0.5,
                  health=None,
                  fail_time_ms: float | None = None,
                  fail_anim_len_ms: float = FAIL_DURATION_MS):
@@ -1046,6 +1054,31 @@ class StdScene:
         if self.depth_mod is not None:
             self.draw_follow_points = False
 
+        # --- cursor-driven object movement: Magnetised (MG) / Repel (RP) ----
+        # A STATEFUL per-object easeTo (render/repel_magnet.py): each frame every
+        # alive object's drawn position eases toward (MG) / away from (RP) the
+        # recorded cursor. Purely visual — the beatmap geometry, the replay
+        # cursor and the judgement/reconcile are UNTOUCHED (the object's own
+        # drawable rides the eased offset via spr.post_xform + the body xform +
+        # the _t_off approach ring; the judgement popup stays at the original
+        # position, exactly as lazer leaves it). Both MG and RP hide follow
+        # points ("won't make any sense" once objects move). The per-object
+        # state (current eased osu!px position) + the slider movement bounds are
+        # precomputed below once self.objects exists.
+        self.rm_mod = (repel_magnet or "").upper()
+        if self.rm_mod not in (MAGNETISED, REPEL):
+            self.rm_mod = ""
+        self.rm_strength = float(repel_magnet_strength)
+        if self.rm_mod:
+            self.draw_follow_points = False   # OsuModMagnetised/Repel hide them
+        # id(obj) -> current eased head position (osu!px); _rm_last_t is the map
+        # time already integrated (None = cold); _rm_bounds is the per-slider
+        # movement-clamp box (RP only).
+        self._rm_pos: dict[int, tuple[float, float]] = {}
+        self._rm_last_t: float | None = None
+        self._rm_bounds: dict[int, tuple[float, float, float, float]] = {}
+        self._rm_frame_times: list[float] = []
+
         # --- settings-surface phase (§4.10/§4.6/§4.8 additions) ------------
         self.video = video_bg             # video_bg.VideoBackground | None
         self.bg_parallax = bg_parallax
@@ -1114,6 +1147,23 @@ class StdScene:
                 lambda o: isinstance(o, Spinner))
         self.radius_px = camera.len_to_screen(self.diff.circle_radius)
         self.circle_k = circle_pixel_scale(self.radius_px)
+
+        # --- MG/RP precompute (needs objects + circle radius) ---------------
+        # RP clamps each slider's fleeing destination so the whole slider stays
+        # on the playfield (CalculatePossibleMovementBounds); the box is static
+        # per slider. Also cache the replay frame times for the cold-start /
+        # keyframe seek (integrating from an object's spawn over the frames).
+        if self.rm_mod:
+            r_osu = self.diff.circle_radius
+            for o in self.objects:
+                if not isinstance(o, Slider):
+                    continue
+                hx, hy = o.get_stacked_start_position(self.diff)
+                rel = [(mx - hx, my - hy) for mx, my in
+                       (o.modify_position(p, self.diff)
+                        for p in o.multi_curve.path)]
+                self._rm_bounds[id(o)] = _rm.slider_movement_bounds(rel, r_osu)
+            self._rm_frame_times = [f.time_ms for f in frames]
 
         # --- screen-mod precompute (needs objects + radius + judgments) ------
         # SY: each object's combo colour comes from its beat-snap divisor at
@@ -1318,6 +1368,9 @@ class StdScene:
         if self.depth_mod is not None:
             self._apply_depth_transform(obj, t)
             return
+        if self.rm_mod:
+            self._apply_rm_transform(obj)
+            return
         ot = self._obj_transform(obj, t)
         self._t_hide_approach = self.tmod in HIDES_APPROACH
         self._t_force_opaque = ot.force_opaque
@@ -1379,6 +1432,123 @@ class StdScene:
         self._t_force_opaque = False
         self._dp_scale = 1.0
         self._dp_center_osu = None
+
+    # --- Magnetised / Repel: stateful per-frame easeTo -------------------------
+
+    def _rm_ball_offset(self, obj, sample_t: float) -> tuple[float, float]:
+        """The slider ball's offset from the head at ``sample_t`` (osu!px), or
+        (0, 0) until the head has a result. Once the head is judged
+        (OsuModMagnetised/Repel: ``slider.HeadCircle.Result.HasResult``) the
+        destination targets the BALL onto the cursor instead of the head, so the
+        head eases to ``destination - Ball.DrawPosition``; this offset is that
+        ``Ball.DrawPosition`` (ball position relative to the real head)."""
+        if not isinstance(obj, Slider):
+            return (0.0, 0.0)
+        v = self._verdict(obj)
+        if v is None:
+            return (0.0, 0.0)
+        resolved = ((v.hit_time is not None and sample_t >= v.hit_time)
+                    or (v.hit_time is None and sample_t >= v.deadline))
+        if not resolved:
+            return (0.0, 0.0)
+        hx, hy = obj.get_stacked_start_position(self.diff)
+        bx, by = obj.get_stacked_position_at(sample_t, self.diff)
+        return (bx - hx, by - hy)
+
+    def _rm_step_one(self, obj, pos: tuple[float, float], sample_t: float,
+                     elapsed: float) -> tuple[float, float]:
+        """One OsuModMagnetised/Repel ``easeTo`` step for a single object:
+        DampContinuously ``pos`` (osu!px) toward its per-mod destination using
+        the cursor at ``sample_t`` and this step's ``elapsed`` ms."""
+        px, py = pos
+        cx, cy, _ = (cursor_at(self.frames, sample_t) if self.frames
+                     else (256.0, 192.0, 0))
+        boffx, boffy = self._rm_ball_offset(obj, sample_t)
+        if self.rm_mod == MAGNETISED:
+            dest_x, dest_y = _rm.magnet_destination(cx, cy, boffx, boffy)
+            damp = _rm.magnet_damp_length(self.rm_strength)
+        else:                                          # REPEL
+            dx, dy = _rm.repel_destination(px, py, cx, cy)
+            if isinstance(obj, Slider):
+                b = self._rm_bounds.get(id(obj))
+                if b is not None:
+                    dx, dy = _rm.clamp_to_slider_bounds(dx, dy, b)
+            dest_x, dest_y = dx - boffx, dy - boffy
+            damp = _rm.repel_damp_length(px, py, cx, cy, self.rm_strength)
+        return _rm.ease_step(px, py, dest_x, dest_y, damp, elapsed)
+
+    def _rm_seek(self, t: float) -> None:
+        """Cold-start / keyframe seek: integrate every alive object from its
+        spawn to ``t`` over the replay frames (the natural per-input timestep),
+        so a single-shot frame_rgb(t) shows the correct eased positions without
+        a prior monotonic pass. O(frames-in-preempt) per alive object."""
+        self._rm_pos = {}
+        ft = self._rm_frame_times
+        frames = self.frames
+        n = len(frames)
+        for obj in self._active:
+            if isinstance(obj, Spinner):
+                continue
+            pos = obj.get_stacked_start_position(self.diff)
+            spawn = obj.get_start_time() - self._preempt_for(obj)
+            prev = spawn
+            i = bisect.bisect_right(ft, spawn) if ft else n
+            while i < n and frames[i].time_ms < t:
+                st = frames[i].time_ms
+                pos = self._rm_step_one(obj, pos, st, st - prev)
+                prev = st
+                i += 1
+            pos = self._rm_step_one(obj, pos, t, t - prev)   # partial step to t
+            self._rm_pos[id(obj)] = pos
+
+    def _rm_advance(self, t: float) -> None:
+        """Integrate the per-object easeTo one render step (the MG/RP analogue
+        of the ruleset's per-frame Update). During the monotonic render pass the
+        step is small and integrated incrementally; a cold start or a
+        discontinuous jump (--dump-frames keyframes) reseeds from each object's
+        spawn over the replay frames."""
+        last = self._rm_last_t
+        if last is None or t < last or (t - last) > _RM_MAX_STEP_MS:
+            self._rm_seek(t)
+        else:
+            elapsed = t - last
+            live = {id(o) for o in self._active
+                    if not isinstance(o, Spinner)}
+            if len(self._rm_pos) != len(live):
+                self._rm_pos = {k: v for k, v in self._rm_pos.items()
+                                if k in live}
+            for obj in self._active:
+                if isinstance(obj, Spinner):
+                    continue
+                oid = id(obj)
+                pos = self._rm_pos.get(oid)
+                if pos is None:            # newly alive → starts at real position
+                    pos = obj.get_stacked_start_position(self.diff)
+                self._rm_pos[oid] = self._rm_step_one(obj, pos, t, elapsed)
+        self._rm_last_t = t
+
+    def _apply_rm_transform(self, obj) -> None:
+        """Install the MG/RP per-object offset for the sprites drawn next: a
+        pure translation (eased position − real head) applied as spr.post_xform
+        (head/number/ball/flash), the body point-xform (slider body) and _t_off
+        (the deferred approach ring), composed with any BR spin. MG/RP never
+        hide the approach ring and never force-opaque, so those gates stay off."""
+        self._t_hide_approach = False
+        self._t_force_opaque = False
+        if isinstance(obj, Spinner):
+            self._t_off = (0.0, 0.0)
+            self._compose_barrel(None, None)
+            return
+        real = obj.get_stacked_start_position(self.diff)
+        px, py = self._rm_pos.get(id(obj), real)
+        ox, oy = px - real[0], py - real[1]
+        self._t_off = (ox, oy)
+        pivot = self.cam.to_screen(*real)
+        scl = self.cam.scl
+        ox_scr, oy_scr = ox * scl, oy * scl
+        self._compose_barrel(
+            self._transform_sprite_xform(pivot, 1.0, 1.0, 0.0, ox_scr, oy_scr),
+            self._transform_point_xform(pivot, 1.0, 1.0, 0.0, ox_scr, oy_scr))
 
     # --- Freeze Frame per-object preempt --------------------------------------
 
@@ -1513,6 +1683,8 @@ class StdScene:
             self._render_fail_frame(t, skip_results=skip_results)
             return
         self._advance(t)
+        if self.rm_mod:
+            self._rm_advance(t)      # MG/RP: integrate the per-object easeTo
         self.spr.begin(clear=self.background)
         brightness = self._draw_background(t)
         if self._tri_field is not None:
@@ -1527,7 +1699,8 @@ class StdScene:
         # post_xform / body xform so objects, deferred approach rings, popups
         # and the cursor all ride it. Background/borders above stay fixed.
         self._install_barrel(t)
-        per_obj = bool(self.tmod) or self.depth_mod is not None
+        per_obj = (bool(self.tmod) or self.depth_mod is not None
+                   or bool(self.rm_mod))
         if self.draw_follow_points and self._fp_dots:
             fps = self._followpoint_sprites(t)
             if fps:
