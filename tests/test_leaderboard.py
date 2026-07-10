@@ -11,7 +11,7 @@ import tempfile
 from osu_std_renderer.render.leaderboard import (
     BoardData, LeaderboardEntry, avatar_cache_path, build_board, compute_rank,
     fetch_discord_avatar, is_fetchable_id, query_leaderboard,
-    resolve_avatar_bytes,
+    query_player_discord_id, resolve_avatar_bytes,
 )
 
 
@@ -103,6 +103,83 @@ def test_query_limit_top_n():
         assert [e["player_name"] for e in lb] == ["P0", "P1", "P2", "P3", "P4"]
     finally:
         os.unlink(path)
+
+
+# --- featured-card avatar id lookup (player_name → discord_user_id) ------------------
+
+def test_featured_discord_id_prefers_snowflake_over_placeholder():
+    # a player links both an osu_<id> placeholder AND a real Discord snowflake
+    # → the fetchable snowflake wins, even when the placeholder row scores
+    # higher (so the featured card can fetch a real avatar).
+    path = _make_db([
+        _row("a", "R3D", "osu_7185555", 100000),          # placeholder, higher
+        _row("b", "R3D", "111166802121281536", 500),      # real snowflake
+    ])
+    try:
+        assert query_player_discord_id(path, "R3D", "MAP") == "111166802121281536"
+    finally:
+        os.unlink(path)
+
+
+def test_featured_discord_id_prefers_current_map_then_score():
+    # two fetchable ids on different maps → the one seen on the CURRENT map
+    # first; with no map hint, the highest-scoring id.
+    path = _make_db([
+        _row("a", "R3D", "222", 99999, md5="OTHER"),      # other map, higher
+        _row("b", "R3D", "111", 100, md5="MAP"),          # this map, lower
+    ])
+    try:
+        assert query_player_discord_id(path, "R3D", "MAP") == "111"
+        assert query_player_discord_id(path, "R3D") == "222"       # score only
+    finally:
+        os.unlink(path)
+
+
+def test_featured_discord_id_placeholder_only_falls_back_to_procedural():
+    # the player has ONLY an osu_<id> placeholder (linked osu! account, no
+    # Discord user) → the id is returned but is NOT fetchable, so
+    # resolve_avatar_bytes → None → the featured card draws the procedural chip.
+    path = _make_db([_row("a", "VI0", "osu_30196342", 2086)])
+    try:
+        did = query_player_discord_id(path, "VI0", "MAP")
+        assert did == "osu_30196342"
+        assert is_fetchable_id(did) is False
+        assert resolve_avatar_bytes(did) is None
+    finally:
+        os.unlink(path)
+
+
+def test_featured_discord_id_none_and_case_insensitive():
+    # a fresh render whose player has no prior DB row → None (procedural chip);
+    # the .osr name is matched case-insensitively against the DB.
+    path = _make_db([_row("a", "R3D", "111166802121281536", 500)])
+    try:
+        assert query_player_discord_id(path, "Nobody", "MAP") is None
+        assert query_player_discord_id(path, "r3d", "MAP") == "111166802121281536"
+    finally:
+        os.unlink(path)
+
+
+def test_featured_discord_id_skips_null_blank_and_deleted():
+    # NULL / blank discord_user_id and soft-deleted rows are ignored; the first
+    # real linked id survives.
+    path = _make_db([
+        _row("a", "R3D", None, 1000),
+        _row("b", "R3D", "", 900),
+        _row("c", "R3D", "999", 5000, deleted=1),          # deleted → skipped
+        _row("d", "R3D", "111", 800),
+    ])
+    try:
+        assert query_player_discord_id(path, "R3D") == "111"
+    finally:
+        os.unlink(path)
+
+
+def test_featured_discord_id_fail_soft():
+    # missing DB / blank name → None (never raises); the featured card then
+    # uses the procedural chip.
+    assert query_player_discord_id("/no/such.sqlite", "R3D", "MAP") is None
+    assert query_player_discord_id("/no/such.sqlite", "") is None
 
 
 # --- rank computation ---------------------------------------------------------------

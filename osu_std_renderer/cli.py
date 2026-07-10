@@ -365,7 +365,8 @@ def _build_lazer_results(spr, settings, beatmap, meta, judgments, hud, fv,
     from .render.hud import build_aim_points
     from .render.lazer_results import (LazerResultsScreen, ResultsData,
                                        query_pb, slider_stats)
-    from .render.leaderboard import build_board, query_leaderboard
+    from .render.leaderboard import (build_board, query_leaderboard,
+                                     query_player_discord_id)
     from .render.pp import build_performance_breakdown, star_rating
 
     is_fail = frozen is not None
@@ -425,6 +426,20 @@ def _build_lazer_results(spr, settings, beatmap, meta, judgments, hud, fv,
               f"{len(board.left)} left + {len(board.right)} right"
               f"{moment} (render DB)", file=sys.stderr)
 
+    # featured (centre) card avatar: the CURRENT player's Discord id from the
+    # render DB (mapped by player_name — the .osr carries only the name). The
+    # featured card always shows, so this is looked up regardless of the
+    # leaderboard toggle. None → the procedural chip (a fresh render not yet in
+    # the DB, or an unlinked player). Read-only, fail-soft.
+    featured_did = query_player_discord_id(PB_DB_PATH, meta.player_name,
+                                           meta.beatmap_md5)
+    if featured_did:
+        print(f"avatar: featured player Discord id {featured_did} "
+              "(render DB) — real avatar attempted", file=sys.stderr)
+    else:
+        print("avatar: no render-DB Discord id for the featured player — "
+              "procedural chip", file=sys.stderr)
+
     data = ResultsData(
         player=meta.player_name, grade=grade, acc_pct=acc_pct,
         score=score, max_combo=max_combo,
@@ -437,6 +452,7 @@ def _build_lazer_results(spr, settings, beatmap, meta, judgments, hud, fv,
         err_deltas=list(hud.data.err_deltas),
         windows=(hud.hw.great, hud.hw.ok, hud.hw.meh),
         aim_points=aim_points, perf=perf, pb=pb, leaderboard=board,
+        discord_user_id=featured_did,
         lazer_mods=meta.lazer_mods, rate_override=meta.rate_override)
     dur_wall_ms = max(settings.results_screen_time,
                       LAZER_RESULTS_MIN_SECONDS) * 1000.0

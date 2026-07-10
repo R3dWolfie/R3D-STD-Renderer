@@ -361,6 +361,32 @@ def test_bake_avatar_deterministic_bytes():
     assert a[0, 0, 3] == 0 and a[0, -1, 3] == 0
 
 
+def _png_bytes(color=(210, 40, 55), size=8):
+    from io import BytesIO
+    from PIL import Image
+    buf = BytesIO()
+    Image.new("RGBA", (size, size), (*color, 255)).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def test_bake_avatar_discord_bytes_vs_procedural_fallback():
+    import numpy as np
+    proc = bake_avatar(96, "R3D")
+    # None → procedural, byte-identical to the pre-Discord path (back-compat)
+    assert np.array_equal(bake_avatar(96, "R3D", None), proc)
+    # corrupt/non-image bytes → graceful procedural fallback (never raises)
+    assert np.array_equal(bake_avatar(96, "R3D", b"not a png"), proc)
+    # real PNG bytes → a DIFFERENT chip: the cover-fit avatar image, not the
+    # username-hued initials disc
+    disc = bake_avatar(96, "R3D", _png_bytes())
+    assert disc.shape == proc.shape == (96, 96, 4)
+    assert not np.array_equal(disc, proc)
+    # still clipped to the disc (transparent corners) + a reddish centre fill
+    assert disc[0, 0, 3] == 0
+    r, g, b, al = (int(v) for v in disc[48, 48])
+    assert al == 255 and r > g and r > b
+
+
 # --- PB-card DB query ---------------------------------------------------------------
 
 def _make_db(rows):
@@ -593,6 +619,44 @@ def test_leaderboard_off_matches_pb_only_behaviour():
     LazerResultsScreen(spr, _data(leaderboard=None), total_ms=5000.0)
     # no leaderboard bakes leaked in
     assert spr.textures, "screen baked nothing"
+
+
+# --- featured-card Discord avatar (centre panel) ------------------------------------
+
+def test_featured_avatar_bytes_none_and_placeholder_fall_back():
+    # no linked id → None (procedural chip); an osu_<id> placeholder is not a
+    # fetchable snowflake so resolve_avatar_bytes → None → still procedural.
+    scr = LazerResultsScreen(_FakeSpr(), _data(discord_user_id=None),
+                             total_ms=5000.0)
+    assert scr._featured_avatar_bytes() is None
+    scr2 = LazerResultsScreen(_FakeSpr(),
+                              _data(discord_user_id="osu_30196342"),
+                              total_ms=5000.0)
+    assert scr2._featured_avatar_bytes() is None
+
+
+def test_featured_avatar_bytes_resolves_and_is_graceful():
+    # with a real snowflake the featured card uses the SAME resolve_avatar_bytes
+    # path the flanks use; a resolver that returns bytes flows through, and one
+    # that RAISES must never break the bake (→ None → procedural chip).
+    import osu_std_renderer.render.leaderboard as lb
+    scr = LazerResultsScreen(_FakeSpr(),
+                             _data(discord_user_id="111166802121281536"),
+                             total_ms=5000.0)
+    orig = lb.resolve_avatar_bytes
+    lb.resolve_avatar_bytes = lambda *a, **k: b"AVATARPNG"
+    try:
+        assert scr._featured_avatar_bytes() == b"AVATARPNG"
+    finally:
+        lb.resolve_avatar_bytes = orig
+
+    def _boom(*a, **k):
+        raise RuntimeError("avatar backend down")
+    lb.resolve_avatar_bytes = _boom
+    try:
+        assert scr._featured_avatar_bytes() is None
+    finally:
+        lb.resolve_avatar_bytes = orig
 
 
 # --- played-mod badge row (lazer starAndModDisplay ModDisplay) ----------------------

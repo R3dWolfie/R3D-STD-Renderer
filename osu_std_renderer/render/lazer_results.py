@@ -512,17 +512,47 @@ def avatar_initials(name: str) -> str:
     return tokens[0][0].upper()
 
 
-def bake_avatar(px: int, name: str, *_ignored):
-    """Procedural avatar chip (no osu!API): a deterministic username-hued
-    disc with a subtle vertical shade, a soft ring, and the centred
-    initial(s) in the repo font — the osu! default-avatar feel. Deterministic:
-    identical `name` → byte-identical chip. (Extra positional args are
-    accepted and ignored for back-compat with the old (px, initial, seed)
-    signature.)"""
+def bake_avatar(px: int, name: str, avatar_bytes: bytes | None = None,
+                *_ignored):
+    """The featured-card avatar chip. From Discord PNG bytes (cover-fit,
+    clipped to the disc, with the same soft ring) when available — the SAME
+    resolve_avatar_bytes path the flank cards use (bot token + SOCKS5 proxy +
+    on-disk cache) — else a deterministic username-hued disc with a subtle
+    vertical shade, a soft ring, and the centred initial(s) in the repo font
+    (the osu! default-avatar feel). A missing/unfetchable/corrupt avatar always
+    falls back to the procedural chip, so the card never breaks and the
+    procedural output stays byte-identical to the pre-Discord path.
+    Deterministic: identical `name` → byte-identical procedural chip. (Extra
+    positional args are accepted and ignored for back-compat with the old
+    (px, initial, seed) signature.)"""
     px = max(int(px), 8)
     h = _name_hash(name)
     hue = (h % 360) / 360.0
     sat = 0.42 + ((h >> 9) % 18) / 100.0            # 0.42..0.59, hash-varied
+    if avatar_bytes:
+        try:
+            from io import BytesIO
+            src = Image.open(BytesIO(avatar_bytes)).convert("RGBA")
+            sw, sh = src.size
+            scale = px / max(min(sw, sh), 1)        # cover-fit the disc
+            nw = max(int(sw * scale + 0.5), px)
+            nh = max(int(sh * scale + 0.5), px)
+            src = src.resize((nw, nh), Image.LANCZOS)
+            lft, top = (nw - px) // 2, (nh - px) // 2
+            img = src.crop((lft, top, lft + px, top + px))
+            mask = Image.new("L", (px, px), 0)
+            ImageDraw.Draw(mask).ellipse([0, 0, px - 1, px - 1], fill=255)
+            img.putalpha(mask)                      # clip to the disc
+            d = ImageDraw.Draw(img)                 # + the same soft ring
+            ring = _hsv(hue, max(sat - 0.16, 0.0), 0.92)
+            rc = tuple(int(round(c * 255)) for c in ring)
+            lw = max(int(px * 0.045), 2)
+            off = lw * 0.5
+            d.ellipse([off, off, px - 1 - off, px - 1 - off],
+                      outline=(*rc, 150), width=lw)
+            return _to_rgba(img)
+        except Exception:  # noqa: BLE001 — corrupt/animated → procedural chip
+            pass
     c0 = _hsv(hue, sat, 0.62)                       # top (lighter)
     c1 = _hsv((hue + 0.06) % 1.0, min(sat + 0.08, 1.0), 0.34)   # bottom (dark)
     img = Image.new("RGBA", (px, px), (0, 0, 0, 0))
@@ -1005,6 +1035,10 @@ class ResultsData:
     perf: object | None                    # pp.PerfBreakdown | None
     pb: dict | None                        # query_pb() row | None
     leaderboard: object | None = None      # leaderboard.BoardData | None
+    # the CURRENT player's Discord user id (render DB → cli looks it up by
+    # player_name), so the FEATURED card resolves a real avatar via the same
+    # path the flanks use. None (fresh render / unlinked player) → procedural.
+    discord_user_id: str | None = None
     # played mods for the badge row: the FULL lazer acronym set
     # (meta.lazer_mods, CL/DA/WU/… in the .osr blob's display order) + the
     # custom clock rate (meta.rate_override) for the "DT 1.3×" suffix. Default
@@ -1189,7 +1223,8 @@ class LazerResultsScreen:
         # char-clip that would drop title/artist/name content off the edge).
         # Title/artist span the panel content width; the name shares its row
         # with the 52px avatar + a 12px gap, so it gets a tighter budget.
-        self.avatar_key = self._put(bake_avatar(int(52 * k), d.player or "?"))
+        self.avatar_key = self._put(bake_avatar(
+            int(52 * k), d.player or "?", self._featured_avatar_bytes()))
         content_w = self.PANEL_W - 48.0                 # panel inner width
         self.name_row = self._fit_text(d.player or "Player", 30, (1, 1, 1),
                                        content_w - 64.0)   # avatar+gap budget
@@ -1328,6 +1363,25 @@ class LazerResultsScreen:
 
         # --- map leaderboard (stage 1, flanking the featured panel) ---------
         self._bake_leaderboard()
+
+    def _featured_avatar_bytes(self):
+        """Discord avatar PNG bytes for the CURRENT (featured) player, or None
+        → the procedural chip. Resolved via the flank cards' resolve_avatar_
+        bytes (on-disk cache → bot fetch through the SOCKS5 proxy), keyed on
+        the render-DB discord_user_id carried on ResultsData (looked up by
+        player_name in cli). None when the player has no DB id (a fresh render
+        not yet in the DB, or an unlinked player) or the module/fetch is
+        unavailable — the featured card then shows the procedural chip, exactly
+        as before. NEVER blocks or raises (the same graceful path as the
+        flanks)."""
+        did = getattr(self.d, "discord_user_id", None)
+        if not did:
+            return None
+        try:
+            from .leaderboard import resolve_avatar_bytes
+            return resolve_avatar_bytes(did)
+        except Exception:  # noqa: BLE001 — avatars never break a bake
+            return None
 
     def _bake_leaderboard(self) -> None:
         """Bake the flanking ranked cards + the rank-moment banner (owner

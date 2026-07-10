@@ -104,6 +104,52 @@ def query_leaderboard(db_path, beatmap_md5: str,
     return [dict(zip(_LB_COLUMNS, r)) for r in rows]
 
 
+def query_player_discord_id(db_path, player_name: str,
+                            beatmap_md5: str | None = None) -> str | None:
+    """The CURRENT player's Discord user id from the R3D render DB (read-only)
+    — so the FEATURED (centre) results card can show their real avatar via the
+    SAME path the flanks use (resolve_avatar_bytes).
+
+    The current render is driven by an .osr that carries only the player_name;
+    the discord_user_id lives in the render DB, so this maps name → id. Prefers
+    a real snowflake (a fetchable all-digit id) over the DB's `osu_<id>`
+    placeholder (an osu! link with no Discord user), and — when `beatmap_md5`
+    is given — an id seen on the SAME map first. Returns None when the player
+    has no prior render / no linked id, or the DB is missing/locked/drifted:
+    in every such case the featured card falls back to the procedural chip
+    (e.g. a fresh render not yet written to the DB). Fail-soft, never raises."""
+    if not player_name:
+        return None
+    try:
+        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2.0)
+    except Exception:  # noqa: BLE001 — DB missing/locked → procedural fallback
+        return None
+    try:
+        cur = con.cursor()
+        sql = ("SELECT discord_user_id FROM renders "
+               "WHERE player_name = ? COLLATE NOCASE AND deleted = 0 "
+               "AND discord_user_id IS NOT NULL AND discord_user_id != ''")
+        params: list = [player_name]
+        if beatmap_md5:
+            # rows on THIS map first, then the player's best score
+            sql += " ORDER BY (beatmap_md5 = ?) DESC, score DESC"
+            params.append(beatmap_md5)
+        else:
+            sql += " ORDER BY score DESC"
+        sql += " LIMIT 32"
+        cands = [str(r[0]) for r in cur.execute(sql, params).fetchall()]
+    except Exception:  # noqa: BLE001 — schema drift → procedural fallback
+        return None
+    finally:
+        con.close()
+    # prefer a fetchable snowflake; else the first non-null (an osu_<id>
+    # placeholder, which resolve_avatar_bytes turns into the procedural chip)
+    for c in cands:
+        if is_fetchable_id(c):
+            return c
+    return cands[0] if cands else None
+
+
 def _entry_from_row(rank: int, row: dict) -> LeaderboardEntry:
     return LeaderboardEntry(
         rank=rank,
