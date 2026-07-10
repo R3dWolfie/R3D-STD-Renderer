@@ -45,6 +45,11 @@ class LeaderboardEntry:
     mods: int
     counts: tuple[int, int, int, int]      # 300/100/50/miss
     discord_user_id: str | None
+    # osu!-global path only: an absolute path to a PRE-FETCHED avatar PNG for
+    # this player (the bot downloads osu avatars ahead of the render). None on
+    # render-DB rows (they resolve a Discord avatar via discord_user_id). The
+    # default keeps every existing LeaderboardEntry(...) construction valid.
+    avatar_png: str | None = None
 
 
 @dataclass
@@ -164,10 +169,75 @@ def _entry_from_row(rank: int, row: dict) -> LeaderboardEntry:
                 int(row.get("count_50") or 0), int(row.get("count_miss") or 0)),
         discord_user_id=(str(row["discord_user_id"])
                          if row.get("discord_user_id") else None),
+        avatar_png=row.get("avatar_png"),
     )
 
 
 # --- board assembly (pure) ---------------------------------------------------------
+
+# --- osu! GLOBAL leaderboard (bot hand-off) ----------------------------------------
+# The service (cli/r3d_render.py) fetches the map's osu! global top scores via
+# the osu!API, pre-fetches each player's osu avatar to a PNG, and writes a JSON
+# list. rows_from_osu_json turns those entries into row dicts of the SAME shape
+# query_leaderboard() returns, so build_board() consumes them UNCHANGED. Purely
+# additive — the render-DB path is untouched and stays the default.
+
+# osu! rank letters (XH/X = silver/gold SS, SH = silver S) -> the render-DB grade
+# spellings (SS/S/A/B/C/D) so the results FOR_RANK colours + grade pill match.
+_OSU_GRADE_NORM = {
+    "XH": "SS", "X": "SS", "SSH": "SS", "SS": "SS",
+    "SH": "S", "S": "S", "A": "A", "B": "B", "C": "C", "D": "D", "F": "D",
+}
+
+
+def _norm_osu_grade(g) -> str:
+    s = str(g or "").strip().upper()
+    return _OSU_GRADE_NORM.get(s, s or "?")
+
+
+def _mods_str_to_csv(s) -> str:
+    """Normalise a mods string to the render-DB comma form ("HD,DT") that the
+    flank card splits on: pass comma'd input through, split a concatenated
+    "HDDT" into 2-char acronyms, map empty/NM -> "" (no pills)."""
+    s = str(s or "").strip()
+    if not s or s.upper() in ("NM", "NOMOD"):
+        return ""
+    if "," in s:
+        return ",".join(p.strip() for p in s.split(",") if p.strip())
+    return ",".join(s[i:i + 2] for i in range(0, len(s), 2))
+
+
+def rows_from_osu_json(entries: list) -> list[dict]:
+    """Convert osu!-global JSON entries (the bot contract) into row dicts shaped
+    like query_leaderboard() output, so build_board() consumes them unchanged.
+
+    Each entry (already sorted by rank): {rank, username, score, accuracy
+    (0..100), grade (osu letter), max_combo, mods (bitmask int), mods_str,
+    count300, count100, count50, count_miss, avatar_png (path|null)}. Robust to
+    missing keys. discord_user_id is None (osu players aren't Discord-linked);
+    avatar_png carries the pre-fetched osu avatar the flank card loads."""
+    rows: list[dict] = []
+    for e in entries or []:
+        if not isinstance(e, dict):
+            continue
+        rows.append({
+            "player_name": str(e.get("username") or "?"),
+            "discord_user_id": None,
+            "score": int(e.get("score") or 0),
+            "accuracy": float(e.get("accuracy") or 0.0),
+            "grade": _norm_osu_grade(e.get("grade")),
+            "max_combo": int(e.get("max_combo") or 0),
+            "mods_str": _mods_str_to_csv(e.get("mods_str")),
+            "mods": int(e.get("mods") or 0),
+            "count_300": int(e.get("count300") or 0),
+            "count_100": int(e.get("count100") or 0),
+            "count_50": int(e.get("count50") or 0),
+            "count_miss": int(e.get("count_miss") or 0),
+            "replay_md5": None,
+            "avatar_png": (str(e["avatar_png"]) if e.get("avatar_png") else None),
+        })
+    return rows
+
 
 def compute_rank(other_scores, current_score: int) -> int:
     """The current play's 1-based rank among the OTHER players' best scores:

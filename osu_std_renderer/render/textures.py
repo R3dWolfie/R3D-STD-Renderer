@@ -284,8 +284,11 @@ def bake_argon_digits(height: int = DIGIT_HEIGHT) -> dict[str, np.ndarray]:
 # (e.g. "DT 1.3×"). Appending '×' is baked as its own glyph_× / aglyph_×
 # texture and — verified — sits inside the existing union vertical extent
 # (its bbox is narrower than the ascenders/'p' descender), so every other
-# glyph bakes byte-identically and legacy renders are unchanged.
-HUD_CHARSET = "0123456789.%x,:-!ABCDEFGHIJKLMNOPQRSTUVWXYZp×"
+# glyph bakes byte-identically and legacy renders are unchanged. '/' is
+# appended for the free-tier URL watermark ("https://renderer.r3dwolfie.com/");
+# it spans cap-top→baseline, inside the existing A-Z union extent, so it
+# likewise bakes without disturbing any other glyph.
+HUD_CHARSET = "0123456789.%x,:-!ABCDEFGHIJKLMNOPQRSTUVWXYZp×/"
 PIE_STEPS = 48          # quantized progress-pie fill masks
 PIE_SIZE = 96
 KEY_SQUARE_SIZE = 128
@@ -722,6 +725,14 @@ def bake_logo_tile(size: int = 256) -> np.ndarray:
     """The R3D 'R' tile (show_logo intro splash): rounded red square with
     a heavy white R centred like the site logo (versus_splash.py measures
     the inner R at ~0.20..0.79 of the tile — matched here)."""
+    # Prefer R3D's real logo asset (own IP, license-clean) over the procedural
+    # draw so the splash matches the site icon; fall back to the bake if missing.
+    try:
+        _lp = os.path.join(os.path.dirname(__file__), "..", "assets", "logo.png")
+        _im = Image.open(_lp).convert("RGBA").resize((size, size), Image.LANCZOS)
+        return np.asarray(_im, dtype=np.uint8).copy()
+    except Exception:
+        pass
     d = _rounded_rect_alpha(size, size, size * LOGO_TILE_RADIUS_FRAC)
     tile = np.clip(-d / _AA_PX, 0.0, 1.0)
     rgba = np.zeros((size, size, 4), dtype=np.uint8)

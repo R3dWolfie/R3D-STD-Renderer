@@ -1423,8 +1423,16 @@ class LazerResultsScreen:
                 return None
 
         def _one(entry):
+            avb = None
             try:
-                avb = resolve_avatar_bytes(entry.discord_user_id)
+                ap = getattr(entry, "avatar_png", None)
+                if ap:
+                    # osu!-global path: the bot pre-fetched this player's osu
+                    # avatar to a PNG — load THOSE bytes (fail-soft → chip).
+                    with open(ap, "rb") as _fh:
+                        avb = _fh.read() or None
+                elif entry.discord_user_id:
+                    avb = resolve_avatar_bytes(entry.discord_user_id)
             except Exception:  # noqa: BLE001 — avatars never break a bake
                 avb = None
             return (self._put(bake_lb_card(entry, avb, cw, ch, k,

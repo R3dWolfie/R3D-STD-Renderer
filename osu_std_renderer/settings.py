@@ -193,6 +193,14 @@ class StdRenderSettings:
     # On by default for std; off → the current single-card results (+ the
     # existing PB card) are unchanged. Only affects results_style="lazer".
     show_leaderboard: bool = True
+    # leaderboard SOURCE (owner 2026-07-10): "r3d" = the LOCAL render DB (the
+    # default, unchanged behaviour); "osu" = the map's osu! GLOBAL top scores,
+    # handed in as JSON by the service (leaderboard_json). from_preset auto-picks
+    # leaderboard_source (field-name match); leaderboard_json is CLI-only (the
+    # bot adapter sets it). The renderer falls back to the render DB whenever the
+    # osu JSON is missing/empty/invalid, so the default path is never disturbed.
+    leaderboard_source: str = "r3d"
+    leaderboard_json: Path | None = None
     letterbox_breaks: bool = True
 
     # cursor (§4.7/§4.8). use_skin_cursor defaults TRUE — real osu has no

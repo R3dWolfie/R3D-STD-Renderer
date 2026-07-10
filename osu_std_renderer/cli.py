@@ -164,6 +164,15 @@ def build_parser() -> argparse.ArgumentParser:
                     help="per-map render leaderboard on the lazer results "
                          "screen (featured play flanked by other renders of "
                          "the same map, from the local render DB); default on")
+    ap.add_argument("--leaderboard-source", choices=("r3d", "osu"),
+                    default="r3d",
+                    help="flank-card source: 'r3d' = the local render DB "
+                         "(default), 'osu' = the map's osu! GLOBAL top scores "
+                         "from --leaderboard-json (silently falls back to r3d "
+                         "when that file is missing/empty/invalid)")
+    ap.add_argument("--leaderboard-json", type=Path, default=None,
+                    help="path to the bot-written osu! global scores JSON "
+                         "(only read when --leaderboard-source osu)")
     ap.add_argument("--no-fail-animation", dest="no_fail_animation",
                     action="store_true", default=False,
                     help="debug escape hatch: ignore the .osr's death point "
@@ -367,7 +376,8 @@ def _build_lazer_results(spr, settings, beatmap, meta, judgments, hud, fv,
     from .render.lazer_results import (LazerResultsScreen, ResultsData,
                                        query_pb, slider_stats)
     from .render.leaderboard import (build_board, query_leaderboard,
-                                     query_player_discord_id)
+                                     query_player_discord_id,
+                                     rows_from_osu_json)
     from .render.pp import build_performance_breakdown, star_rating
 
     is_fail = frozen is not None
@@ -418,14 +428,38 @@ def _build_lazer_results(spr, settings, beatmap, meta, judgments, hud, fv,
     cur_score = int(meta.score or fv["score"])
     board = None
     if settings.show_leaderboard:
-        rows = query_leaderboard(PB_DB_PATH, meta.beatmap_md5, replay_md5)
         prev_best = int(pb["score"]) if pb is not None else None
-        board = build_board(rows, meta.player_name, cur_score,
-                            prev_best_score=prev_best, max_per_side=3)
-        moment = f" [{board.moment}]" if board.moment else ""
-        print(f"board:  #{board.rank}/{board.n_players} on this map — "
-              f"{len(board.left)} left + {len(board.right)} right"
-              f"{moment} (render DB)", file=sys.stderr)
+        # osu! GLOBAL source (opt-in): the bot hands us the map's osu top scores
+        # as JSON (avatars pre-fetched). Fail-soft — a missing/empty/invalid file
+        # falls back to the render DB so the default r3d path is never disturbed.
+        osu_rows = None
+        if settings.leaderboard_source == "osu":
+            import json as _json
+            try:
+                _raw = (_json.loads(Path(settings.leaderboard_json).read_text(
+                    encoding="utf-8")) if settings.leaderboard_json else None)
+                if _raw:
+                    osu_rows = rows_from_osu_json(_raw)
+            except Exception as _e:  # noqa: BLE001 — never kill a render over this
+                print(f"board:  osu! JSON unreadable ({_e}) — falling back",
+                      file=sys.stderr)
+                osu_rows = None
+        if osu_rows:
+            board = build_board(osu_rows, meta.player_name, cur_score,
+                                prev_best_score=prev_best, max_per_side=3)
+            print(f"board:  source: osu!global ({len(osu_rows)} players) — "
+                  f"#{board.rank}/{board.n_players}, {len(board.left)} left + "
+                  f"{len(board.right)} right", file=sys.stderr)
+        else:
+            rows = query_leaderboard(PB_DB_PATH, meta.beatmap_md5, replay_md5)
+            board = build_board(rows, meta.player_name, cur_score,
+                                prev_best_score=prev_best, max_per_side=3)
+            moment = f" [{board.moment}]" if board.moment else ""
+            _src = ("R3D DB (fallback)"
+                    if settings.leaderboard_source == "osu" else "render DB")
+            print(f"board:  #{board.rank}/{board.n_players} on this map — "
+                  f"{len(board.left)} left + {len(board.right)} right"
+                  f"{moment} ({_src})", file=sys.stderr)
 
     # featured (centre) card avatar: the CURRENT player's Discord id from the
     # render DB (mapped by player_name — the .osr carries only the name). The
@@ -1165,6 +1199,8 @@ def main(argv: list[str] | None = None) -> int:
         lead_in_time=max(args.lead_in, 0.0),
         show_results=args.results, results_style=args.results_style,
         show_leaderboard=args.leaderboard,
+        leaderboard_source=args.leaderboard_source,
+        leaderboard_json=args.leaderboard_json,
         letterbox_breaks=args.letterbox_breaks,
         draw_approach_circles=args.approach_circles,
         draw_combo_numbers=args.combo_numbers,
