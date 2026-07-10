@@ -12,6 +12,11 @@ MODULES = [
     "tests.test_difficulty",
     "tests.test_sliderpath",
     "tests.test_parser_synthetic",
+    # osu!stable replay-clock lead-in: osrparse strips the leading
+    # (256,-500) placeholder frames without accumulating their deltas,
+    # dropping the intro-skip/audio lead-in; parse_replay recovers it so
+    # the cursor clock matches the beatmap (fixes ~25%% stable mass-miss)
+    "tests.test_leadin_offset",
     "tests.test_skin_ini",
     "tests.test_ruleset",
     "tests.test_health",
