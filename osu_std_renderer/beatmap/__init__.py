@@ -6,3 +6,4 @@ from .parser import (BeatmapParseError, load_full, parse_beatmap,  # noqa: F401
                      parse_timing_points_and_pauses)
 from .pause import Pause  # noqa: F401
 from .stacking import process_stacking  # noqa: F401
+from .storyboard import Storyboard, parse_storyboard  # noqa: F401

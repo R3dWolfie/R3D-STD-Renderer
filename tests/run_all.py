@@ -80,6 +80,9 @@ MODULES = [
     # DotNetRandom). The layout is reproduced bit-for-bit from the .osr seed
     # (object 0 re-derived straight from the C#); non-TP renders untouched.
     "tests.test_target_practice",
+    # storyboard engine phase 1: the .osu[Events]+.osb PARSER (data model only;
+    # command execution + rendering are later phases) (2026-07)
+    "tests.test_storyboard",
 ]
 
 
