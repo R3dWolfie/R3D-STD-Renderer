@@ -1017,7 +1017,8 @@ class ArgonBarField:
                                             0.0, 1.0)
         self._s1 = np.empty((gh, gw))
         self._s2 = np.empty((gh, gw))
-        self._end_cache: dict[tuple[float, float], np.ndarray] = {}
+        self._end_cache: dict = {}
+        self._band_cache: dict[float, tuple[int, int, int, int]] = {}
 
     @staticmethod
     def _path_points(w: float, h: float, r: float,
@@ -1067,27 +1068,61 @@ class ArgonBarField:
         y = float(np.interp(s, self._cum_n, self._pts[:, 1]))
         return x, y
 
-    def _dist_to(self, p: tuple[float, float]) -> np.ndarray:
-        """Distance field to one path point — cached by exact endpoint
-        (pos(0.0) recurs every frame; damped hp repeats during steady
-        stretches). Same np.hypot expression as before; cached arrays are
-        never written to."""
-        d = self._end_cache.get(p)
+    def _dist_to(self, p: tuple[float, float], box) -> np.ndarray:
+        """Distance field to one path point over the live box — cached by
+        exact endpoint (pos(0.0) recurs every frame; damped hp repeats
+        during steady stretches). Same np.hypot expression as before;
+        cached arrays are never written to."""
+        key = (p, box)
+        d = self._end_cache.get(key)
         if d is None:
             if len(self._end_cache) >= 16:
                 self._end_cache.clear()
-            d = np.hypot(self.xx - p[0], self.yy - p[1])
-            self._end_cache[p] = d
+            y0, y1, x0, x1 = box
+            d = np.hypot(self.xx[y0:y1, x0:x1] - p[0],
+                         self.yy[y0:y1, x0:x1] - p[1])
+            self._end_cache[key] = d
         return d
 
-    def sub_distance(self, a: float, b: float) -> np.ndarray:
-        """Distance field to the sub-path [a, b] (b ≥ a)."""
+    def _live_box(self, radius: float) -> tuple[int, int, int, int]:
+        """Bounding box of {d < radius}: every texel OUTSIDE it has
+        sub_distance ≥ d ≥ radius for ANY sub-path (a sub-path's distance
+        can only exceed the full path's), so after the clip-to-radius it
+        lands in bar_rgba's constant far-field (core=0, mixv=0). Slicing
+        the math to this box is therefore value-preserving."""
+        box = self._band_cache.get(radius)
+        if box is None:
+            live = self.d < radius
+            rows = np.flatnonzero(live.any(axis=1))
+            cols = np.flatnonzero(live.any(axis=0))
+            if rows.size:
+                y0, y1 = int(rows[0]), int(rows[-1]) + 1
+                x0, x1 = int(cols[0]), int(cols[-1]) + 1
+                # snap nearly-full dimensions to full: a 1-column trim
+                # (the glow bar) would break buffer contiguity and cost
+                # more than it saves
+                if (y1 - y0) > 0.9 * self.gh:
+                    y0, y1 = 0, self.gh
+                if (x1 - x0) > 0.9 * self.gw:
+                    x0, x1 = 0, self.gw
+                box = (y0, y1, x0, x1)
+            else:
+                box = (0, 0, 0, 0)
+            self._band_cache[radius] = box
+        return box
+
+    def sub_distance(self, a: float, b: float, box=None) -> np.ndarray:
+        """Distance field to the sub-path [a, b] (b ≥ a), over the whole
+        field or a (y0, y1, x0, x1) sub-box."""
+        if box is None:
+            box = (0, self.gh, 0, self.gw)
+        y0, y1, x0, x1 = box
         if b <= a + 1e-9:
-            return self._dist_to(self.pos(a))
-        inside = (self.s >= a) & (self.s <= b)
-        cap = np.minimum(self._dist_to(self.pos(a)),
-                         self._dist_to(self.pos(b)))
-        return np.where(inside, self.d, cap)
+            return self._dist_to(self.pos(a), box)
+        inside = (self.s[y0:y1, x0:x1] >= a) & (self.s[y0:y1, x0:x1] <= b)
+        cap = np.minimum(self._dist_to(self.pos(a), box),
+                         self._dist_to(self.pos(b), box))
+        return np.where(inside, self.d[y0:y1, x0:x1], cap)
 
     def bar_rgba(self, a: float, b: float, radius: float,
                  glow_portion: float, bar_rgb, glow_rgba,
@@ -1101,30 +1136,47 @@ class ArgonBarField:
         # tests/test_hud.py::test_bar_rgba_matches_reference_formulation
         # pins the refactor bit-for-bit. (np.rint == np.round(decimals=0),
         # x*1.0 == x, and u8-assignment == astype(u8) — all exact.)
-        D = np.clip(self.sub_distance(a, b), 0.0, radius)
+        # Outside the {d < radius} bounding box every texel is constant:
+        # D clips to radius -> core=0, mixv=0 -> rgb = glow colour, a=0
+        # (the same values the full-field math produced there) -- so the
+        # heavy math runs only on the live box. Requires agp > 0 (all
+        # real callers): at agp <= 0 the far field is NOT constant.
+        if radius * glow_portion > 0.0:
+            y0, y1, x0, x1 = self._live_box(radius)
+        else:
+            y0, y1, x0, x1 = 0, self.gh, 0, self.gw
+        D = np.clip(self.sub_distance(a, b, (y0, y1, x0, x1)), 0.0, radius)
         agp = radius * glow_portion
         core = np.clip((radius - agp - D), 0.0, 1.0)       # 1 px blend edge
         mixv = np.clip(1.0 - (D - radius + agp) / max(agp, 1e-9), 0.0, 1.0)
         glow_a = glow_rgba[3] * mixv ** 8
         inv = 1.0 - core
-        t1, t2 = self._s1, self._s2
+        rows, cols = y1 - y0, x1 - x0
+        boxed = (rows, cols) != (self.gh, self.gw)
+        t1 = self._s1[:rows, :cols]
+        t2 = self._s2[:rows, :cols]
         out = np.empty((self.gh, self.gw, 4), dtype=np.uint8)
         for c in range(3):
+            if boxed:
+                # far-field constant: core=0 -> 0*bar + 1*glow == glow
+                out[..., c] = np.uint8(np.rint(glow_rgba[c] * 255.0))
             np.multiply(core, bar_rgb[c], out=t1)
             np.multiply(inv, glow_rgba[c], out=t2)
             np.add(t1, t2, out=t1)
             np.multiply(t1, 255.0, out=t1)
             np.rint(t1, out=t1)
-            out[..., c] = t1
+            out[y0:y1, x0:x1, c] = t1
+        if boxed:
+            out[..., 3] = 0                # far-field alpha: glow_a=0 -> 0
         np.multiply(inv, glow_a, out=t2)
         np.add(core, t2, out=t2)
         if xgrad:
-            np.multiply(t2, self._xgrad_g, out=t2)
+            np.multiply(t2, self._xgrad_g[y0:y1, x0:x1], out=t2)
         np.multiply(t2, alpha_mult, out=t2)
         np.clip(t2, 0.0, 1.0, out=t2)
         np.multiply(t2, 255.0, out=t2)
         np.rint(t2, out=t2)
-        out[..., 3] = t2
+        out[y0:y1, x0:x1, 3] = t2
         return out
 
     def background_rgba(self) -> np.ndarray:
