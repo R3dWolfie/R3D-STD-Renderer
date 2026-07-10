@@ -1076,3 +1076,50 @@ def read_repel_magnet(osr_path: Path) -> "RepelMagnet | None":
     if not mods:
         return None
     return repel_magnet_from_mods(mods)
+
+
+# osu.Game.Rulesets.Osu/Mods/OsuModTargetPractice.cs
+# TP is a CONVERSION mod (ModType.Conversion): it discards the map's objects and
+# rebuilds it as seeded "target" hit circles placed on the beat. Like OsuModRandom
+# it is IHasSeed — ``ApplyToBeatmap`` does ``Seed.Value ??= RNG.Next()`` before
+# ``new Random(Seed.Value.Value)``, so a replay ALWAYS persists the actual seed
+# under the snake_case ``seed`` key in the ScoreInfo blob settings; without it the
+# target layout can't be reproduced. ``Metronome`` (BindableBool, default true) is
+# an audio-only tick overlay — read for completeness, it never moves a target.
+TARGET_PRACTICE_ACRONYM = "TP"
+_TP_SEED_KEY = "seed"
+_TP_METRONOME_KEY = "metronome"
+
+
+@dataclass(frozen=True)
+class TargetPractice:
+    """The TP mod read from a .osr. ``seed`` is the .NET Random seed (None only
+    when a replay somehow omitted it — then the target positions can't be
+    reproduced and TP must not be rendered). ``metronome`` mirrors the audio
+    metronome-tick toggle (default True)."""
+    seed: int | None
+    metronome: bool = True
+
+
+def target_practice_from_mods(mods: list[dict]) -> "TargetPractice | None":
+    """The TP mod (seed + metronome) from an already-parsed
+    :func:`read_lazer_mods` list, or None when no TP mod is present."""
+    for m in mods:
+        if isinstance(m, dict) and str(m.get("acronym", "")).upper() == TARGET_PRACTICE_ACRONYM:
+            s = m.get("settings") or {}
+            sv = s.get(_TP_SEED_KEY)
+            seed = (int(sv) if isinstance(sv, (int, float))
+                    and not isinstance(sv, bool) else None)
+            mv = s.get(_TP_METRONOME_KEY)
+            metronome = bool(mv) if isinstance(mv, bool) else True
+            return TargetPractice(seed=seed, metronome=metronome)
+    return None
+
+
+def read_target_practice(osr_path: Path) -> "TargetPractice | None":
+    """The TP mod (seed + metronome) from a .osr, or None when the replay
+    carries no Target Practice mod (or no ScoreInfo blob). Never raises."""
+    mods = read_lazer_mods(osr_path)
+    if not mods:
+        return None
+    return target_practice_from_mods(mods)

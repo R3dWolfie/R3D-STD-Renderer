@@ -43,6 +43,7 @@ from .lazer_mods import (LAZER_GAME_VERSION,
                          read_lazer_mods,
                          repel_magnet_from_mods,
                          synesthesia_from_mods,
+                         target_practice_from_mods,
                          traceable_from_mods,
                          transform_from_mods)
 
@@ -186,6 +187,13 @@ class ReplayMeta:
     mirror_reflection: str = ""
     random_seed: int | None = None
     random_angle_sharpness: float = 7.0
+    # Target Practice (TP): a CONVERSION mod (lazer-only) that replaces the map
+    # with seeded "target" hit circles on the beat. target_practice_seed is the
+    # .NET Random seed the layout is regenerated from (None = no reproducible TP,
+    # so the map is left untouched). target_practice_metronome mirrors the
+    # audio metronome-tick toggle. See beatmap/target_practice.py.
+    target_practice_seed: int | None = None
+    target_practice_metronome: bool = True
     # Transform-family "fun" mods (GR/DF/SI/WG/TR): per-object visual entrance
     # animation only — the beatmap geometry, the cursor and the judgement are
     # untouched (see render/transform_mods.py). transform_acronym is "" for
@@ -279,6 +287,13 @@ class ReplayMeta:
         """True when the replay carries a reproducible Random mod (a seed is
         present). The gate that keeps every non-RD render byte-identical."""
         return self.random_seed is not None
+
+    @property
+    def has_target_practice(self) -> bool:
+        """True when the replay carries a reproducible Target Practice mod (a
+        seed is present). The gate that swaps the map for the generated targets;
+        every non-TP render stays byte-identical."""
+        return self.target_practice_seed is not None
 
     @property
     def has_repel_magnet(self) -> bool:
@@ -405,6 +420,8 @@ def parse_replay(path: Path) -> tuple[list[StdFrame], ReplayMeta]:
     mirror_reflection = ""
     random_seed: int | None = None
     random_angle_sharpness = 7.0
+    target_practice_seed: int | None = None
+    target_practice_metronome = True
     transform_acronym = ""
     transform_start_scale = 1.0
     transform_strength = 1.0
@@ -461,6 +478,15 @@ def parse_replay(path: Path) -> tuple[list[StdFrame], ReplayMeta]:
             if rd is not None and rd.seed is not None:
                 random_seed = rd.seed
                 random_angle_sharpness = rd.angle_sharpness
+            # Target Practice (TP): the .NET Random seed that regenerates the
+            # map as seeded target circles. A replay persists the actual seed;
+            # without one the target layout can't be reproduced, so leave
+            # target_practice_seed None (map rendered untouched). TP is
+            # incompatible with RD, so the two seeds never co-occur.
+            tp = target_practice_from_mods(mlist)
+            if tp is not None and tp.seed is not None:
+                target_practice_seed = tp.seed
+                target_practice_metronome = tp.metronome
             # Transform-family (GR/DF/SI/WG/TR): a per-object entrance
             # animation. Visual only, so no geometry/judgement change — the
             # scene reads transform_acronym to drive the appear transform.
@@ -534,6 +560,8 @@ def parse_replay(path: Path) -> tuple[list[StdFrame], ReplayMeta]:
         mirror_reflection=mirror_reflection,
         random_seed=random_seed,
         random_angle_sharpness=random_angle_sharpness,
+        target_practice_seed=target_practice_seed,
+        target_practice_metronome=target_practice_metronome,
         transform_acronym=transform_acronym,
         transform_start_scale=transform_start_scale,
         transform_strength=transform_strength,
