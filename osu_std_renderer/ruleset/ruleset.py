@@ -229,6 +229,10 @@ class PartOutcome:
     kind: str                   # "head" | "tick" | "repeat" | "tail"
     pos: tuple[float, float]    # stacked osu!px
     hit: bool
+    # cursor-to-ball distance (osu!px) at this part's JUDGE time — the
+    # per-part tracking quality the lazer tick/tail reconcile ranks by
+    # (worst-tracked parts become the misses). inf for the head (unused).
+    margin: float = math.inf
 
 
 @dataclass
@@ -404,6 +408,12 @@ class StdRuleset:
             if self.classic:
                 lazer = False   # CL overrides the game_version auto-detect
         self.lazer = lazer
+        # lazer slider-part judgement counts (LargeTick / SliderTail)
+        # from the .osr ScoreInfo — reconciled onto the sim's tick/tail
+        # combo outcomes for lazer replays (None → cursor guess stands).
+        self.lazer_stats = (getattr(meta, "lazer_statistics", None)
+                            if meta is not None else None)
+        self.slider_reconcile_note: str | None = None
 
     # ---- public API ---------------------------------------------------------------
 
@@ -420,9 +430,17 @@ class StdRuleset:
             real_max_combo = self.meta.max_combo
             if self.do_reconcile:
                 relabeled = self.reconcile_to_counts(sims, real_counts)
+        # lazer-only: reconcile the slider tick/tail COMBO outcomes to the
+        # ScoreInfo statistics (the note reconcile above only fixed the
+        # 300/100/50/miss tiers). Stable replays carry no ScoreInfo → the
+        # cursor-tracking guess stands untouched.
+        parts_reconciled = False
+        if (self.do_reconcile and self.lazer
+                and self.lazer_stats is not None):
+            parts_reconciled = self.reconcile_slider_parts(sims, real_max_combo)
         final_counts = self._tally(sims)
         events, final_max_combo, timeline = (
-            self._build_events(sims) if relabeled
+            self._build_events(sims) if (relabeled or parts_reconciled)
             else (sim_events, sim_max_combo, sim_timeline))
         verdicts = {id(s.obj): self._verdict(s) for s in sims}
         return SimResult(
@@ -444,6 +462,8 @@ class StdRuleset:
         (sliderbreak at the head), `sliderbreak@t` (tick/repeat) and
         `tail_missed@t` (lenient, no break)."""
         lines: list[str] = []
+        if self.slider_reconcile_note:
+            lines.append(self.slider_reconcile_note)
         for s in sims:
             if s.kind == "slider":
                 if not s.head_hit:
@@ -682,7 +702,13 @@ class StdRuleset:
             kind = {"tick": "tick", "reverse": "repeat", "last": "tail"}[tp.kind]
             pos = obj.modify_position(tp.pos, self.diff)
             disp_t = end if tp.kind == "last" else tp.time
-            s.parts.append(PartOutcome(time=disp_t, kind=kind, pos=pos, hit=hit))
+            # cursor-to-ball distance at the JUDGE time — the tracking-quality
+            # key the lazer tick/tail reconcile ranks by (reconcile_slider_parts)
+            cxj, cyj, _ = cursor_at(self.frames, jt)
+            bxj, byj = obj.get_stacked_position_at(jt, self.diff)
+            mgn = math.hypot(cxj - bxj, cyj - byj)
+            s.parts.append(PartOutcome(time=disp_t, kind=kind, pos=pos,
+                                       hit=hit, margin=mgn))
             if not hit and kind != "tail":
                 s.breaks.append(tp.time)            # tick/repeat miss = sliderbreak
 
@@ -866,6 +892,195 @@ class StdRuleset:
         # repaired parts; the head break is carried by head_missed_at
         s.breaks = [p.time for p in s.parts[1:]
                     if not p.hit and p.kind != "tail"]
+
+    # ---- lazer slider-part reconcile (tick/tail combo faithfulness) --------------------
+
+    def reconcile_slider_parts(self, sims: list[_ObjSim],
+                               real_max_combo: int | None) -> bool:
+        """LAZER-only: snap the sim's slider tick/repeat and tail COMBO
+        outcomes to the .osr ScoreInfo statistics, then reshape which parts
+        are misses so the longest unbroken combo run equals the replay's real
+        max combo. Returns True if it ran (a part may or may not have flipped).
+
+        COMBO MODEL (ppy/osu master — HitResult.cs `AffectsCombo/IsHit`,
+        Judgement.cs default `MinResult`, SliderTick/SliderRepeat/
+        SliderTailCircle):
+          * SliderTick / SliderRepeat  -> HitResult.LargeTickHit on hit
+            (AffectsCombo && IsHit  => IncreasesCombo, +1), default MinResult
+            HitResult.LargeTickMiss on miss (AffectsCombo && !IsHit =>
+            BreaksCombo, reset to 0).
+          * SliderTailCircle (non-classic TailJudgement) -> HitResult
+            .SliderTailHit on hit (AffectsCombo && IsHit => IncreasesCombo,
+            +1); its default MinResult is HitResult.IgnoreMiss on miss
+            (AffectsCombo == false => NO combo effect — a missed tail neither
+            breaks nor increments). So the ONLY combo-breaking slider parts
+            are tick/repeat misses.
+        The note tiers (300/100/50/miss = circles + slider HEADS) are already
+        snapped by reconcile_to_counts; this pass never touches heads.
+
+        WHICH parts become misses is chosen by per-part cursor tracking quality
+        (PartOutcome.margin): worst-tracked ticks -> the LargeTickMisses,
+        best-tracked tails -> the SliderTailHits. The exact break POSITIONS are
+        NOT in the replay (only the aggregate counts are), so after the
+        count-snap a minimal position pass shifts placement WITHIN the
+        reconciled counts until the longest run equals real_max_combo. This is
+        the honest approximation: counts exact, positions cursor-ranked.
+        """
+        stats = self.lazer_stats
+        if stats is None:
+            return False
+
+        ticks: list[PartOutcome] = []
+        tails: list[PartOutcome] = []
+        for s in sims:
+            if s.kind != "slider":
+                continue
+            for p in s.parts:
+                if p.kind in ("tick", "repeat"):
+                    ticks.append(p)
+                elif p.kind == "tail":
+                    tails.append(p)
+        if not ticks and not tails:
+            return False
+
+        want_tail_hit = max(0, min(stats.slider_tail_hit, len(tails)))
+        want_tick_miss = max(0, min(stats.large_tick_miss, len(ticks)))
+        T = real_max_combo if (real_max_combo and real_max_combo > 0) else None
+
+        # (1) tails: best-tracked (smallest margin) become the SliderTailHits.
+        tails.sort(key=lambda p: p.margin)
+        for i, p in enumerate(tails):
+            p.hit = i < want_tail_hit
+
+        # combo-affecting event lattice (mirrors _lattice's combo subset, in
+        # the same object/part order so a stable time-sort matches _build_events
+        # exactly): "hit"/"brk" = FIXED increment/break (circles, spinners,
+        # slider heads — set by the note reconcile); "tick" = MOVABLE (hit=+1,
+        # miss=break); "tail" = MOVABLE (hit=+1, miss=inert).
+        def build_events():
+            ev = []
+            for s in sims:
+                if s.kind == "slider":
+                    for p in s.parts:
+                        if p.kind == "head":
+                            t = (s.hit_time if (p.hit and s.hit_time is not None)
+                                 else (s.deadline if not p.hit else p.time))
+                            ev.append((t, "hit" if p.hit else "brk", None))
+                        elif p.kind == "tail":
+                            ev.append((p.time, "tail", p))
+                        else:
+                            ev.append((p.time, "tick", p))
+                else:
+                    t = (s.hit_time if s.hit_time is not None
+                         else (s.deadline if s.kind == "circle" else s.end))
+                    ev.append((t, "hit" if s.final is not JudgmentKind.MISS
+                               else "brk", None))
+            ev.sort(key=lambda e: e[0])
+            return ev
+
+        events = build_events()
+        tick_break: set[int] = set()
+
+        def segments():
+            """Runs delimited by fixed breaks + the chosen tick-breaks, each
+            (length, [(incs_before, tick_part)...], [tail_part...])."""
+            segs = []
+            st: list = []
+            sta: list = []
+            ln = 0
+            for (t, ty, ref) in events:
+                is_break = (ty == "brk"
+                            or (ty == "tick" and id(ref) in tick_break))
+                if is_break:
+                    segs.append((ln, st, sta))
+                    ln = 0
+                    st = []
+                    sta = []
+                elif ty == "hit":
+                    ln += 1
+                elif ty == "tick":
+                    st.append((ln, ref))
+                    ln += 1
+                else:                       # tail
+                    sta.append(ref)
+                    if ref.hit:
+                        ln += 1
+            segs.append((ln, st, sta))
+            return segs
+
+        # (2) place exactly want_tick_miss LargeTickMisses: split the longest
+        # run at the tick nearest (but not past) the target so a run lands on
+        # T; once every run <= T, spend the remaining budget on the
+        # worst-tracked ticks OUTSIDE the peak run(s) (quality preference).
+        for _ in range(want_tick_miss):
+            segs = segments()
+            ln, st, _sta = max(segs, key=lambda seg: seg[0])
+            gmax = ln
+            if T is not None and ln > T and st:
+                le = [x for x in st if x[0] <= T]
+                pick = (max(le, key=lambda x: x[0]) if le
+                        else min(st, key=lambda x: x[0]))
+                tick_break.add(id(pick[1]))
+            else:
+                protect = set(id(rp) for (rl, rst, _rsa) in segs if rl == gmax
+                              for (_ib, rp) in rst)
+                pool = [p for p in ticks
+                        if id(p) not in tick_break and id(p) not in protect]
+                if not pool:
+                    pool = [p for p in ticks if id(p) not in tick_break]
+                if not pool:
+                    break
+                pool.sort(key=lambda p: -p.margin)
+                tick_break.add(id(pool[0]))
+
+        for p in ticks:
+            p.hit = id(p) not in tick_break
+
+        # (3) tail fine-adjust: nudge the peak run to EXACTLY T while holding
+        # the tail-hit count — swap best-tracked interior misses for
+        # worst-tracked exterior hits (or the reverse to shrink). Tails never
+        # break combo, so this only changes run LENGTHS, never break positions.
+        if T is not None:
+            segs = segments()
+            mi = max(range(len(segs)), key=lambda k: segs[k][0])
+            m_len = segs[mi][0]
+            if m_len != T:
+                peak_tails = segs[mi][2]
+                other_tails = [p for k in range(len(segs)) if k != mi
+                               for p in segs[k][2]]
+                if m_len < T:
+                    promote = sorted((p for p in peak_tails if not p.hit),
+                                     key=lambda p: p.margin)
+                    demote = sorted((p for p in other_tails if p.hit),
+                                    key=lambda p: -p.margin)
+                    k = min(T - m_len, len(promote), len(demote))
+                    for j in range(k):
+                        promote[j].hit = True
+                        demote[j].hit = False
+                else:
+                    demote = sorted((p for p in peak_tails if p.hit),
+                                    key=lambda p: -p.margin)
+                    promote = sorted((p for p in other_tails if not p.hit),
+                                     key=lambda p: p.margin)
+                    k = min(m_len - T, len(demote), len(promote))
+                    for j in range(k):
+                        demote[j].hit = False
+                        promote[j].hit = True
+
+        # rebuild every slider's sliderbreak list from the reconciled parts.
+        for s in sims:
+            if s.kind == "slider":
+                s.breaks = [p.time for p in s.parts[1:]
+                            if not p.hit and p.kind != "tail"]
+
+        tick_miss_final = sum(1 for p in ticks if not p.hit)
+        tail_hit_final = sum(1 for p in tails if p.hit)
+        self.slider_reconcile_note = (
+            "ruleset[lazer]: slider parts reconciled to ScoreInfo — "
+            f"large-tick miss {tick_miss_final} (replay {stats.large_tick_miss}), "
+            f"slider-tail hit {tail_hit_final} (replay {stats.slider_tail_hit}); "
+            "break positions cursor-quality-ranked")
+        return True
 
     # ---- events: popups + combo/acc/score timeline -------------------------------------
 

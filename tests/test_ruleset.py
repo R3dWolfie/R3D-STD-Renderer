@@ -468,3 +468,126 @@ def test_engine_autoselected_from_game_version():
                       lazer=True).lazer is True
     assert StdRuleset(bm, [], SimpleNamespace(game_version=30000016),
                       lazer=False).lazer is False
+
+
+# --- lazer slider-part (tick/tail) combo reconcile -------------------------------------
+# The note reconcile only snaps 300/100/50/miss (circles + slider HEADS); a
+# lazer .osr's ScoreInfo additionally carries the slider tick/tail judgement
+# counts (LargeTick / SliderTail), which drive combo INDEPENDENTLY. These tests
+# prove the reconcile snaps those counts exactly and lands the headline max
+# combo on the replay's real value — and that a stable replay is untouched.
+
+_MULTI_SL = "256,192,{st},2,0,L|506:192,1,250,0|0,0:0|0:0,0:0:0:0:"
+
+
+def _multi_slider(n: int, gap: int = 3000):
+    """n back-to-back L sliders (each = head + 2 ticks + tail = 4 combo)."""
+    return _map("\n".join(_MULTI_SL.format(st=1000 + i * gap)
+                           for i in range(n)) + "\n")
+
+
+def _perfect_slider_frames(bm):
+    """Click every head (a fresh press edge, key released between sliders) and
+    track the ball perfectly → every tick/tail hit at baseline."""
+    ents = []
+    for obj in bm.hit_objects:
+        st, en = obj.get_start_time(), obj.get_end_time()
+        ents.append((st - 80, 256, 192, 0))          # release → new press edge
+        ents.append((st, 256, 192, KEY_K1))          # head click
+        t = st + 5
+        while t <= en:
+            x, y = obj.position_at(t)
+            ents.append((t, x, y, KEY_K1))
+            t += 10
+    return _frames(sorted(ents, key=lambda e: e[0]))
+
+
+def _lazer_stats_meta(n, *, large_tick_hit, large_tick_miss, slider_tail_hit,
+                      max_large_tick, max_slider_tail, max_combo):
+    from osu_std_renderer.replay.replay import ReplayMeta
+    from osu_std_renderer.replay.lazer_mods import LazerStatistics
+    return ReplayMeta(
+        mode=0, beatmap_md5="", player_name="t", mods=0, score=0,
+        max_combo=max_combo, count_300=n, count_100=0, count_50=0,
+        count_geki=0, count_katu=0, count_miss=0, accuracy=0.0, grade="A",
+        game_version=30_000_017,
+        lazer_statistics=LazerStatistics(
+            large_tick_hit=large_tick_hit, large_tick_miss=large_tick_miss,
+            slider_tail_hit=slider_tail_hit, max_large_tick=max_large_tick,
+            max_slider_tail=max_slider_tail))
+
+
+def test_lazer_statistics_from_info_parse():
+    from osu_std_renderer.replay.lazer_mods import (
+        LazerStatistics, lazer_statistics_from_info)
+    info = {
+        "statistics": {"great": 1004, "ok": 118, "meh": 8, "miss": 39,
+                       "large_tick_hit": 69, "large_tick_miss": 22,
+                       "slider_tail_hit": 147, "ignore_hit": 264},
+        "maximum_statistics": {"great": 1169, "large_tick_hit": 91,
+                               "slider_tail_hit": 273, "ignore_hit": 273}}
+    assert lazer_statistics_from_info(info) == LazerStatistics(
+        large_tick_hit=69, large_tick_miss=22, slider_tail_hit=147,
+        max_large_tick=91, max_slider_tail=273)
+    # None cases: not a dict / missing dicts / a slider-less map (no large
+    # ticks and no tails in maximum_statistics → nothing to reconcile).
+    assert lazer_statistics_from_info(None) is None
+    assert lazer_statistics_from_info({"statistics": {}}) is None
+    assert lazer_statistics_from_info(
+        {"statistics": {"great": 5}, "maximum_statistics": {"great": 5}}
+    ) is None
+
+
+def test_lazer_slider_parts_reconcile_hits_target_counts_and_max_combo():
+    """8 perfect sliders (baseline combo 32). Feed ScoreInfo stats of 2
+    LargeTickMisses + 5 SliderTailHits (of 8) and a real max combo of 24: the
+    sim must snap the tick/tail COUNTS exactly, break combo ONLY on the tick
+    misses (tail misses are IgnoreMiss = no break), and land final_max_combo
+    on 24."""
+    n = 8
+    bm = _multi_slider(n)
+    fr = _perfect_slider_frames(bm)
+
+    base = StdRuleset(bm, fr).run()               # perfect FC baseline
+    assert base.sim_max_combo == 32
+    parts = [p for o in bm.hit_objects for p in base.verdict_for(o).parts]
+    assert sum(1 for p in parts if p.kind in ("tick", "repeat")) == 16
+    assert sum(1 for p in parts if p.kind == "tail") == 8
+
+    meta = _lazer_stats_meta(
+        n, large_tick_hit=14, large_tick_miss=2, slider_tail_hit=5,
+        max_large_tick=16, max_slider_tail=8, max_combo=24)
+    sim = StdRuleset(bm, fr, meta).run()
+
+    vp = [(o, p) for o in bm.hit_objects for p in sim.verdict_for(o).parts]
+    tick_miss = sum(1 for _o, p in vp
+                    if p.kind in ("tick", "repeat") and not p.hit)
+    tail_hit = sum(1 for _o, p in vp if p.kind == "tail" and p.hit)
+    tail_miss = sum(1 for _o, p in vp if p.kind == "tail" and not p.hit)
+    # counts snapped EXACTLY to the ScoreInfo statistics
+    assert (tick_miss, tail_hit, tail_miss) == (2, 5, 3)
+    # the ONLY combo-break slider parts are tick/repeat misses (LargeTickMiss
+    # BreaksCombo); the 3 tail misses are IgnoreMiss → they never break combo,
+    # so the sliderbreak tally == the tick-miss count, NOT tick+tail.
+    assert sum(len(sim.verdict_for(o).breaks) for o in bm.hit_objects) == 2
+    # the position pass lands the HEADLINE max combo on the replay's real value
+    assert sim.final_max_combo == 24 == sim.real_max_combo
+    # note tiers untouched (every head hit → 8×300)
+    assert sim.final_counts == (8, 0, 0, 0)
+    assert any("reconciled to ScoreInfo" in ln for ln in sim.report_lines())
+
+
+def test_stable_replay_slider_parts_untouched():
+    """A stable replay carries no ScoreInfo: the tick/tail reconcile never runs
+    (self.lazer False gates it), so the cursor-tracking guess stands — every
+    perfectly-tracked part stays a hit and no reconcile line is emitted."""
+    n = 4
+    bm = _multi_slider(n)
+    fr = _perfect_slider_frames(bm)
+    sim = StdRuleset(bm, fr, _meta(n, 0, 0, 0, max_combo=16)).run()
+    assert sim.lazer is False
+    # the reconcile is never invoked → its honesty line is absent from the log
+    assert not any("reconciled to ScoreInfo" in ln for ln in sim.report_lines())
+    # perfect tracking → every tick/tail hit, unmodified by any reconcile
+    assert all(p.hit for o in bm.hit_objects
+               for p in sim.verdict_for(o).parts)

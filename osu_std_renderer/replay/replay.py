@@ -40,7 +40,9 @@ from .lazer_mods import (LAZER_GAME_VERSION,
                          random_from_mods,
                          rate_adjust_from_mods,
                          rate_ramp_from_mods,
+                         LazerStatistics,
                          read_lazer_mods,
+                         read_lazer_statistics,
                          repel_magnet_from_mods,
                          synesthesia_from_mods,
                          target_practice_from_mods,
@@ -152,6 +154,11 @@ class ReplayMeta:
     # has_classic_mod = the Classic mod ("CL") is in that list.
     lazer_mods: tuple[str, ...] = ()
     has_classic_mod: bool = False
+    # lazer slider-part judgement counts (LargeTick / SliderTail) from the
+    # ScoreInfo blob - the combo-relevant tick/tail results the legacy
+    # 300/100/50/miss header can't express. None for stable replays / a
+    # blob without slider-part stats; see lazer_mods.read_lazer_statistics.
+    lazer_statistics: "LazerStatistics | None" = None
     # Difficulty Adjust (DA) overrides read from the ScoreInfo blob (lazer
     # only). Each is the custom AR/CS/OD/HP or None (= keep the beatmap's
     # value). da_extended_limits mirrors the mod's ExtendedLimits toggle
@@ -409,6 +416,7 @@ def parse_replay(path: Path) -> tuple[list[StdFrame], ReplayMeta]:
     gv = int(getattr(r, "game_version", 0) or 0)
     lazer_mods: tuple[str, ...] = ()
     has_classic = False
+    lazer_statistics: "LazerStatistics | None" = None
     da_ar = da_cs = da_od = da_hp = None
     da_ext = False
     rate_override: float | None = None
@@ -439,6 +447,9 @@ def parse_replay(path: Path) -> tuple[list[StdFrame], ReplayMeta]:
     repel_magnet_acronym = ""
     repel_magnet_strength = 0.5
     if gv >= LAZER_GAME_VERSION:
+        # slider-part judgement counts (LargeTick / SliderTail) - the
+        # ruleset reconciles the sim's tick/tail combo outcomes to these.
+        lazer_statistics = read_lazer_statistics(path)
         mlist = read_lazer_mods(path)
         if mlist is not None:
             lazer_mods = tuple(m["acronym"] for m in mlist)
@@ -546,6 +557,7 @@ def parse_replay(path: Path) -> tuple[list[StdFrame], ReplayMeta]:
         played_at=played_at,
         lazer_mods=lazer_mods,
         has_classic_mod=has_classic,
+        lazer_statistics=lazer_statistics,
         da_ar=da_ar,
         da_cs=da_cs,
         da_od=da_od,
