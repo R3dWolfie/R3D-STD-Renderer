@@ -1010,6 +1010,14 @@ class ArgonBarField:
             s_best = np.where(closer, s_here, s_best)
         self.d = d_best
         self.s = s_best
+        # perf-optimize: field-constant hoists + reusable scratch buffers
+        # (bar_rgba is regenerated per frame; these cut its allocations).
+        # _xgrad_g is the exact xgrad expression from bar_rgba, hoisted.
+        self._xgrad_g = 0.8 + 0.2 * np.clip((self.xx / max(self.w, 1e-9)),
+                                            0.0, 1.0)
+        self._s1 = np.empty((gh, gw))
+        self._s2 = np.empty((gh, gw))
+        self._end_cache: dict[tuple[float, float], np.ndarray] = {}
 
     @staticmethod
     def _path_points(w: float, h: float, r: float,
@@ -1059,15 +1067,26 @@ class ArgonBarField:
         y = float(np.interp(s, self._cum_n, self._pts[:, 1]))
         return x, y
 
+    def _dist_to(self, p: tuple[float, float]) -> np.ndarray:
+        """Distance field to one path point — cached by exact endpoint
+        (pos(0.0) recurs every frame; damped hp repeats during steady
+        stretches). Same np.hypot expression as before; cached arrays are
+        never written to."""
+        d = self._end_cache.get(p)
+        if d is None:
+            if len(self._end_cache) >= 16:
+                self._end_cache.clear()
+            d = np.hypot(self.xx - p[0], self.yy - p[1])
+            self._end_cache[p] = d
+        return d
+
     def sub_distance(self, a: float, b: float) -> np.ndarray:
         """Distance field to the sub-path [a, b] (b ≥ a)."""
         if b <= a + 1e-9:
-            px, py = self.pos(a)
-            return np.hypot(self.xx - px, self.yy - py)
+            return self._dist_to(self.pos(a))
         inside = (self.s >= a) & (self.s <= b)
-        pa, pb = self.pos(a), self.pos(b)
-        cap = np.minimum(np.hypot(self.xx - pa[0], self.yy - pa[1]),
-                         np.hypot(self.xx - pb[0], self.yy - pb[1]))
+        cap = np.minimum(self._dist_to(self.pos(a)),
+                         self._dist_to(self.pos(b)))
         return np.where(inside, self.d, cap)
 
     def bar_rgba(self, a: float, b: float, radius: float,
@@ -1076,23 +1095,36 @@ class ArgonBarField:
                  ) -> np.ndarray:
         """sh_ArgonBarPath.fs getColour over the sub-path field: solid
         barColour core, 1 px blend, then the glow falloff (mix^8)."""
+        # Restructured for speed (hoisted invariants, scratch buffers,
+        # rint-into-buffer, one (1-core)) — every element's value comes from
+        # the exact same f64 expression chain as the original formulation;
+        # tests/test_hud.py::test_bar_rgba_matches_reference_formulation
+        # pins the refactor bit-for-bit. (np.rint == np.round(decimals=0),
+        # x*1.0 == x, and u8-assignment == astype(u8) — all exact.)
         D = np.clip(self.sub_distance(a, b), 0.0, radius)
         agp = radius * glow_portion
         core = np.clip((radius - agp - D), 0.0, 1.0)       # 1 px blend edge
         mixv = np.clip(1.0 - (D - radius + agp) / max(agp, 1e-9), 0.0, 1.0)
         glow_a = glow_rgba[3] * mixv ** 8
-        rgb = np.empty((self.gh, self.gw, 3))
-        alpha = core * 1.0 + (1.0 - core) * glow_a
-        for c in range(3):
-            rgb[..., c] = core * bar_rgb[c] + (1.0 - core) * glow_rgba[c]
-        if xgrad:
-            g = 0.8 + 0.2 * np.clip((self.xx / max(self.w, 1e-9)), 0.0, 1.0)
-            alpha = alpha * g
-        alpha = alpha * alpha_mult
+        inv = 1.0 - core
+        t1, t2 = self._s1, self._s2
         out = np.empty((self.gh, self.gw, 4), dtype=np.uint8)
-        out[..., :3] = np.round(rgb * 255.0).astype(np.uint8)
-        out[..., 3] = np.round(np.clip(alpha, 0.0, 1.0) * 255.0
-                               ).astype(np.uint8)
+        for c in range(3):
+            np.multiply(core, bar_rgb[c], out=t1)
+            np.multiply(inv, glow_rgba[c], out=t2)
+            np.add(t1, t2, out=t1)
+            np.multiply(t1, 255.0, out=t1)
+            np.rint(t1, out=t1)
+            out[..., c] = t1
+        np.multiply(inv, glow_a, out=t2)
+        np.add(core, t2, out=t2)
+        if xgrad:
+            np.multiply(t2, self._xgrad_g, out=t2)
+        np.multiply(t2, alpha_mult, out=t2)
+        np.clip(t2, 0.0, 1.0, out=t2)
+        np.multiply(t2, 255.0, out=t2)
+        np.rint(t2, out=t2)
+        out[..., 3] = t2
         return out
 
     def background_rgba(self) -> np.ndarray:
@@ -1209,6 +1241,8 @@ class StdHud:
         self._pin = 1.0
         self._graph = self._density_buckets(starts, ends)
         self._hp_field: ArgonBarField | None = None
+        self._hp_glow_key = None
+        self._hp_main_key = None
         if (not self.legacy_health and self.health is not None
                 and getattr(settings, "show_hp_bar", True)):
             self._hp_field = ArgonBarField(
@@ -1646,16 +1680,25 @@ class StdHud:
             gbar_rgb, ggl = HP_MISS_BAR, (*HP_MISS_GLOW, 0.5)
         else:
             gbar_rgb, ggl = (1.0, 1.0, 1.0), glow_rgba
-        glow_tex = field.bar_rgba(
-            seg_lo, seg_hi, HP_GLOW_RADIUS,
-            (HP_GLOW_RADIUS - HP_MAIN_RADIUS
-             * (1.0 - HP_MAIN_GLOW_PORTION)) / HP_GLOW_RADIUS,
-            gbar_rgb, ggl, xgrad=True, alpha_mult=0.9)
-        main_tex = field.bar_rgba(0.0, hp_now, HP_MAIN_RADIUS,
-                                  HP_MAIN_GLOW_PORTION, bar_rgb,
-                                  glow_rgba, alpha_mult=alpha_main)
-        self.spr.upload_texture("hud_hp_glow", glow_tex)
-        self.spr.upload_texture("hud_hp_main", main_tex)
+        # regenerate + re-upload only when the bar parameters actually
+        # changed this frame (steady hp / no recent hit-flash repeats the
+        # exact same texture; radii/portions/mults below are constants)
+        gkey = (seg_lo, seg_hi, gbar_rgb, ggl)
+        if gkey != self._hp_glow_key:
+            self._hp_glow_key = gkey
+            glow_tex = field.bar_rgba(
+                seg_lo, seg_hi, HP_GLOW_RADIUS,
+                (HP_GLOW_RADIUS - HP_MAIN_RADIUS
+                 * (1.0 - HP_MAIN_GLOW_PORTION)) / HP_GLOW_RADIUS,
+                gbar_rgb, ggl, xgrad=True, alpha_mult=0.9)
+            self.spr.write_texture("hud_hp_glow", glow_tex)
+        mkey = (hp_now, bar_rgb, glow_rgba, alpha_main)
+        if mkey != self._hp_main_key:
+            self._hp_main_key = mkey
+            main_tex = field.bar_rgba(0.0, hp_now, HP_MAIN_RADIUS,
+                                      HP_MAIN_GLOW_PORTION, bar_rgb,
+                                      glow_rgba, alpha_mult=alpha_main)
+            self.spr.write_texture("hud_hp_main", main_tex)
         # content top-left at HP_POS minus the main radius padding row
         x0 = (HP_POS[0] - field.margin) * es
         y0 = (HP_POS[1] - field.margin) * es

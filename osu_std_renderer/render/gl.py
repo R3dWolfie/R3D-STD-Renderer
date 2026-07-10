@@ -128,6 +128,7 @@ class SpriteRenderer:
         self.color_tex.filter = (moderngl.LINEAR, moderngl.LINEAR)
         self.fbo = self.ctx.framebuffer(color_attachments=[self.color_tex])
         self._textures: dict[str, "moderngl.Texture"] = {}
+        self._nomip_keys: set[str] = set()
         self._white = self._make_texture_rgba(np.full((1, 1, 4), 255, dtype="u1"))
         # optional per-sprite post-transform (Sprite -> Sprite), applied to
         # every sprite in draw(). The fail animation installs this to drop
@@ -196,6 +197,29 @@ class SpriteRenderer:
             except Exception:  # noqa: BLE001 - context may be tearing down
                 pass
 
+    def write_texture(self, key: str, rgba: np.ndarray,
+                      clamp: bool = False) -> None:
+        """Per-frame texture update: same-size re-writes go through
+        glTexSubImage2D on the EXISTING texture object — no allocation, no
+        release, no mipmap chain (plain LINEAR). Only for textures drawn
+        at 1:1 where the mip chain is never sampled (the HUD hp bars);
+        the first call (or a size change) allocates a LINEAR no-mip
+        texture."""
+        with perf.T("tex_upload"):
+            if rgba.dtype != np.uint8:
+                rgba = rgba.astype("u1")
+            if rgba.shape[2] == 3:
+                a = np.full(rgba.shape[:2] + (1,), 255, dtype="u1")
+                rgba = np.concatenate([rgba, a], axis=2)
+            h, w = rgba.shape[:2]
+            tex = self._textures.get(key)
+            if key in self._nomip_keys and tex is not None \
+                    and tex.size == (w, h):
+                tex.write(rgba)
+                return
+            self._upload_texture(key, rgba, clamp=clamp, mipmaps=False)
+            self._nomip_keys.add(key)
+
     def has_texture(self, key: str) -> bool:
         return key in self._textures
 
@@ -203,6 +227,7 @@ class SpriteRenderer:
         """Free a cached texture by key (storyboard LRU eviction). No-op if
         the key is absent."""
         tex = self._textures.pop(key, None)
+        self._nomip_keys.discard(key)
         if tex is not None:
             try:
                 tex.release()
