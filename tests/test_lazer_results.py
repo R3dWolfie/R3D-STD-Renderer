@@ -304,7 +304,11 @@ def test_timing_histogram_defers_slider_tick_tint():
     from dataclasses import fields
     from osu_std_renderer.ruleset.ruleset import PartOutcome
     part_fields = {f.name for f in fields(PartOutcome)}
-    assert part_fields == {"time", "kind", "pos", "hit"}
+    # `margin` (cursor-to-ball distance at the judge time, the lazer tick/tail
+    # combo reconcile's tracking-quality key) is a SPATIAL field, NOT a timing
+    # delta — the no-timing-offset invariant below still holds: std slider
+    # ticks/ends have no timing window, so no per-tick offset exists to bin.
+    assert {"time", "kind", "pos", "hit"} <= part_fields
     assert "delta" not in part_fields and "offset" not in part_fields
     # slider_stats yields only aggregate hit/total counts — no deltas
     sim = _Sim([_Verdict([_Part("head", True), _Part("tick", True),

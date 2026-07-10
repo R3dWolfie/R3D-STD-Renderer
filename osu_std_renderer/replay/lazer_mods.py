@@ -152,6 +152,66 @@ def read_lazer_mod_acronyms(osr_path: Path) -> list[str] | None:
     return [m["acronym"] for m in mods]
 
 
+# --- slider-part judgement counts (LazerStatistics) --------------------------
+# osu.Game/Rulesets/Scoring/HitResult.cs — the classic-aggregate note counts
+# (300/100/50/miss the legacy .osr header carries) can't express a lazer
+# slider's tick/tail judgements, which drive combo INDEPENDENTLY of the note
+# grade:
+#   * SliderTick / SliderRepeat -> HitResult.LargeTickHit (default MinResult
+#     LargeTickMiss). LargeTickHit.AffectsCombo && IsHit  => IncreasesCombo;
+#     LargeTickMiss.AffectsCombo && !IsHit                => BreaksCombo.
+#   * SliderTailCircle (non-classic TailJudgement) -> HitResult.SliderTailHit
+#     (Judgement default MinResult for SliderTailHit is IgnoreMiss).
+#     SliderTailHit.AffectsCombo && IsHit  => IncreasesCombo; a MISSED tail is
+#     IgnoreMiss (AffectsCombo == false) => NO combo effect (not a break).
+# These exact per-play counts live only in the ScoreInfo ``statistics`` /
+# ``maximum_statistics`` dicts. ``max_*`` are the FC totals (every large tick /
+# every slider tail) used to validate the sim generated the right part count.
+@dataclass(frozen=True)
+class LazerStatistics:
+    large_tick_hit: int
+    large_tick_miss: int
+    slider_tail_hit: int
+    max_large_tick: int          # maximum_statistics.large_tick_hit (FC total)
+    max_slider_tail: int         # maximum_statistics.slider_tail_hit (FC total)
+
+
+def lazer_statistics_from_info(info: "dict | None") -> "LazerStatistics | None":
+    """Extract the combo-relevant slider-part counts from a parsed ScoreInfo
+    dict, or None when the blob carries no slider-part statistics (a genuine
+    stable score, or a lazer score whose maximum_statistics names no large
+    ticks / slider tails — e.g. a spinner/circle-only map, in which case the
+    note reconcile alone already suffices)."""
+    if not isinstance(info, dict):
+        return None
+    stats = info.get("statistics")
+    mx = info.get("maximum_statistics")
+    if not isinstance(stats, dict) or not isinstance(mx, dict):
+        return None
+
+    def g(d: dict, k: str) -> int:
+        v = d.get(k, 0)
+        return int(v) if isinstance(v, (int, float)) else 0
+
+    max_lt = g(mx, "large_tick_hit")
+    max_st = g(mx, "slider_tail_hit")
+    if max_lt == 0 and max_st == 0:
+        return None
+    return LazerStatistics(
+        large_tick_hit=g(stats, "large_tick_hit"),
+        large_tick_miss=g(stats, "large_tick_miss"),
+        slider_tail_hit=g(stats, "slider_tail_hit"),
+        max_large_tick=max_lt,
+        max_slider_tail=max_st,
+    )
+
+
+def read_lazer_statistics(osr_path: Path) -> "LazerStatistics | None":
+    """The lazer slider-part judgement counts from a .osr's ScoreInfo blob, or
+    None for a stable replay / a blob without slider-part statistics."""
+    return lazer_statistics_from_info(parse_lazer_score_info(osr_path))
+
+
 # --- Difficulty Adjust (DA) --------------------------------------------------
 # osu.Game.Rulesets.Osu/Mods/OsuModDifficultyAdjust.cs +
 # osu.Game/Rulesets/Mods/ModDifficultyAdjust.cs — the DA mod overrides the
