@@ -394,6 +394,34 @@ def test_spinner_spin_vs_no_spin():
     assert idle.verdict_for(bm.hit_objects[0]).kind is JudgmentKind.MISS
 
 
+def test_micro_spinner_auto_completes_without_spinning():
+    """osu! truncates SpinsRequired to an INTEGER; a spinner too short to
+    require even one full spin (SpinsRequired == 0) is already complete and
+    scores Great with no rotation — the aspire micro-spinner case (e.g. Time
+    Traveler's 23 ms centre spinners). OD7 → SpinnerRatio 6.0, so a 23 ms
+    spinner needs int(0.023·6.0) = 0 spins. Cursor sits dead still, key held:
+    it must still be a 300, not a miss (the pre-fix fractional requirement
+    demanded 0.138 of a spin and MISSED it)."""
+    bm = _map("256,192,1000,12,0,1023,0:0:0:0:\n")
+    still = StdRuleset(bm, _frames([(999, 256, 192, KEY_K1),
+                                    (1012, 256, 192, KEY_K1),
+                                    (1023, 256, 192, KEY_K1)])).run()
+    assert still.verdict_for(bm.hit_objects[0]).kind is JudgmentKind.HIT300
+    # and with NO frames covering it at all — still auto-complete (0 required)
+    none = StdRuleset(bm, _frames([(500, 0, 0, 0)])).run()
+    assert none.verdict_for(bm.hit_objects[0]).kind is JudgmentKind.HIT300
+
+
+def test_short_spinner_needing_one_spin_still_missable():
+    """Guard the boundary the fix must NOT cross: a spinner just long enough
+    to require one integer spin (int(0.2·6.0) = 1) is a real MISS when the
+    player never rotates — truncation lowers the bar to 0 only BELOW one
+    spin, not at/above it."""
+    bm = _map("256,192,1000,12,0,1200,0:0:0:0:\n")
+    idle = StdRuleset(bm, _frames([(1100, 256, 192, KEY_K1)])).run()
+    assert idle.verdict_for(bm.hit_objects[0]).kind is JudgmentKind.MISS
+
+
 # --- reconcile snap ----------------------------------------------------------------------
 
 def test_reconcile_snaps_to_replay_counts():

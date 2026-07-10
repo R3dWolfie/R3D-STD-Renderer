@@ -768,8 +768,19 @@ class StdRuleset:
             prev_angle = ang
             prev_held = is_held
         rotations = total / (2.0 * math.pi)
-        required = (s.end - s.start) / 1000.0 * self.diff.spinner_ratio
-        progress = rotations / required if required > 0 else 1.0
+        # osu! SpinsRequired is an INTEGER count of full spins — both engines
+        # truncate it (Spinner.ApplyDefaultsToSelf / stable's rotation
+        # requirement are `(int)(...)`), NOT the continuous fraction the
+        # progress meter draws. A spinner too short to require even one full
+        # spin (SpinsRequired == 0) is already complete: Progress → 1 → Great,
+        # no spin needed. Aspire micro-spinners (e.g. Time Traveler's 23 ms
+        # centre spinners) live here — the old un-truncated fractional
+        # requirement demanded a fraction of a spin the player never made in
+        # ~1 frame and wrongly MISSED every one of them. Truncation only ever
+        # lowers the requirement, so it cannot manufacture a new over-miss.
+        seconds_duration = (s.end - s.start) / 1000.0
+        spins_required = int(seconds_duration * self.diff.spinner_ratio)
+        progress = 1.0 if spins_required <= 0 else rotations / spins_required
         if progress >= 1.0:
             s.final = JudgmentKind.HIT300
         elif progress > 0.9:
