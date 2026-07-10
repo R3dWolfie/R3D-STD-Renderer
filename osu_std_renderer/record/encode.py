@@ -16,9 +16,14 @@ Differences from the reference (§5.6) — deliberate:
 """
 from __future__ import annotations
 
+import queue
 import shutil
 import subprocess
+import sys
+import threading
 from pathlib import Path
+
+from ..render import perf
 
 LOUDNORM = "loudnorm=I=-14:TP=-1.5"
 
@@ -78,25 +83,73 @@ def build_ffmpeg_cmd(*, encoder: str, resolution: tuple[int, int], fps: int,
 class FfmpegPipe:
     """Spawn ffmpeg, push raw frames, close. Mirrors mania v2's FfmpegPipe
     contract minus asyncio (the worker wraps the CLI in a subprocess
-    already; in-process async buys nothing here)."""
+    already; in-process async buys nothing here).
+
+    Frames are handed to a writer thread over a small bounded queue: the
+    serialisation (`tobytes` — a negative-stride flip copy) and the
+    blocking pipe write happen OFF the render thread, overlapping the next
+    frame's draw. Order is FIFO so the byte stream ffmpeg sees (and the
+    R3D_FRAME_MD5 hash, computed writer-side) is unchanged. The queue
+    bounds memory (4 × ~2.7 MB frames) and provides natural backpressure
+    when ffmpeg is the bottleneck; writer errors surface loudly on the
+    next push() instead of deadlocking the producer."""
+
+    _QUEUE_FRAMES = 4
 
     def __init__(self, cmd: list[str]):
         self.cmd = cmd
         self.proc: subprocess.Popen | None = None
+        self._q: "queue.Queue" = queue.Queue(maxsize=self._QUEUE_FRAMES)
+        self._thread: threading.Thread | None = None
+        self._werr: BaseException | None = None
+        self._hash = None
+        self._hash_frames = 0
+        if perf.FRAME_MD5:
+            import hashlib
+            self._hash = hashlib.blake2b(digest_size=16)
 
     def __enter__(self) -> "FfmpegPipe":
         self.proc = subprocess.Popen(
             self.cmd, stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        self._thread = threading.Thread(target=self._writer,
+                                        name="ffmpeg-writer", daemon=True)
+        self._thread.start()
         return self
 
+    def _writer(self) -> None:
+        stdin = self.proc.stdin
+        while True:
+            frame = self._q.get()
+            if frame is None:
+                return
+            if self._werr is not None:
+                continue          # drain (never write after an error)
+            try:
+                data = frame.tobytes()
+                if self._hash is not None:
+                    self._hash.update(data)
+                    self._hash_frames += 1
+                stdin.write(data)
+            except BaseException as e:  # noqa: BLE001 - surfaced on push()
+                self._werr = e
+
     def push(self, frame_rgb) -> None:
-        assert self.proc is not None and self.proc.stdin is not None
-        self.proc.stdin.write(frame_rgb.tobytes())
+        assert self.proc is not None and self._thread is not None
+        if self._werr is not None:
+            raise EncoderError(f"ffmpeg writer failed: {self._werr!r}")
+        with perf.T("encode_push"):
+            self._q.put(frame_rgb)
 
     def __exit__(self, exc_type, exc, tb) -> None:
         if self.proc is None:
             return
+        if self._thread is not None:
+            self._q.put(None)
+            self._thread.join()
+        if self._hash is not None:
+            print(f"frame-stream-hash: {self._hash.hexdigest()} "
+                  f"({self._hash_frames} frames)", file=sys.stderr, flush=True)
         if self.proc.stdin is not None:
             try:
                 self.proc.stdin.close()
@@ -107,6 +160,9 @@ class FfmpegPipe:
             err = self.proc.stderr.read() if self.proc.stderr else b""
         finally:
             code = self.proc.wait()
+        if exc_type is None and self._werr is not None \
+                and not isinstance(self._werr, BrokenPipeError):
+            raise EncoderError(f"ffmpeg writer failed: {self._werr!r}")
         if exc_type is None and code != 0:
             raise EncoderError(
                 f"ffmpeg exited {code}: {err.decode(errors='replace')[-2000:]}")

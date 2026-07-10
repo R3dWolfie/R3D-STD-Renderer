@@ -603,3 +603,59 @@ def test_argon_accuracy_percent_full_height_fraction_half():
     # the fraction sits BELOW (bottom-aligned): its top edge is lower
     frac_top = min(s.y - s.h / 2.0 for s in frac)
     assert frac_top > whole_top + 1e-6
+
+
+def test_bar_rgba_matches_reference_formulation():
+    """perf-optimize guard: bar_rgba's scratch-buffer/rint rewrite must be
+    BIT-identical to the original (pre-refactor) formulation, including
+    the hoisted xgrad field and the (1.0 - core) reuse."""
+    import numpy as np
+    from osu_std_renderer.render.hud import (
+        ArgonBarField, HP_WIDTH, HP_BAR_HEIGHT, HP_MAIN_RADIUS,
+        HP_GLOW_RADIUS, HP_MAIN_GLOW_PORTION, HP_GLOW_COLOUR)
+
+    f = ArgonBarField(HP_WIDTH, HP_BAR_HEIGHT + 2 * HP_MAIN_RADIUS,
+                      0.9375, HP_GLOW_RADIUS - HP_MAIN_RADIUS)
+
+    def reference(a, b, radius, glow_portion, bar_rgb, glow_rgba,
+                  xgrad=False, alpha_mult=1.0):
+        # the pre-refactor bar_rgba body, kept verbatim as the oracle
+        D = np.clip(f.sub_distance(a, b), 0.0, radius)
+        agp = radius * glow_portion
+        core = np.clip((radius - agp - D), 0.0, 1.0)
+        mixv = np.clip(1.0 - (D - radius + agp) / max(agp, 1e-9), 0.0, 1.0)
+        glow_a = glow_rgba[3] * mixv ** 8
+        rgb = np.empty((f.gh, f.gw, 3))
+        alpha = core * 1.0 + (1.0 - core) * glow_a
+        for c in range(3):
+            rgb[..., c] = core * bar_rgb[c] + (1.0 - core) * glow_rgba[c]
+        if xgrad:
+            g = 0.8 + 0.2 * np.clip((f.xx / max(f.w, 1e-9)), 0.0, 1.0)
+            alpha = alpha * g
+        alpha = alpha * alpha_mult
+        out = np.empty((f.gh, f.gw, 4), dtype=np.uint8)
+        out[..., :3] = np.round(rgb * 255.0).astype(np.uint8)
+        out[..., 3] = np.round(np.clip(alpha, 0.0, 1.0) * 255.0
+                               ).astype(np.uint8)
+        return out
+
+    gp = (HP_GLOW_RADIUS - HP_MAIN_RADIUS
+          * (1.0 - HP_MAIN_GLOW_PORTION)) / HP_GLOW_RADIUS
+    cases = [
+        (0.0, 1.0, HP_MAIN_RADIUS, HP_MAIN_GLOW_PORTION,
+         (1.0, 1.0, 1.0), HP_GLOW_COLOUR, False, 1.0),
+        (0.0, 0.734, HP_MAIN_RADIUS, HP_MAIN_GLOW_PORTION,
+         (1.0, 1.0, 1.0), (0.9, 0.95, 1.0, 0.72), False, 0.0),
+        (0.3, 0.9, HP_GLOW_RADIUS, gp,
+         (1.0, 1.0, 1.0), HP_GLOW_COLOUR, True, 0.9),
+        (0.62, 0.62, HP_GLOW_RADIUS, gp,
+         (1.0, 0.2, 0.2), (1.0, 0.1, 0.1, 0.5), True, 0.9),
+        (0.999, 1.0, HP_GLOW_RADIUS, gp,
+         (1.0, 1.0, 1.0), (1.0, 1.0, 1.0, 1.0), True, 0.9),
+    ]
+    for (a, b, radius, gpn, brgb, grgba, xg, am) in cases:
+        got = f.bar_rgba(a, b, radius, gpn, brgb, grgba,
+                         xgrad=xg, alpha_mult=am)
+        want = reference(a, b, radius, gpn, brgb, grgba,
+                         xgrad=xg, alpha_mult=am)
+        assert np.array_equal(got, want), (a, b, radius)

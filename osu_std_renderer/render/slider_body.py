@@ -86,6 +86,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from . import perf
+
 try:
     import moderngl
 except Exception as e:  # noqa: BLE001
@@ -421,6 +423,10 @@ class SliderBodyRenderer:
 
         items: [(path_points_screen_px, (snake_start, snake_end))].
         """
+        with perf.T("slider_build"):
+            return self._build_merged(items, radius_px, style)
+
+    def _build_merged(self, items, radius_px, style=None):
         style = style or BodyStyle()
         arrs: list[np.ndarray] = []
         for path_points, snake in items:
@@ -513,6 +519,10 @@ class SliderBodyRenderer:
         convention as SpriteRenderer). `alpha` is an extra fade multiplier."""
         if body.empty:
             return
+        with perf.T("slider_composite"):
+            self._draw_body(body, target_fbo, alpha)
+
+    def _draw_body(self, body, target_fbo, alpha):
         ctx = self.ctx
         target_fbo.use()
         ctx.enable(moderngl.BLEND)

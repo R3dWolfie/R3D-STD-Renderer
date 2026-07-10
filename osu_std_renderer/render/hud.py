@@ -176,6 +176,7 @@ import numpy as np
 
 from ..replay.replay import KEY_K1, KEY_K2, KEY_M1, KEY_M2
 from ..ruleset import JudgmentKind, OsuHitWindows
+from . import perf
 from .gl import Sprite
 from .textures import ARGON_GLYPH_CAP_SCALE
 
@@ -1009,6 +1010,15 @@ class ArgonBarField:
             s_best = np.where(closer, s_here, s_best)
         self.d = d_best
         self.s = s_best
+        # perf-optimize: field-constant hoists + reusable scratch buffers
+        # (bar_rgba is regenerated per frame; these cut its allocations).
+        # _xgrad_g is the exact xgrad expression from bar_rgba, hoisted.
+        self._xgrad_g = 0.8 + 0.2 * np.clip((self.xx / max(self.w, 1e-9)),
+                                            0.0, 1.0)
+        self._s1 = np.empty((gh, gw))
+        self._s2 = np.empty((gh, gw))
+        self._end_cache: dict = {}
+        self._band_cache: dict[float, tuple[int, int, int, int]] = {}
 
     @staticmethod
     def _path_points(w: float, h: float, r: float,
@@ -1058,16 +1068,61 @@ class ArgonBarField:
         y = float(np.interp(s, self._cum_n, self._pts[:, 1]))
         return x, y
 
-    def sub_distance(self, a: float, b: float) -> np.ndarray:
-        """Distance field to the sub-path [a, b] (b ≥ a)."""
+    def _dist_to(self, p: tuple[float, float], box) -> np.ndarray:
+        """Distance field to one path point over the live box — cached by
+        exact endpoint (pos(0.0) recurs every frame; damped hp repeats
+        during steady stretches). Same np.hypot expression as before;
+        cached arrays are never written to."""
+        key = (p, box)
+        d = self._end_cache.get(key)
+        if d is None:
+            if len(self._end_cache) >= 16:
+                self._end_cache.clear()
+            y0, y1, x0, x1 = box
+            d = np.hypot(self.xx[y0:y1, x0:x1] - p[0],
+                         self.yy[y0:y1, x0:x1] - p[1])
+            self._end_cache[key] = d
+        return d
+
+    def _live_box(self, radius: float) -> tuple[int, int, int, int]:
+        """Bounding box of {d < radius}: every texel OUTSIDE it has
+        sub_distance ≥ d ≥ radius for ANY sub-path (a sub-path's distance
+        can only exceed the full path's), so after the clip-to-radius it
+        lands in bar_rgba's constant far-field (core=0, mixv=0). Slicing
+        the math to this box is therefore value-preserving."""
+        box = self._band_cache.get(radius)
+        if box is None:
+            live = self.d < radius
+            rows = np.flatnonzero(live.any(axis=1))
+            cols = np.flatnonzero(live.any(axis=0))
+            if rows.size:
+                y0, y1 = int(rows[0]), int(rows[-1]) + 1
+                x0, x1 = int(cols[0]), int(cols[-1]) + 1
+                # snap nearly-full dimensions to full: a 1-column trim
+                # (the glow bar) would break buffer contiguity and cost
+                # more than it saves
+                if (y1 - y0) > 0.9 * self.gh:
+                    y0, y1 = 0, self.gh
+                if (x1 - x0) > 0.9 * self.gw:
+                    x0, x1 = 0, self.gw
+                box = (y0, y1, x0, x1)
+            else:
+                box = (0, 0, 0, 0)
+            self._band_cache[radius] = box
+        return box
+
+    def sub_distance(self, a: float, b: float, box=None) -> np.ndarray:
+        """Distance field to the sub-path [a, b] (b ≥ a), over the whole
+        field or a (y0, y1, x0, x1) sub-box."""
+        if box is None:
+            box = (0, self.gh, 0, self.gw)
+        y0, y1, x0, x1 = box
         if b <= a + 1e-9:
-            px, py = self.pos(a)
-            return np.hypot(self.xx - px, self.yy - py)
-        inside = (self.s >= a) & (self.s <= b)
-        pa, pb = self.pos(a), self.pos(b)
-        cap = np.minimum(np.hypot(self.xx - pa[0], self.yy - pa[1]),
-                         np.hypot(self.xx - pb[0], self.yy - pb[1]))
-        return np.where(inside, self.d, cap)
+            return self._dist_to(self.pos(a), box)
+        inside = (self.s[y0:y1, x0:x1] >= a) & (self.s[y0:y1, x0:x1] <= b)
+        cap = np.minimum(self._dist_to(self.pos(a), box),
+                         self._dist_to(self.pos(b), box))
+        return np.where(inside, self.d[y0:y1, x0:x1], cap)
 
     def bar_rgba(self, a: float, b: float, radius: float,
                  glow_portion: float, bar_rgb, glow_rgba,
@@ -1075,23 +1130,53 @@ class ArgonBarField:
                  ) -> np.ndarray:
         """sh_ArgonBarPath.fs getColour over the sub-path field: solid
         barColour core, 1 px blend, then the glow falloff (mix^8)."""
-        D = np.clip(self.sub_distance(a, b), 0.0, radius)
+        # Restructured for speed (hoisted invariants, scratch buffers,
+        # rint-into-buffer, one (1-core)) — every element's value comes from
+        # the exact same f64 expression chain as the original formulation;
+        # tests/test_hud.py::test_bar_rgba_matches_reference_formulation
+        # pins the refactor bit-for-bit. (np.rint == np.round(decimals=0),
+        # x*1.0 == x, and u8-assignment == astype(u8) — all exact.)
+        # Outside the {d < radius} bounding box every texel is constant:
+        # D clips to radius -> core=0, mixv=0 -> rgb = glow colour, a=0
+        # (the same values the full-field math produced there) -- so the
+        # heavy math runs only on the live box. Requires agp > 0 (all
+        # real callers): at agp <= 0 the far field is NOT constant.
+        if radius * glow_portion > 0.0:
+            y0, y1, x0, x1 = self._live_box(radius)
+        else:
+            y0, y1, x0, x1 = 0, self.gh, 0, self.gw
+        D = np.clip(self.sub_distance(a, b, (y0, y1, x0, x1)), 0.0, radius)
         agp = radius * glow_portion
         core = np.clip((radius - agp - D), 0.0, 1.0)       # 1 px blend edge
         mixv = np.clip(1.0 - (D - radius + agp) / max(agp, 1e-9), 0.0, 1.0)
         glow_a = glow_rgba[3] * mixv ** 8
-        rgb = np.empty((self.gh, self.gw, 3))
-        alpha = core * 1.0 + (1.0 - core) * glow_a
-        for c in range(3):
-            rgb[..., c] = core * bar_rgb[c] + (1.0 - core) * glow_rgba[c]
-        if xgrad:
-            g = 0.8 + 0.2 * np.clip((self.xx / max(self.w, 1e-9)), 0.0, 1.0)
-            alpha = alpha * g
-        alpha = alpha * alpha_mult
+        inv = 1.0 - core
+        rows, cols = y1 - y0, x1 - x0
+        boxed = (rows, cols) != (self.gh, self.gw)
+        t1 = self._s1[:rows, :cols]
+        t2 = self._s2[:rows, :cols]
         out = np.empty((self.gh, self.gw, 4), dtype=np.uint8)
-        out[..., :3] = np.round(rgb * 255.0).astype(np.uint8)
-        out[..., 3] = np.round(np.clip(alpha, 0.0, 1.0) * 255.0
-                               ).astype(np.uint8)
+        for c in range(3):
+            if boxed:
+                # far-field constant: core=0 -> 0*bar + 1*glow == glow
+                out[..., c] = np.uint8(np.rint(glow_rgba[c] * 255.0))
+            np.multiply(core, bar_rgb[c], out=t1)
+            np.multiply(inv, glow_rgba[c], out=t2)
+            np.add(t1, t2, out=t1)
+            np.multiply(t1, 255.0, out=t1)
+            np.rint(t1, out=t1)
+            out[y0:y1, x0:x1, c] = t1
+        if boxed:
+            out[..., 3] = 0                # far-field alpha: glow_a=0 -> 0
+        np.multiply(inv, glow_a, out=t2)
+        np.add(core, t2, out=t2)
+        if xgrad:
+            np.multiply(t2, self._xgrad_g[y0:y1, x0:x1], out=t2)
+        np.multiply(t2, alpha_mult, out=t2)
+        np.clip(t2, 0.0, 1.0, out=t2)
+        np.multiply(t2, 255.0, out=t2)
+        np.rint(t2, out=t2)
+        out[y0:y1, x0:x1, 3] = t2
         return out
 
     def background_rgba(self) -> np.ndarray:
@@ -1208,6 +1293,8 @@ class StdHud:
         self._pin = 1.0
         self._graph = self._density_buckets(starts, ends)
         self._hp_field: ArgonBarField | None = None
+        self._hp_glow_key = None
+        self._hp_main_key = None
         if (not self.legacy_health and self.health is not None
                 and getattr(settings, "show_hp_bar", True)):
             self._hp_field = ArgonBarField(
@@ -1378,41 +1465,55 @@ class StdHud:
     # -- frame draw --------------------------------------------------------------------
 
     def draw(self, t: float) -> None:
+        with perf.T("hud_draw"):
+            self._draw_timed(t)
+
+    def _draw_timed(self, t: float) -> None:
         if self.op <= 0.0:
             return
         out: list[Sprite] = []
         # strain graph first — UNDER every other HUD element
-        self._strain_graph(out, t)
+        with perf.T("hud_strain"):
+            self._strain_graph(out, t)
         # per-element skin-else-Argon (module docstring hybrid rule;
         # legacy_defaults flips every flag legacy)
-        if self.legacy_score:
-            self._legacy_score_block(out, t)   # includes the legacy pie
-        else:
-            self._argon_score_block(out, t)
-            self._argon_accuracy(out, t)
-            self._argon_progress(out, t)
-        if self.legacy_combo:
-            self._legacy_combo(out, t)
-        else:
-            self._argon_combo(out, t)
-        if not self.legacy_health:
-            self._argon_health(out, t)
-        if self.legacy_keys:
-            self._legacy_key_overlay(out, t)
-        else:
-            self._argon_key_overlay(out, t)
-        self._hit_error(out, t)
+        with perf.T("hud_score_acc"):
+            if self.legacy_score:
+                self._legacy_score_block(out, t)   # includes the legacy pie
+            else:
+                self._argon_score_block(out, t)
+                self._argon_accuracy(out, t)
+        with perf.T("hud_progress"):
+            if not self.legacy_score:
+                self._argon_progress(out, t)
+        with perf.T("hud_combo"):
+            if self.legacy_combo:
+                self._legacy_combo(out, t)
+            else:
+                self._argon_combo(out, t)
+        with perf.T("hud_health"):
+            if not self.legacy_health:
+                self._argon_health(out, t)
+        with perf.T("hud_keys"):
+            if self.legacy_keys:
+                self._legacy_key_overlay(out, t)
+            else:
+                self._argon_key_overlay(out, t)
+        with perf.T("hud_hit_error"):
+            self._hit_error(out, t)
         # settings-surface house elements (both component paths)
-        self._mod_pills(out, t)
-        self._hit_counter(out, t)
-        self._pp_counter(out, t)
-        self._aim_error(out, t)
-        self._watermark(out)
-        self._break_flash(out, t)
-        if self.legacy_health:
-            # stable draws the scorebar in FRONT of everything (LegacySkin's
-            # "hacky full screen area health bars" comment) — last.
-            self._legacy_health(out, t)
+        with perf.T("hud_house"):
+            self._mod_pills(out, t)
+            self._hit_counter(out, t)
+            self._pp_counter(out, t)
+            self._aim_error(out, t)
+            self._watermark(out)
+            self._break_flash(out, t)
+            if self.legacy_health:
+                # stable draws the scorebar in FRONT of everything (LegacySkin's
+                # "hacky full screen area health bars" comment) — last.
+                self._legacy_health(out, t)
+        perf.count("hud_sprites", len(out))
         if out:
             self.spr.draw(out)
 
@@ -1631,16 +1732,25 @@ class StdHud:
             gbar_rgb, ggl = HP_MISS_BAR, (*HP_MISS_GLOW, 0.5)
         else:
             gbar_rgb, ggl = (1.0, 1.0, 1.0), glow_rgba
-        glow_tex = field.bar_rgba(
-            seg_lo, seg_hi, HP_GLOW_RADIUS,
-            (HP_GLOW_RADIUS - HP_MAIN_RADIUS
-             * (1.0 - HP_MAIN_GLOW_PORTION)) / HP_GLOW_RADIUS,
-            gbar_rgb, ggl, xgrad=True, alpha_mult=0.9)
-        main_tex = field.bar_rgba(0.0, hp_now, HP_MAIN_RADIUS,
-                                  HP_MAIN_GLOW_PORTION, bar_rgb,
-                                  glow_rgba, alpha_mult=alpha_main)
-        self.spr.upload_texture("hud_hp_glow", glow_tex)
-        self.spr.upload_texture("hud_hp_main", main_tex)
+        # regenerate + re-upload only when the bar parameters actually
+        # changed this frame (steady hp / no recent hit-flash repeats the
+        # exact same texture; radii/portions/mults below are constants)
+        gkey = (seg_lo, seg_hi, gbar_rgb, ggl)
+        if gkey != self._hp_glow_key:
+            self._hp_glow_key = gkey
+            glow_tex = field.bar_rgba(
+                seg_lo, seg_hi, HP_GLOW_RADIUS,
+                (HP_GLOW_RADIUS - HP_MAIN_RADIUS
+                 * (1.0 - HP_MAIN_GLOW_PORTION)) / HP_GLOW_RADIUS,
+                gbar_rgb, ggl, xgrad=True, alpha_mult=0.9)
+            self.spr.write_texture("hud_hp_glow", glow_tex)
+        mkey = (hp_now, bar_rgb, glow_rgba, alpha_main)
+        if mkey != self._hp_main_key:
+            self._hp_main_key = mkey
+            main_tex = field.bar_rgba(0.0, hp_now, HP_MAIN_RADIUS,
+                                      HP_MAIN_GLOW_PORTION, bar_rgb,
+                                      glow_rgba, alpha_mult=alpha_main)
+            self.spr.write_texture("hud_hp_main", main_tex)
         # content top-left at HP_POS minus the main radius padding row
         x0 = (HP_POS[0] - field.margin) * es
         y0 = (HP_POS[1] - field.margin) * es

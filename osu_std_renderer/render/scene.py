@@ -168,6 +168,7 @@ from .transform_mods import (DEFLATE, GROW, HIDES_APPROACH, IDENTITY, SPIN_IN,
                              wiggle_offset_at)
 from .appearance_mods import (approach_different_scale, freeze_frame_scale,
                               freeze_preempts)
+from . import perf
 from . import screen_mods as _sm
 from . import repel_magnet as _rm
 from .repel_magnet import MAGNETISED, REPEL
@@ -1760,6 +1761,10 @@ class StdScene:
         # skip_results: draw the scene-behind WITHOUT the results card. The
         # SSAA outro path (_frame_rgb_ssaa) renders this at output res, then
         # composites the card on top at the supersample resolution.
+        with perf.T("frame_render"):
+            self._render_frame(t, skip_results)
+
+    def _render_frame(self, t: float, skip_results: bool = False) -> None:
         if self.fail_time_ms is not None and t >= self.fail_time_ms:
             self._render_fail_frame(t, skip_results=skip_results)
             return
@@ -1967,6 +1972,26 @@ class StdScene:
             p[0], p[1], pivot, center, o_scale, o_rot, fall_px,
             c_scale, c_rot)
 
+    def frame_rgb_pipelined(self, t: float) -> list:
+        """Record-loop variant of frame_rgb: returns the frames that are
+        READY, oldest first (the PBO ring adds a fixed lag; every frame
+        still arrives exactly once, in order). SSAA/results frames flush
+        the ring first, then append their synchronously-composited frame,
+        so ordering is preserved across the boundary. frame_rgb_drain()
+        must be called after the loop."""
+        if self.results_ssaa is not None and self.results is not None \
+                and self.results_start_ms is not None \
+                and t >= self.results_start_ms:
+            out = self.spr.read_drain()
+            out.append(self._frame_rgb_ssaa(t))
+            return out
+        self.render_frame(t)
+        fr = self.spr.read_rgb_async()
+        return [fr] if fr is not None else []
+
+    def frame_rgb_drain(self) -> list:
+        return self.spr.read_drain()
+
     def frame_rgb(self, t: float):
         if self.results_ssaa is not None and self.results is not None \
                 and self.results_start_ms is not None \
@@ -2129,6 +2154,10 @@ class StdScene:
         the image, then the dark void), dimmed by the envelope, flashed to
         the beat, parallax-shifted opposite the cursor. Returns the
         brightness so the triangles deco can match the dim."""
+        with perf.T("background"):
+            return self._draw_background_inner(t)
+
+    def _draw_background_inner(self, t: float) -> float:
         b = 1.0 - (self.dim.level(t) if self.dim is not None else 0.0)
         if self.flash_to_beat:
             b = min(b * flash_factor(beat_phase(t, self.beatmap.timings)),
@@ -3513,5 +3542,10 @@ class ScenePlayer:
             self.t += delta_ms * self.rate_fn(self.t)
         return self.t >= self.end_ms
 
-    def draw(self):
-        return self.scene.frame_rgb(self.t)
+    def draw(self) -> list:
+        # pipelined: 0..n ready frames, strict display order (the PBO
+        # readback ring lags ~2 frames; drain() flushes the tail)
+        return self.scene.frame_rgb_pipelined(self.t)
+
+    def drain(self) -> list:
+        return self.scene.frame_rgb_drain()
