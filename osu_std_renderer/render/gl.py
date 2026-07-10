@@ -141,6 +141,16 @@ class SpriteRenderer:
     def has_texture(self, key: str) -> bool:
         return key in self._textures
 
+    def release_texture(self, key: str) -> None:
+        """Free a cached texture by key (storyboard LRU eviction). No-op if
+        the key is absent."""
+        tex = self._textures.pop(key, None)
+        if tex is not None:
+            try:
+                tex.release()
+            except Exception:  # noqa: BLE001 - context may be tearing down
+                pass
+
     def _make_texture_rgba(self, rgba: np.ndarray,
                            mipmaps: bool = True) -> "moderngl.Texture":
         h, w = rgba.shape[:2]

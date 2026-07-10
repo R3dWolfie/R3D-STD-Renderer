@@ -164,7 +164,7 @@ class StdRenderSettings:
     bg_blur: int = 0                      # 0-10 → gaussian at texture load
     bg_parallax: bool = False             # bg ~1.02×, offset vs cursor
     bg_triangles: bool = False            # drifting osu-triangles deco
-    load_storyboard: bool = False         # ACCEPTED + NO-OP (see docstring)
+    load_storyboard: bool = False         # render/storyboard_render (phase 3); service gates free tier
     load_video: bool = False              # [Events] Video → video_bg.py
     flash_to_beat: bool = False           # bg brightness pulse on beats
 

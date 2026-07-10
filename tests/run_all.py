@@ -89,6 +89,11 @@ MODULES = [
     # semantics, loop unrolling, sprite lifetime (alpha-0 opt), alpha flicker,
     # flip/additive params; trigger FIRING is stubbed (machinery only) (2026-07)
     "tests.test_storyboard_engine",
+    # storyboard engine phase 3: the RENDERER (per-time SpriteState -> drawn
+    # frames). 640x480->output transform + widescreen letterbox, 9 origins x
+    # flip origin-adjust, additive z-slot blend, animation frame index, lazy
+    # LRU texture cache; GL draw proven by an EGL smoke test (2026-07)
+    "tests.test_storyboard_render",
 ]
 
 
