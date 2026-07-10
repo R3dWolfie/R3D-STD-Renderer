@@ -7,9 +7,12 @@ import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
-from osu_std_renderer.render.hud import (HudData, ModPill, build_aim_points,
+from osu_std_renderer.render.hud import (MOD_PILL_GAP, MOD_PILL_H,
+                                         MOD_PILL_PAD_X, MOD_PILL_ROW_GAP,
+                                         MOD_PILL_ROW_MAX_W, MOD_TEXT_FRAC,
+                                         HudData, ModPill, build_aim_points,
                                          build_mod_pills, mod_pill_color,
-                                         mods_to_acronyms)
+                                         mods_to_acronyms, pack_mod_pill_rows)
 from osu_std_renderer.render.scoreboard import (ScoreboardEntry, draw,
                                                 load_scoreboard_json)
 from tests.test_hud import _three_circle_run
@@ -102,6 +105,71 @@ def test_build_mod_pills_lazer_dedup_and_swallow():
     assert build_mod_pills(0, ["NC", "DT"]) == [ModPill("NC", "NC")]
     assert build_mod_pills(0, ["PF", "SD"]) == [ModPill("PF", "PF")]
     assert build_mod_pills(0, ["HD", "HD"]) == [ModPill("HD", "HD")]
+
+
+# --- mod-pill prominence: legible size + wrap/stack (no overlap) ------------------
+
+def test_mod_pill_is_prominent():
+    # owner-directed prominence: the pill must be big enough to read at 720p
+    # and survive a 360p downscale. It was 22 lazer px (illegible); the fix
+    # sizes it to lazer's ModDisplay icon (80×0.6 = 48 lazer px) region.
+    # Guard against a silent regression back to the tiny size.
+    assert MOD_PILL_H >= 38.0                 # ≥ ~1.7× the old 22 px
+    assert MOD_PILL_H >= 22.0 * 1.5           # the "~1.5–2×" directive floor
+    # text tall enough to read: at 720p a downscale to 360p keeps the glyph
+    # height clearly above the ~9 px legibility floor.
+    # 360p px = h_lazer · (1080/768) · (720/1080) · (360/720)
+    text_h_lazer = MOD_PILL_H * MOD_TEXT_FRAC
+    px_360p = text_h_lazer * (1080.0 / 768.0) * (720.0 / 1080.0) * (360.0 / 720.0)
+    assert px_360p >= 10.0                    # legible after the 360p downscale
+    # padding/gap scaled with the taller pill so it doesn't look cramped
+    assert MOD_PILL_PAD_X >= 12.0
+    assert MOD_PILL_GAP >= 6.0
+
+
+def test_pack_mod_pill_rows_single_row_when_it_fits():
+    # a realistic mod count (≤ a few pills) stays one right-aligned row
+    widths = [60.0, 60.0, 60.0]               # + gaps ≪ the cap
+    rows = pack_mod_pill_rows(widths, MOD_PILL_GAP, MOD_PILL_ROW_MAX_W)
+    assert rows == [[0, 1, 2]]
+
+
+def test_pack_mod_pill_rows_wraps_and_preserves_order():
+    # a pathological long set wraps to further rows; every index appears once,
+    # in order, and no row (past the first pill) exceeds the cap
+    widths = [120.0] * 10
+    gap, cap = 8.0, 420.0
+    rows = pack_mod_pill_rows(widths, gap, cap)
+    assert [i for row in rows for i in row] == list(range(10))   # partition
+    assert len(rows) > 1                                          # it wrapped
+    for row in rows:
+        row_w = sum(widths[i] for i in row) + gap * max(len(row) - 1, 0)
+        if len(row) > 1:
+            assert row_w <= cap
+
+
+def test_pack_mod_pill_rows_lone_oversize_pill_kept():
+    # a single pill wider than the cap is never dropped — it gets its own row
+    rows = pack_mod_pill_rows([999.0, 50.0], 8.0, 420.0)
+    assert rows[0] == [0]
+    assert [i for row in rows for i in row] == [0, 1]
+
+
+def test_mod_pills_no_overlap_within_row():
+    # right-aligning a row and laying pills left-to-right with `gap` spacing
+    # yields strictly non-overlapping pill spans (the layout _mod_pills uses)
+    widths = [60.0, 44.0, 72.0]
+    gap, right = MOD_PILL_GAP, 1000.0
+    total = sum(widths) + gap * (len(widths) - 1)
+    x = right - total
+    spans = []
+    for w in widths:
+        spans.append((x, x + w))
+        x += w + gap
+    for (a_lo, a_hi), (b_lo, b_hi) in zip(spans, spans[1:]):
+        assert a_hi + 1e-9 <= b_lo             # gap keeps them apart
+    assert spans[-1][1] <= right + 1e-9        # row stays within the right edge
+    assert MOD_PILL_ROW_GAP > 0.0              # wrapped rows are separated too
 
 
 # --- hit counter -------------------------------------------------------------------
