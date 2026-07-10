@@ -74,6 +74,11 @@ MODULES = [
     # (Interpolation.DampContinuously) over the recorded cursor; both hide
     # follow points (visual only; reconcile/geometry untouched)
     "tests.test_repel_magnet",
+    # Target Practice (TP): a CONVERSION mod — the map is DISCARDED and rebuilt
+    # as seeded "target" hit circles on the beat (OsuModTargetPractice via
+    # DotNetRandom). The layout is reproduced bit-for-bit from the .osr seed
+    # (object 0 re-derived straight from the C#); non-TP renders untouched.
+    "tests.test_target_practice",
 ]
 
 
