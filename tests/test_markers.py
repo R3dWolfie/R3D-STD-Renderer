@@ -11,7 +11,8 @@ from osu_std_renderer.beatmap.objects.spinner import Spinner
 from osu_std_renderer.beatmap.objects.timing import Timings
 from osu_std_renderer.render.markers import (
     ARROW_EXPLODE_MS, ARROW_EXPLODE_SCALE, ARROW_FADE_MS,
-    ARROW_PULSE_ROT_RAD, FP_PREEMPT, FP_SPACING, TICK_FADE_MS, TICK_POP_MS,
+    ARROW_PULSE_ROT_RAD, FP_PREEMPT, FP_PREEMPT_MIN, FP_SPACING,
+    TICK_FADE_MS, TICK_POP_MS,
     TICK_POP_SCALE, arrow_alpha_scale, arrow_pulse, arrow_rotation,
     beat_phase, followpoint_dots, followpoint_eligible, followpoint_state,
     reverse_arrow_schedule, tick_alpha_scale, tick_schedule,
@@ -209,7 +210,8 @@ def test_followpoint_eligibility_same_combo_only():
 
 
 def test_followpoint_spacing_and_schedule():
-    dots = followpoint_dots((0.0, 0.0), 1000.0, (200.0, 0.0), 2000.0)
+    # AR <= 10 origin (preempt_u >= 450) -> factor 1 -> flat 800 preempt
+    dots = followpoint_dots((0.0, 0.0), 1000.0, (200.0, 0.0), 2000.0, 600.0)
     # d = 48, 80, 112, 144 (while d < 200-32)
     assert len(dots) == 4
     fractions = [48 / 200, 80 / 200, 112 / 200, 144 / 200]
@@ -222,12 +224,36 @@ def test_followpoint_spacing_and_schedule():
     # all dots retire by (or fading right at) the next object's start
     assert max(d.fade_out for d in dots) < 2000.0
     # too close / no gap in time → no dots
-    assert followpoint_dots((0.0, 0.0), 1000.0, (70.0, 0.0), 2000.0) == []
-    assert followpoint_dots((0.0, 0.0), 1000.0, (200.0, 0.0), 1000.0) == []
+    assert followpoint_dots((0.0, 0.0), 1000.0, (70.0, 0.0), 2000.0, 600.0) == []
+    assert followpoint_dots((0.0, 0.0), 1000.0, (200.0, 0.0), 1000.0, 600.0) == []
+
+
+def test_followpoint_preempt_scaling():
+    """Lazer FollowPointConnection.GetFadeTimes scales the connection
+    preempt by min(1, start.TimePreempt / PREEMPT_MIN); PREEMPT_MIN=450."""
+    assert FP_PREEMPT == 800.0
+    assert FP_PREEMPT_MIN == 450.0
+    # exactly at PREEMPT_MIN (AR 10) and above: factor 1 -> flat 800, unchanged
+    for pre in (FP_PREEMPT_MIN, 540.0, 1200.0):
+        dots = followpoint_dots((0.0, 0.0), 1000.0, (200.0, 0.0), 2000.0, pre)
+        for dot in dots:
+            assert abs(dot.fade_in - (dot.fade_out - FP_PREEMPT)) < 1e-9
+    # low preempt (TimePreempt=300, i.e. AR11 via DA extended): shortened preempt
+    dots = followpoint_dots((0.0, 0.0), 1000.0, (200.0, 0.0), 2000.0, 300.0)
+    assert len(dots) == 4
+    expect = FP_PREEMPT * (300.0 / FP_PREEMPT_MIN)          # 800 * 2/3 = 533.33
+    for dot in dots:
+        assert abs(dot.fade_in - (dot.fade_out - expect)) < 1e-9
+        # strictly LATER (larger fade_in) than the flat-800 schedule
+        assert dot.fade_in > dot.fade_out - FP_PREEMPT
+    # the fade_out schedule itself is untouched by the preempt scaling
+    flat = followpoint_dots((0.0, 0.0), 1000.0, (200.0, 0.0), 2000.0, 600.0)
+    for d_lo, d_hi in zip(dots, flat):
+        assert abs(d_lo.fade_out - d_hi.fade_out) < 1e-9
 
 
 def test_followpoint_state_lifecycle():
-    dots = followpoint_dots((0.0, 0.0), 1000.0, (200.0, 0.0), 2000.0)
+    dots = followpoint_dots((0.0, 0.0), 1000.0, (200.0, 0.0), 2000.0, 600.0)
     dot = dots[0]
     fin = 400.0
     assert followpoint_state(dot.fade_in - 1, dot, fin) is None

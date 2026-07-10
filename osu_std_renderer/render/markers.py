@@ -76,6 +76,7 @@ TICK_POP_SCALE = 1.5
 # follow points (lazer FollowPointConnection)
 FP_SPACING = 32.0
 FP_PREEMPT = 800.0
+FP_PREEMPT_MIN = 450.0        # lazer OsuHitObject.PREEMPT_MIN
 
 
 def _clamp01(v: float) -> float:
@@ -252,14 +253,26 @@ def followpoint_eligible(prev, nxt) -> bool:
 
 def followpoint_dots(p1: tuple[float, float], t_end: float,
                      p2: tuple[float, float],
-                     t_start: float) -> list[FollowPointDot]:
+                     t_start: float,
+                     prev_preempt: float) -> list[FollowPointDot]:
     """The lazer FollowPointConnection dot schedule between prev END
-    (p1 @ t_end) and next START (p2 @ t_start), osu!px."""
+    (p1 @ t_end) and next START (p2 @ t_start), osu!px.
+
+    prev_preempt is the ORIGIN object's TimePreempt — our un-speed-scaled
+    ``Difficulty.preempt_u`` (the AR→preempt in map ms). Lazer scales the
+    connection preempt exactly like FollowPointConnection.GetFadeTimes:
+
+        preempt = PREEMPT * min(1, start.TimePreempt / PREEMPT_MIN)
+
+    so on extended-AR objects (TimePreempt < 450 → AR > 10) the follow
+    points appear later and linger less. For AR <= 10 (preempt_u >= 450) the
+    factor is 1 → flat 800, byte-identical to the old behaviour."""
     duration = t_start - t_end
     dx, dy = p2[0] - p1[0], p2[1] - p1[1]
     distance = math.hypot(dx, dy)
     if duration <= 0 or distance <= 0:
         return []
+    preempt = FP_PREEMPT * min(1.0, prev_preempt / FP_PREEMPT_MIN)
     rotation = math.atan2(dy, dx)
     out: list[FollowPointDot] = []
     d = float(int(FP_SPACING * 1.5))
@@ -267,7 +280,7 @@ def followpoint_dots(p1: tuple[float, float], t_end: float,
         fraction = d / distance
         fade_out = t_end + fraction * duration
         out.append(FollowPointDot(
-            fade_in=fade_out - FP_PREEMPT, fade_out=fade_out,
+            fade_in=fade_out - preempt, fade_out=fade_out,
             x_start=p1[0] + (fraction - 0.1) * dx,
             y_start=p1[1] + (fraction - 0.1) * dy,
             x_end=p1[0] + fraction * dx,

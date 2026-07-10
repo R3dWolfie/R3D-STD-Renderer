@@ -1330,7 +1330,8 @@ class StdScene:
                     prev.get_stacked_end_position(self.diff),
                     prev.get_end_time(),
                     nxt.get_stacked_start_position(self.diff),
-                    nxt.get_start_time()))
+                    nxt.get_start_time(),
+                    self.diff.preempt_u))   # lazer start.TimePreempt
             self._fp_dots.sort(key=lambda d: d.fade_in)
         self._fp_idx = 0
         self._fp_active: list = []
