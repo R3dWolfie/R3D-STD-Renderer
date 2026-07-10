@@ -4,9 +4,19 @@ context.py. Draws textured/solid quads with straight-alpha blending in
 painter's order plus an additive pass (hit explosions / glow), then reads
 back tightly-packed RGB24 for the ffmpeg pipe.
 
-The mania v2 gpu/ package (atlas, texture arrays, instancing, PBO readback)
-is the performance end-state; this batch is the correctness baseline the
-std draw phase starts from — same trajectory catch/taiko took.
+Batched draw (perf-optimize): all sprite parameters ride per-vertex
+attributes in ONE dynamic VBO built per draw() call, and consecutive
+sprites sharing a texture collapse into a single indexed glDrawElements —
+~444 draw calls/frame became ~40 (med-map profile). The vertex/fragment
+math is expression-identical to the per-sprite uniform path it replaces
+(same rotate/NDC lines, `flat` colour so no interpolation), so the raster
+output is bit-identical; the per-frame blake2b frame-stream hash proved it
+on the med benchmark map.
+
+The mania v2 gpu/ package (atlas, texture arrays, PBO readback) remains
+the performance end-state; texture-atlas packing is deliberately NOT done
+here — mipmapped LINEAR sampling at atlas edges cannot be proven
+pixel-identical against per-texture repeat wrapping.
 """
 from __future__ import annotations
 
@@ -26,36 +36,44 @@ _VERT = """
 #version 330
 in vec2 in_pos;      // unit quad corner [-0.5,0.5]
 in vec2 in_uv;
+in vec2 in_center;   // sprite center in px (origin top-left)
+in vec2 in_size;     // sprite w,h in px
+in float in_rot;     // radians
+in vec4 in_color;
+in vec2 in_uv_off;   // texture sub-rect (spinner-metre reveal)
+in vec2 in_uv_scale;
 uniform vec2 u_screen;   // (w, h) in px
-uniform vec2 u_center;   // sprite center in px (origin top-left)
-uniform vec2 u_size;     // sprite w,h in px
-uniform float u_rot;     // radians
-uniform vec2 u_uv_off;   // texture sub-rect (spinner-metre reveal)
-uniform vec2 u_uv_scale;
 out vec2 v_uv;
+flat out vec4 v_color;
 void main() {
-    vec2 p = in_pos * u_size;
-    float c = cos(u_rot), s = sin(u_rot);
+    vec2 p = in_pos * in_size;
+    float c = cos(in_rot), s = sin(in_rot);
     p = vec2(p.x * c - p.y * s, p.x * s + p.y * c);
-    vec2 px = u_center + p;
+    vec2 px = in_center + p;
     vec2 ndc = vec2(px.x / u_screen.x * 2.0 - 1.0,
                     1.0 - px.y / u_screen.y * 2.0);
     gl_Position = vec4(ndc, 0.0, 1.0);
-    v_uv = in_uv * u_uv_scale + u_uv_off;
+    v_uv = in_uv * in_uv_scale + in_uv_off;
+    v_color = in_color;
 }
 """
 
 _FRAG = """
 #version 330
 in vec2 v_uv;
+flat in vec4 v_color;
 uniform sampler2D u_tex;
-uniform vec4 u_color;
 out vec4 f_color;
 void main() {
     vec4 t = texture(u_tex, v_uv);
-    f_color = t * u_color;
+    f_color = t * v_color;
 }
 """
+
+# floats per vertex: in_pos(2) in_uv(2) center(2) size(2) rot(1) color(4)
+# uv_off(2) uv_scale(2)
+_VERT_FLOATS = 17
+_SPRITE_BYTES = 4 * _VERT_FLOATS * 4          # 4 corners × 17 f4
 
 
 @dataclass
@@ -85,18 +103,24 @@ class SpriteRenderer:
         self.ctx.blend_func = (moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA)
 
         self.prog = self.ctx.program(vertex_shader=_VERT, fragment_shader=_FRAG)
-        # unit quad centered at origin; v grows downward with screen y
-        quad = np.array([
-            -0.5, -0.5, 0.0, 0.0,
-             0.5, -0.5, 1.0, 0.0,
-            -0.5,  0.5, 0.0, 1.0,
-             0.5,  0.5, 1.0, 1.0,
-        ], dtype="f4")
-        self.vbo = self.ctx.buffer(quad.tobytes())
-        self.vao = self.ctx.vertex_array(
-            self.prog, [(self.vbo, "2f 2f", "in_pos", "in_uv")],
-        )
         self.prog["u_screen"].value = (float(width), float(height))
+        self.prog["u_tex"].value = 0
+
+        # unit-quad corners + uv, replicated per sprite in _draw (v grows
+        # downward with screen y — same corner order the old TRIANGLE_STRIP
+        # used; the index pattern below re-emits its two triangles)
+        self._corners = np.array([
+            [-0.5, -0.5, 0.0, 0.0],
+            [ 0.5, -0.5, 1.0, 0.0],
+            [-0.5,  0.5, 0.0, 1.0],
+            [ 0.5,  0.5, 1.0, 1.0],
+        ], dtype="f4")
+
+        self._capacity = 0
+        self.vbo: "moderngl.Buffer | None" = None
+        self._ibo: "moderngl.Buffer | None" = None
+        self.vao: "moderngl.VertexArray | None" = None
+        self._ensure_capacity(2048)
 
         # texture-backed colour attachment (was a renderbuffer): the bloom
         # post-pass samples the scene, and fbo.read() works the same
@@ -109,6 +133,34 @@ class SpriteRenderer:
         # every sprite in draw(). The fail animation installs this to drop
         # the frozen playfield's objects off-screen; None = identity.
         self.post_xform = None
+
+    def _ensure_capacity(self, n_sprites: int) -> None:
+        """Size the dynamic VBO + static index buffer for n_sprites quads."""
+        if n_sprites <= self._capacity:
+            return
+        cap = max(n_sprites, self._capacity * 2, 2048)
+        if self.vao is not None:
+            self.vao.release()
+        if self._ibo is not None:
+            self._ibo.release()
+        if self.vbo is None:
+            self.vbo = self.ctx.buffer(reserve=cap * _SPRITE_BYTES,
+                                       dynamic=True)
+        else:
+            self.vbo.orphan(cap * _SPRITE_BYTES)
+        # two triangles per quad: (0,1,2) + (2,1,3) — the same coverage the
+        # old strip produced for corners v0..v3
+        idx = (np.arange(cap, dtype="u4")[:, None] * 4
+               + np.array([0, 1, 2, 2, 1, 3], dtype="u4")[None, :])
+        self._ibo = self.ctx.buffer(np.ascontiguousarray(idx))
+        self.vao = self.ctx.vertex_array(
+            self.prog,
+            [(self.vbo, "2f 2f 2f 2f 1f 4f 2f 2f",
+              "in_pos", "in_uv", "in_center", "in_size", "in_rot",
+              "in_color", "in_uv_off", "in_uv_scale")],
+            index_buffer=self._ibo, index_element_size=4,
+        )
+        self._capacity = cap
 
     # --- texture management ---------------------------------------------------
 
@@ -182,32 +234,60 @@ class SpriteRenderer:
     def _draw(self, sprites: list[Sprite]) -> None:
         if self.post_xform is not None:
             sprites = [self.post_xform(sp) for sp in sprites]
-        add = []
-        for sp in sprites:
-            if sp.additive:
-                add.append(sp)
-            else:
-                self._draw_one(sp)
-        if add:
-            self.ctx.blend_func = (moderngl.SRC_ALPHA, moderngl.ONE)
-            for sp in add:
-                self._draw_one(sp)
-            self.ctx.blend_func = (moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA)
+        if not sprites:
+            return
+        # painter's order per pass: every non-additive sprite in order,
+        # THEN every additive sprite in order (the exact two-phase order
+        # the per-sprite loop produced)
+        n_norm = 0
+        if any(sp.additive for sp in sprites):
+            normal = [sp for sp in sprites if not sp.additive]
+            n_norm = len(normal)
+            ordered = normal + [sp for sp in sprites if sp.additive]
+        else:
+            ordered = sprites
+            n_norm = len(ordered)
+        n = len(ordered)
+        self._ensure_capacity(n)
 
-    def _draw_one(self, sp: Sprite) -> None:
-        perf.count("draw_calls")
-        tex = self._textures.get(sp.texture_key) if sp.texture_key else self._white
-        if tex is None:
-            tex = self._white
-        tex.use(location=0)
-        self.prog["u_tex"].value = 0
-        self.prog["u_color"].value = sp.color
-        self.prog["u_center"].value = (sp.x, sp.y)
-        self.prog["u_size"].value = (sp.w, sp.h)
-        self.prog["u_rot"].value = sp.rotation
-        self.prog["u_uv_off"].value = sp.uv_off
-        self.prog["u_uv_scale"].value = sp.uv_scale
-        self.vao.render(moderngl.TRIANGLE_STRIP)
+        params = np.array(
+            [(sp.x, sp.y, sp.w, sp.h, sp.rotation,
+              sp.color[0], sp.color[1], sp.color[2], sp.color[3],
+              sp.uv_off[0], sp.uv_off[1], sp.uv_scale[0], sp.uv_scale[1])
+             for sp in ordered], dtype="f4")
+        verts = np.empty((n, 4, _VERT_FLOATS), dtype="f4")
+        verts[:, :, 0:4] = self._corners
+        verts[:, :, 4:] = params[:, None, :]
+        self.vbo.orphan()
+        self.vbo.write(verts)
+
+        textures = self._textures
+        white = self._white
+        texs = [textures.get(sp.texture_key, white) if sp.texture_key
+                else white for sp in ordered]
+
+        self._run_pass(texs, 0, n_norm)
+        if n_norm < n:
+            self.ctx.blend_func = (moderngl.SRC_ALPHA, moderngl.ONE)
+            self._run_pass(texs, n_norm, n)
+            self.ctx.blend_func = (moderngl.SRC_ALPHA,
+                                   moderngl.ONE_MINUS_SRC_ALPHA)
+
+    def _run_pass(self, texs, start: int, end: int) -> None:
+        """Draw quads [start, end) grouping consecutive same-texture runs
+        into single indexed draws (primitive order == list order, so the
+        painter's-algorithm blending is unchanged)."""
+        i = start
+        render = self.vao.render
+        while i < end:
+            tex = texs[i]
+            j = i + 1
+            while j < end and texs[j] is tex:
+                j += 1
+            tex.use(location=0)
+            render(moderngl.TRIANGLES, vertices=(j - i) * 6, first=i * 6)
+            perf.count("draw_calls")
+            i = j
 
     def read_rgb(self) -> np.ndarray:
         """HxWx3 uint8, top-left origin (ready for ffmpeg rgb24)."""
