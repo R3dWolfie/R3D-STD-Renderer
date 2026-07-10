@@ -37,8 +37,11 @@ class Player(Protocol):
         """Advance sim time by delta_ms. True at MapEnd."""
         ...
 
-    def draw(self) -> np.ndarray:
-        """Render the current frame → HxWx3 uint8 (top-left origin)."""
+    def draw(self) -> "np.ndarray | list[np.ndarray]":
+        """Render the current frame. Returns either one HxWx3 uint8
+        frame (top-left origin) or an ORDERED list of ready frames — an
+        async-readback player (PBO ring) returns [] while its pipeline
+        fills and may also expose drain() for the tail at map end."""
         ...
 
 
@@ -79,9 +82,20 @@ class RecordPipeline:
 
             delta_sum_f += update_delta
             if delta_sum_f >= fps_delta:
-                self.push_frame(player.draw())
-                frames += 1
+                out = player.draw()
+                if isinstance(out, np.ndarray):
+                    self.push_frame(out)
+                    frames += 1
+                else:
+                    for f in out:      # pipelined player: 0..n ready frames
+                        self.push_frame(f)
+                        frames += 1
                 delta_sum_f -= fps_delta
                 if self.progress is not None and total_ms:
                     self.progress(min(1.0, elapsed / total_ms))
+        drain = getattr(player, "drain", None)
+        if drain is not None:
+            for f in drain():          # PBO ring tail — order preserved
+                self.push_frame(f)
+                frames += 1
         return frames

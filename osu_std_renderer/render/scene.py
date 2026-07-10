@@ -1972,6 +1972,26 @@ class StdScene:
             p[0], p[1], pivot, center, o_scale, o_rot, fall_px,
             c_scale, c_rot)
 
+    def frame_rgb_pipelined(self, t: float) -> list:
+        """Record-loop variant of frame_rgb: returns the frames that are
+        READY, oldest first (the PBO ring adds a fixed lag; every frame
+        still arrives exactly once, in order). SSAA/results frames flush
+        the ring first, then append their synchronously-composited frame,
+        so ordering is preserved across the boundary. frame_rgb_drain()
+        must be called after the loop."""
+        if self.results_ssaa is not None and self.results is not None \
+                and self.results_start_ms is not None \
+                and t >= self.results_start_ms:
+            out = self.spr.read_drain()
+            out.append(self._frame_rgb_ssaa(t))
+            return out
+        self.render_frame(t)
+        fr = self.spr.read_rgb_async()
+        return [fr] if fr is not None else []
+
+    def frame_rgb_drain(self) -> list:
+        return self.spr.read_drain()
+
     def frame_rgb(self, t: float):
         if self.results_ssaa is not None and self.results is not None \
                 and self.results_start_ms is not None \
@@ -3522,5 +3542,10 @@ class ScenePlayer:
             self.t += delta_ms * self.rate_fn(self.t)
         return self.t >= self.end_ms
 
-    def draw(self):
-        return self.scene.frame_rgb(self.t)
+    def draw(self) -> list:
+        # pipelined: 0..n ready frames, strict display order (the PBO
+        # readback ring lags ~2 frames; drain() flushes the tail)
+        return self.scene.frame_rgb_pipelined(self.t)
+
+    def drain(self) -> list:
+        return self.scene.frame_rgb_drain()

@@ -138,6 +138,12 @@ class SpriteRenderer:
         # every sprite in draw(). The fail animation installs this to drop
         # the frozen playfield's objects off-screen; None = identity.
         self.post_xform = None
+        # pipelined readback ring (danser's recording-pipeline pattern:
+        # glReadPixels DMAs into a pixel-pack buffer while the CPU builds
+        # the next frames; mapping a buffer ~2 frames later never stalls)
+        self._pbos: list["moderngl.Buffer"] | None = None
+        self._pbo_head = 0
+        self._pbo_tail = 0
 
     def _ensure_capacity(self, n_sprites: int) -> None:
         """Size the dynamic VBO + static index buffer for n_sprites quads."""
@@ -317,6 +323,44 @@ class SpriteRenderer:
             render(moderngl.TRIANGLES, vertices=(j - i) * 6, first=i * 6)
             perf.count("draw_calls")
             i = j
+
+    _PBO_RING = 3
+
+    def read_rgb_async(self) -> "np.ndarray | None":
+        """Queue an async readback of the current fbo into a small PBO
+        ring and return the OLDEST completed frame (top-left origin), or
+        None while the ring is still filling. Frames come back in strict
+        submission order — the record loop pushes them straight to ffmpeg,
+        so the byte stream is identical to the synchronous read_rgb path,
+        just ~RING-1 frames late. read_drain() flushes the tail."""
+        with perf.T("readback"):
+            if self._pbos is None:
+                size = self.width * self.height * 3
+                self._pbos = [self.ctx.buffer(reserve=size)
+                              for _ in range(self._PBO_RING)]
+            buf = self._pbos[self._pbo_head % len(self._pbos)]
+            self.fbo.read_into(buf, components=3, alignment=1)
+            self._pbo_head += 1
+            if self._pbo_head - self._pbo_tail < len(self._pbos):
+                return None
+            return self._pop_pbo()
+
+    def _pop_pbo(self) -> np.ndarray:
+        buf = self._pbos[self._pbo_tail % len(self._pbos)]
+        self._pbo_tail += 1
+        data = buf.read()
+        arr = np.frombuffer(data, dtype="u1").reshape(
+            (self.height, self.width, 3))
+        return np.flipud(arr)  # same orientation contract as read_rgb
+
+    def read_drain(self) -> list:
+        """Return every frame still in flight, oldest first (map end, or
+        an SSAA/results frame about to take the synchronous path)."""
+        out = []
+        with perf.T("readback"):
+            while self._pbos is not None and self._pbo_tail < self._pbo_head:
+                out.append(self._pop_pbo())
+        return out
 
     def read_rgb(self) -> np.ndarray:
         """HxWx3 uint8, top-left origin (ready for ffmpeg rgb24)."""

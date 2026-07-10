@@ -91,3 +91,40 @@ def test_sim_rate_never_below_1000hz():
     pipe.run(player)
     assert player.updates == 2000          # 0.5 ms steps
     assert audio_ticks[0] == 999
+
+
+def test_record_loop_pipelined_player_preserves_order_and_count():
+    """PBO-ring players return [] while their pipeline fills and drain()
+    the tail at map end: the pushed stream must contain every frame
+    exactly once, in display order."""
+
+    class _LaggedPlayer:
+        LAG = 2
+
+        def __init__(self):
+            self.t = 0.0
+            self.seq = 0
+            self.pending = []
+
+        def update(self, delta):
+            self.t += delta
+            return self.t >= 1000.0
+
+        def draw(self):
+            self.pending.append(
+                np.full((1, 1, 3), self.seq % 251, dtype=np.uint8))
+            self.seq += 1
+            if len(self.pending) < self.LAG + 1:
+                return []
+            return [self.pending.pop(0)]
+
+        def drain(self):
+            out, self.pending = self.pending, []
+            return out
+
+    frames = []
+    n = RecordPipeline(fps=60, push_frame=frames.append).run(_LaggedPlayer())
+    assert n == len(frames)
+    assert 58 <= n <= 60
+    vals = [int(f[0, 0, 0]) for f in frames]
+    assert vals == [i % 251 for i in range(n)]
