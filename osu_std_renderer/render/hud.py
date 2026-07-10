@@ -136,8 +136,10 @@ SETTINGS-SURFACE ADDITIONS (2026-07, this phase — house elements, both
 component paths):
   mod pills          show_mods — procedural rounded pills with the mod
                      acronyms (NC swallows DT, PF swallows SD — the
-                     standard derivation), category-coloured, stacked
-                     right-aligned under the accuracy block
+                     standard derivation), category-coloured, sized to
+                     lazer's ModDisplay icon (≈48 lazer px), right-aligned
+                     under the accuracy block, wrapping to stacked rows
+                     when a long mod set would overflow left
   pp counter         show_pp_counter — render/pp.py's rosu gradual
                      timeline, rolled like the counters, top-left under
                      the hp bar; HIDES itself when rosu/the timeline is
@@ -328,10 +330,20 @@ _MOD_AUTOMATION = {"RX", "AP", "V2", "TD"}
 MOD_COLOR_REDUCTION = (0.45, 0.78, 0.36)     # greens (lazer's reduction)
 MOD_COLOR_INCREASE = (0.90, 0.32, 0.42)      # reds (difficulty increase)
 MOD_COLOR_AUTOMATION = (0.36, 0.62, 0.92)    # blues (automation/special)
-MOD_PILL_H = 22.0              # lazer px
-MOD_PILL_PAD_X = 9.0
-MOD_PILL_GAP = 5.0
-MOD_TEXT_FRAC = 0.60           # text height / pill height
+# Owner-directed (2026-07): the pills were illegible — 22 lazer px tall,
+# tucked under the accuracy, unreadable at 720p and gone on a 360p downscale
+# ("hasn't seen a single mod pill"). Lazer HAS no mod display in the Argon
+# default gameplay HUD (ArgonSkin MainHUDComponents ships none), but its
+# ModDisplay component (Screens/Play/HUD/ModDisplay.cs) is a horizontal row
+# of ModIcons at MOD_ICON_SIZE 80 × MOD_ICON_SCALE 0.6 = 48 lazer px tall,
+# category-coloured via OsuColour.ForModType. Our pills are that element in
+# procedural form, so we size to ~lazer's icon (~1.8× the old height).
+MOD_PILL_H = 40.0              # lazer px (was 22; ≈ lazer ModIcon 80×0.6=48)
+MOD_PILL_PAD_X = 14.0          # was 9 — kept ≈0.35·H so wider pills breathe
+MOD_PILL_GAP = 8.0             # was 5 — gap between pills in a row
+MOD_PILL_ROW_GAP = 6.0         # vertical gap when a long mod set wraps rows
+MOD_PILL_ROW_MAX_W = 420.0     # max row width (lazer px) before wrap/stack
+MOD_TEXT_FRAC = 0.62           # text height / pill height (was 0.60)
 
 HITC_ROW_H = 19.0              # hit-counter row height (lazer px)
 HITC_LABELS = ("300", "100", "50", "X")
@@ -416,6 +428,25 @@ def build_mod_pills(mods: int, lazer_mods=(),
                 out.append(ModPill(a, a))
         return out
     return [ModPill(a, a) for a in mods_to_acronyms(mods)]
+
+
+def pack_mod_pill_rows(widths, gap: float, max_row_w: float) -> list[list[int]]:
+    """Pack pill indices (in display order) into right-aligned rows that
+    never exceed ``max_row_w`` — the mod-pill wrap/stack. A row always keeps
+    at least one pill even if that single pill is wider than the cap (a lone
+    pill is never dropped), so the returned rows partition ``range(len(widths))``
+    in order. ``gap`` is the inter-pill spacing counted between pills in a row.
+    Pure geometry (no GL) so the no-overlap invariant is unit-testable."""
+    rows: list[list[int]] = [[]]
+    row_w = 0.0
+    for i, w in enumerate(widths):
+        if rows[-1] and row_w + gap + w > max_row_w:
+            rows.append([i])
+            row_w = w
+        else:
+            row_w += (gap if rows[-1] else 0.0) + w
+            rows[-1].append(i)
+    return rows
 
 
 def mod_pill_color(acr: str) -> tuple[float, float, float]:
@@ -1146,6 +1177,7 @@ class StdHud:
             mod_pills = build_mod_pills(self.mods)
         self._mod_acrs = (list(mod_pills)
                           if getattr(settings, "show_mods", True) else [])
+        self._mod_rows = 0        # rows laid last frame (hit-counter offset)
         self.pp_pts = pp_timeline            # [(t, pp)] | None (hidden)
         self._pp_times = ([p[0] for p in pp_timeline]
                           if pp_timeline else [])
@@ -2086,29 +2118,51 @@ class StdHud:
         return (104.0 if self.legacy_score else 68.0) * self.es
 
     def _mod_pills(self, out, t: float) -> None:
-        """§4.6 Gameplay.Mods: procedural rounded pills with the active
-        mod acronyms, right-aligned under the accuracy block, category-
-        coloured (reduction green / increase red / automation blue) —
-        lazer-style mod display without the icon sheet."""
+        """§4.6 Gameplay.Mods: procedural rounded pills with the active mod
+        acronyms, right-aligned under the accuracy block, category-coloured
+        (reduction green / increase red / automation blue) — our procedural
+        form of lazer's ModDisplay (Screens/Play/HUD/ModDisplay.cs: a
+        horizontal ModIcon row, MOD_ICON_SIZE 80 × MOD_ICON_SCALE 0.6 = 48
+        lazer px), sized big enough to read at 720p and survive a 360p
+        downscale. A long mod set wraps to further stacked rows so it never
+        runs off the left edge or over the score/combo; ``_mod_rows`` records
+        the row count for the hit-counter's offset below."""
         if not getattr(self.s, "show_mods", True) or not self._mod_acrs:
+            self._mod_rows = 0
             return
         es, lk = self.es, self.lk
         h = MOD_PILL_H * es
         text_h = h * MOD_TEXT_FRAC
-        top = self._top_right_stack_y()
-        x_right = self.ui_w_l - 20.0 * es
-        for pill in reversed(self._mod_acrs):    # lay right-to-left
-            tw = self._lrun_width(pill.text, text_h)
-            pw = tw + 2.0 * MOD_PILL_PAD_X * es
-            cx = x_right - pw / 2.0
-            color = mod_pill_color(pill.acr)
-            out.append(Sprite(cx * lk, (top + h / 2.0) * lk,
-                              pw * lk, h * lk, "pill",
-                              (*color, 0.88 * self.op)))
-            self._lrun(out, pill.text, cx - tw / 2.0,
-                       top + (h - text_h) / 2.0, text_h,
-                       (1.0, 1.0, 1.0), 0.95 * self.op)
-            x_right -= pw + MOD_PILL_GAP * es
+        gap = MOD_PILL_GAP * es
+        pad = MOD_PILL_PAD_X * es
+        row_gap = MOD_PILL_ROW_GAP * es
+        top0 = self._top_right_stack_y()
+        right = self.ui_w_l - 20.0 * es
+        max_row_w = MOD_PILL_ROW_MAX_W * es
+        # measure each pill, then pack (in display order) into right-aligned
+        # rows that never exceed max_row_w — wrap/stack downward, keeping the
+        # mods' reading order left-to-right within each row.
+        widths = [self._lrun_width(p.text, text_h) + 2.0 * pad
+                  for p in self._mod_acrs]
+        rows = pack_mod_pill_rows(widths, gap, max_row_w)
+        for r, idxs in enumerate(rows):
+            top = top0 + r * (h + row_gap)
+            total = sum(widths[i] for i in idxs) + gap * max(len(idxs) - 1, 0)
+            x = right - total                    # left edge of this row
+            for i in idxs:
+                pw = widths[i]
+                pill = self._mod_acrs[i]
+                cx = x + pw / 2.0
+                color = mod_pill_color(pill.acr)
+                out.append(Sprite(cx * lk, (top + h / 2.0) * lk,
+                                  pw * lk, h * lk, "pill",
+                                  (*color, 0.88 * self.op)))
+                tw = pw - 2.0 * pad
+                self._lrun(out, pill.text, cx - tw / 2.0,
+                           top + (h - text_h) / 2.0, text_h,
+                           (1.0, 1.0, 1.0), 0.95 * self.op)
+                x += pw + gap
+        self._mod_rows = len(rows)
 
     def _hit_counter(self, out, t: float) -> None:
         """§4.6 HitCounter: the live 300/100/50/miss column under the mod
@@ -2122,7 +2176,10 @@ class StdHud:
         text_h = row_h * 0.78
         top = self._top_right_stack_y()
         if self._mod_acrs and getattr(self.s, "show_mods", True):
-            top += (MOD_PILL_H + 8.0) * es
+            # clear the whole (possibly wrapped) pill stack laid this frame
+            rows = max(self._mod_rows, 1)
+            stack_h = rows * MOD_PILL_H + (rows - 1) * MOD_PILL_ROW_GAP
+            top += (stack_h + 8.0) * es
         right = self.ui_w_l - 20.0 * es
         for i, (label, n, color) in enumerate(
                 zip(HITC_LABELS, counts, colors)):
