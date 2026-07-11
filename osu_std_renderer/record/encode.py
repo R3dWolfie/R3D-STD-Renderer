@@ -75,7 +75,7 @@ def build_ffmpeg_cmd(*, encoder: str, resolution: tuple[int, int], fps: int,
         af = [LOUDNORM] if loudnorm else []
         if af:
             cmd += ["-af", ",".join(af)]
-        cmd += ["-c:a", "aac", "-b:a", audio_bitrate, "-shortest"]
+        cmd += ["-c:a", "aac", "-b:a", audio_bitrate, "-ar", "48000", "-shortest"]
     cmd += ["-movflags", "+faststart", str(output_path)]
     return cmd
 
