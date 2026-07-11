@@ -174,13 +174,15 @@ def test_fail_transform_sprite_grays_shrinks_fades():
 def test_F_grade_colour_is_fail_red():
     from osu_std_renderer.render.hud import GRADE_COLORS
     from osu_std_renderer.render.lazer_results import FOR_RANK
-    # ff5a5a = (1.0, 0x5a/255, 0x5a/255)
+    # the HUD gameplay grade F stays stable fail red (ff5a5a)
     r, g, b = GRADE_COLORS["F"]
     assert abs(r - 1.0) < 1e-6 and abs(g - 0x5a / 255) < 1e-2
+    # the results-screen FOR_RANK["F"] is now OsuColour.ForRank(F) = gray 3f3f3f
+    # (the EXACT lazer value), distinct from the D red.
     fr, fg, fb = FOR_RANK["F"]
-    assert abs(fr - 1.0) < 1e-6 and abs(fg - 0x5a / 255) < 1e-6
-    # same red as the D / stable fail red
-    assert FOR_RANK["F"] == FOR_RANK["D"]
+    assert abs(fr - 0x3f / 255) < 1e-6 and abs(fg - 0x3f / 255) < 1e-6 \
+        and abs(fb - 0x3f / 255) < 1e-6
+    assert FOR_RANK["F"] != FOR_RANK["D"]
 
 
 def test_F_grade_arc_caps_at_virtual_ss_notch():

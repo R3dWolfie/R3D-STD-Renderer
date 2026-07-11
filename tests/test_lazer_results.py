@@ -777,41 +777,43 @@ def test_mod_badges_empty_for_nomod():
 
 
 def test_mod_badges_custom_rate_suffix():
-    # a custom-rate DT (rate_override) carries the compact "DT 1.3×" suffix on
-    # its badge, and that pill is WIDER than the plain default-rate DT badge.
+    # a custom-rate DT (rate_override) is flagged via mod_pill_texts ("DT 1.3×")
+    # and, on the lazer ModIcon hexagon, drawn as a settings COG rather than a
+    # wider pill — so the acronym-only hexagon keeps a rate-independent width
+    # but the custom-rate icon differs pixel-wise from the plain one (the cog).
+    import numpy as np
     spr = _CapSpr()
     scr = LazerResultsScreen(
         spr, _data(mods=0, lazer_mods=("HD", "DT"), rate_override=1.3),
         total_ms=5000.0)
     assert scr.mod_pill_texts == ("HD", "DT 1.3×")
-    w_custom = scr.mod_pills[1][1]
+    kc, w_custom, _ = scr.mod_pills[1]
     spr2 = _CapSpr()
     scr2 = LazerResultsScreen(spr2, _data(mods=0, lazer_mods=("HD", "DT")),
                               total_ms=5000.0)
-    w_plain = scr2.mod_pills[1][1]
-    assert w_custom > w_plain, "custom-rate suffix should widen the DT badge"
+    kp, w_plain, _ = scr2.mod_pills[1]
+    assert abs(w_custom - w_plain) < 1e-6, "hexagon width is rate-independent"
+    assert not np.array_equal(spr.textures[kc], spr2.textures[kp]), \
+        "custom-rate DT should draw a settings cog"
 
 
 def test_mod_badge_category_colours():
-    # the badge fill is the HUD's mod_pill_color category colour: a reduction
-    # mod (EZ) bakes green-dominant, a difficulty-increase mod (HR) red-
-    # dominant — proving the pill is coloured by category, end to end.
-    import numpy as np
-    from osu_std_renderer.render.hud import mod_pill_color
-
+    # the mod ICON hexagon fill is OsuColour.ForModType (mod_type_color): a
+    # reduction mod (EZ) bakes lime green-dominant, a difficulty-increase mod
+    # (HR) red-dominant — proving the hexagon is coloured by ModType, end to
+    # end. (The acronym is a near-black tint of the fill, so sampling the
+    # opaque hexagon body still yields the category-dominant channel.)
     def _fill_rgb(scr, spr, acr):
-        key, _w, _h = scr._bake_mod_pill(acr, mod_pill_color(acr))
+        key, _w, _h = scr._bake_mod_icon(acr, False)
         rgba = spr.textures[key]
         a = rgba[..., 3]
         rgb = rgba[..., :3].astype(float)
-        near_white = (rgb[..., 0] > 225) & (rgb[..., 1] > 225) \
-            & (rgb[..., 2] > 225)
-        m = (a > 200) & (~near_white)             # the pill fill, not the text
+        m = a > 200                               # the opaque hexagon body
         return rgb[m].mean(axis=0)
 
     spr = _CapSpr()
     scr = LazerResultsScreen(spr, _data(mods=0), total_ms=5000.0)
-    ez = _fill_rgb(scr, spr, "EZ")               # reduction → green
+    ez = _fill_rgb(scr, spr, "EZ")               # reduction → lime
     hr = _fill_rgb(scr, spr, "HR")               # increase → red
-    assert ez[1] > ez[0] and ez[1] > ez[2], "EZ badge not green-dominant"
-    assert hr[0] > hr[1] and hr[0] > hr[2], "HR badge not red-dominant"
+    assert ez[1] > ez[0] and ez[1] > ez[2], "EZ hexagon not green-dominant"
+    assert hr[0] > hr[1] and hr[0] > hr[2], "HR hexagon not red-dominant"

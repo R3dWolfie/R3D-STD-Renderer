@@ -72,22 +72,28 @@ from dataclasses import dataclass
 from PIL import Image, ImageDraw
 
 from .gl import Sprite
-from .hud import (BAND_50, BAND_100, BAND_300, build_mod_pills,
-                  mod_pill_color)
+from .hud import BAND_50, BAND_100, BAND_300, build_mod_pills
 from .results import histogram_bins, mods_string
 from .textures import ARGON_FONT_PATH, _load_argon_font, _load_font
 
 UH = 1080.0                    # virtual design height (HUD convention)
 
-# --- timeline (ms from results start) -----------------------------------------------
+# --- timeline (ms from results start) — lazer AccuracyCircle.cs constants ----------
+# Ported 1:1 from osu.Game/Screens/Ranking/Expanded/Accuracy/AccuracyCircle.cs:
+# the sweep runs ACCURACY_TRANSFORM_DURATION 3000 ms after a 450 ms delay with
+# Easing.OutPow10 (was a 1150 ms OutCubic recreation — 2.6× too fast, wrong
+# curve). OutPow10 decays so hard the arc/score read as settled by ~half-way.
 FADE_MS = 320.0                # panel opacity ramp
-SWEEP_DELAY_MS = 260.0         # accuracy arc sweep start
-SWEEP_MS = 1150.0              # AccuracyCircle ACCURACY_TRANSFORM_DURATION (scaled)
-BADGE_MS = 340.0               # rank badge (grade letter) punch duration
-STAGE1_MS = 2000.0            # panel settles + holds until here, then opens
-OPEN_MS = 900.0                # panel slide + stats unfold (OutQuint)
-STAGGER_MS = 160.0             # per-stats-panel unfold stagger
-MIN_TOTAL_MS = 3800.0         # floor so both stages + a hold always fit
+SWEEP_DELAY_MS = 450.0         # AccuracyCircle.ACCURACY_TRANSFORM_DELAY
+SWEEP_MS = 3000.0             # AccuracyCircle.ACCURACY_TRANSFORM_DURATION
+TEXT_APPEAR_MS = 1500.0       # AccuracyCircle.TEXT_APPEAR_DELAY (= dur/2), into sweep
+STAT_ROLL_MS = 1500.0        # stat counters (acc/combo/pp) roll = dur/2 (OutQuad)
+BADGE_FADE_MS = 50.0         # RankBadge.Appear() fade-in
+BADGE_MS = 300.0             # centre rank-letter punch duration
+STAGE1_MS = 3600.0           # panel settles + holds until here, then opens
+OPEN_MS = 900.0               # panel slide + stats unfold (OutQuint)
+STAGGER_MS = 160.0           # per-stats-panel unfold stagger
+MIN_TOTAL_MS = 5400.0        # floor so the 3 s sweep + both stages + a hold fit
 
 # map-leaderboard flank-card entrance — a lazer-style staggered slide-in, so
 # the ranked cards unfurl outward from the featured panel rather than popping
@@ -105,13 +111,16 @@ LB_SLIDE_OFFSET = 96.0         # virtual px each card travels inward (outer→re
 
 DIM_ALPHA = 0.72               # scene dim under the results screen
 
-# mod badges (the played-mods row under the score — lazer's starAndModDisplay
-# ModDisplay in ExpandedPanelMiddleContent). Category colour comes from the
-# HUD's mod_pill_color so the badges match the gameplay HUD pills exactly.
-MOD_PILL_VH = 34.0             # results mod-badge height (virtual px)
-MOD_PILL_TEXT_VPX = 19.0       # acronym text size (virtual px)
-MOD_PILL_GAP_V = 8.0           # inter-badge gap (virtual px)
-MOD_PILL_ALPHA = 235           # pill fill alpha (0..255), lazer-ish opacity
+# mod icons (the played-mods row under the score — lazer's starAndModDisplay
+# ModDisplay in ExpandedPanelMiddleContent). Each mod is a ForModType-coloured
+# HEXAGON (lazer ModIcon), NOT a text pill; colour comes from mod_type_color.
+MOD_ICON_VH = 42.0             # results mod-icon HEXAGON height (virtual px)
+MOD_ICON_GAP_V = 8.0           # inter-icon gap (virtual px)
+
+# statistics grid fonts (lazer ExpandedPanelMiddleContent: label ~12, scaled
+# into our 560-wide panel from lazer's 360-wide ScorePanel.EXPANDED_WIDTH).
+STAT_LABEL_VPX = 15.0          # grid label (ACCURACY / MAX COMBO / GREAT …)
+STAT_VALUE_VPX = 28.0          # grid value
 
 VIRTUAL_SS_PERCENTAGE = 0.01   # AccuracyCircle: the reserved SS notch
 
@@ -154,17 +163,67 @@ FOR_RANK = {
     "A": _hex("88da20"),   # ScoreRank.A
     "S": _hex("02b5c3"),   # ScoreRank.S / SH
     "SS": _hex("de31ae"),  # ScoreRank.X / XH  (SS)
-    # F = FAIL: lazer's ScoreRank enum has no F (it bottoms at D), but
-    # osu!STABLE shows a red F for a failed play — the owner's pick. Reuse
-    # the ForRank fail red (== ScoreRank.D ff5a5a) for the centre letter +
-    # its rank glow; target_arc_value caps a non-SS at the virtual-SS notch.
-    "F": _hex("ff5a5a"),   # osu!stable fail red
+    # F = FAIL: OsuColour.ForRank returns Gray 3f3f3f for ScoreRank.F — the
+    # EXACT lazer value (used for the centre letter + its glow on a failed
+    # play). target_arc_value caps a non-SS at the virtual-SS notch.
+    "F": _hex("3f3f3f"),   # OsuColour.ForRank(ScoreRank.F)
 }
 # alias the lazer rank-letter keys the meta layer may hand us
 FOR_RANK["X"] = FOR_RANK["SS"]
 FOR_RANK["SSH"] = FOR_RANK["SS"]
 FOR_RANK["XH"] = FOR_RANK["SS"]
 FOR_RANK["SH"] = FOR_RANK["S"]
+
+# lazer OsuColour.ForModType(ModType) — the mod-icon HEXAGON background colour
+# (osu.Game/Rulesets/UI/ModIcon.cs sets the icon Colour = colours.ForModType).
+# EXACT hexes from OsuColour.cs; replaces the old 3-way HUD text-pill palette.
+FOR_MOD_TYPE = {
+    "DifficultyReduction": _hex("b2ff66"),   # lime   (EZ, NF, HT, DC)
+    "DifficultyIncrease": _hex("ff6666"),    # red    (HR, DT, NC, HD, FL, …)
+    "Conversion": _hex("8c66ff"),            # purple (DA, CL, RD, MR, …)
+    "Automation": _hex("66ccff"),            # blue   (RX, AP, SO, AT, CN)
+    "Fun": _hex("ff66ab"),                   # pink   (WU, WD, BR, MG, …)
+    "System": _hex("ffcc22"),                # yellow (TD, SV2)
+}
+
+# acronym -> ModType so a mod hexagon picks its ForModType colour. Covers the
+# full lazer std set (legacy bitmask + lazer-only acronyms in meta.lazer_mods);
+# an unknown acronym defaults to DifficultyIncrease (the old pill default).
+_MOD_ACR_TYPE = {
+    "EZ": "DifficultyReduction", "NF": "DifficultyReduction",
+    "HT": "DifficultyReduction", "DC": "DifficultyReduction",
+    "HR": "DifficultyIncrease", "SD": "DifficultyIncrease",
+    "PF": "DifficultyIncrease", "DT": "DifficultyIncrease",
+    "NC": "DifficultyIncrease", "HD": "DifficultyIncrease",
+    "FL": "DifficultyIncrease", "BL": "DifficultyIncrease",
+    "ST": "DifficultyIncrease", "AC": "DifficultyIncrease",
+    "RX": "Automation", "AP": "Automation", "SO": "Automation",
+    "AT": "Automation", "CN": "Automation",
+    "TP": "Conversion", "DA": "Conversion", "CL": "Conversion",
+    "RD": "Conversion", "MR": "Conversion", "AL": "Conversion",
+    "SG": "Conversion", "TC": "Conversion",
+    "TR": "Fun", "WG": "Fun", "SI": "Fun", "GR": "Fun", "DF": "Fun",
+    "WU": "Fun", "WD": "Fun", "BR": "Fun", "AD": "Fun", "MU": "Fun",
+    "NS": "Fun", "MG": "Fun", "RP": "Fun", "BU": "Fun", "SY": "Fun",
+    "DP": "Fun", "BM": "Fun",
+    "TD": "System", "V2": "System", "SV2": "System",
+}
+
+
+def mod_type_color(acr: str) -> tuple[float, float, float]:
+    """The mod hexagon background — OsuColour.ForModType for `acr`'s ModType,
+    defaulting to DifficultyIncrease (red) for an unknown acronym."""
+    t = _MOD_ACR_TYPE.get((acr or "").upper(), "DifficultyIncrease")
+    return FOR_MOD_TYPE[t]
+
+
+def mod_icon_text_color(bg: tuple[float, float, float]
+                        ) -> tuple[float, float, float]:
+    """ModIcon acronym colour = Interpolation.ValueAt(0.1, Black, bg): 10 % of
+    the way from black to the background — a near-black tint of the hexagon's
+    hue (dark acronym on the bright icon, the osu! look)."""
+    return (bg[0] * 0.1, bg[1] * 0.1, bg[2] * 0.1)
+
 
 # AccuracyCircle.GRADE_SPACING_PERCENTAGE = 2.0 / 360 — GradedCircles insets
 # each band by half of this on each side, opening the boundary notches.
@@ -179,13 +238,17 @@ ARC_GRAD_BOT = _hex("BAFFA9")
 
 # accuracy-circle geometry as a fraction of the (square) bake canvas S.
 # Outer thick achieved arc, thin inner graded rank ring, badge pills outside.
-ACC_ARC_R = 0.350         # achieved-arc centreline radius
-ACC_ARC_W = 0.066         # achieved-arc thickness
-ACC_GRAD_R = 0.293        # inner graded-ring centreline (≈0.8× → sits inside)
-ACC_GRAD_W = 0.020        # inner graded-ring thickness (thin)
-ACC_BADGE_R = 0.435       # badge-pill centre radius (outside the arc)
-ACC_BADGE_W = 0.088       # badge-pill width
-ACC_BADGE_H = 0.050       # badge-pill height
+# Proportions ported from AccuracyCircle.cs' relative InnerRadii: the achieved
+# accuracy arc is thick (InnerRadius 0.2), the graded rank ring thin (RANK_
+# CIRCLE_RADIUS 0.05) and concentric at the arc's OUTER rim; the RankBadges
+# (28×14, 2:1) ride just outside it.
+ACC_ARC_R = 0.350         # achieved-arc centreline radius (fraction of canvas)
+ACC_ARC_W = 0.070         # achieved-arc thickness — 0.070/0.35 = lazer InnerRadius 0.2
+ACC_GRAD_R = 0.393        # graded rank-ring centreline — hugs the arc's outer rim
+ACC_GRAD_W = 0.015        # graded rank-ring thickness (thin, lazer RANK 0.05)
+ACC_BADGE_R = 0.443       # RankBadge ride radius (just outside the graded ring)
+ACC_BADGE_W = 0.090       # RankBadge width  (lazer 28 → 2× height)
+ACC_BADGE_H = 0.045       # RankBadge height (lazer 14)
 
 # results-screen text weights (Nunito variable-font `wght`, our lazer
 # OsuFont.Torus stand-in). Body/labels are Medium; the big rolling score is
@@ -254,6 +317,22 @@ def ease_out_quint(p: float) -> float:
 def ease_out_cubic(p: float) -> float:
     p = _clamp01(p)
     return 1.0 - (1.0 - p) ** 3
+
+
+def ease_out_pow10(p: float) -> float:
+    """Easing.OutPow10 — AccuracyCircle's ACCURACY_TRANSFORM_EASING (the
+    accuracy arc fill, the score roll, the rank circles/badges). 1-(1-p)^10:
+    an aggressive decel that is ~99.9% complete by p=0.5, so the 3 s sweep
+    reads as a fast punch that eases into its final degree of a percent."""
+    p = _clamp01(p)
+    return 1.0 - (1.0 - p) ** 10
+
+
+def ease_out_quad(p: float) -> float:
+    """Easing.OutQuad — the stat counters (accuracy/combo/pp) roll. Short +
+    OutQuad so a non-rounding accuracy (99.99%) doesn't visibly stick short."""
+    p = _clamp01(p)
+    return 1.0 - (1.0 - p) ** 2
 
 
 def grade_bands() -> list[tuple[float, float, str]]:
@@ -676,22 +755,90 @@ def bake_star(px: int, color):
     return _to_rgba(big)
 
 
+# mod-icon geometry — lazer's ModIcon hexagon (the 131×92 mod-icon asset) is
+# drawn procedurally here (the ppy asset is CC-BY-NC): a horizontal hexagon
+# (flat top/bottom, pointed left/right) with softly-rounded corners, filled
+# with the ForModType colour, the acronym centred in a heavy near-black font.
+MOD_HEX_ASPECT = 131.0 / 92.0        # lazer mod-icon hexagon w:h
+
+
+def _hexagon_points(w: float, h: float):
+    """The 6 vertices of a horizontal hexagon (flat top/bottom, pointed
+    left/right) in a w×h box — the lazer mod-icon shape."""
+    x = w * 0.235                     # inset of the flat top/bottom edges
+    return [(0.0, h / 2.0), (x, 0.0), (w - x, 0.0),
+            (w, h / 2.0), (w - x, h), (x, h)]
+
+
+def bake_mod_hexagon(acronym: str, bg, px_h: int, loader, cog: bool = False,
+                     ss: int = TEXT_SS):
+    """One mod icon: a rounded ForModType-coloured HEXAGON with the acronym
+    centred in a heavy near-black font (lazer ModIcon). `px_h` = hexagon height
+    in px; width follows MOD_HEX_ASPECT, widening if a long acronym needs it.
+    `cog` draws a small settings gear (a mod with non-default settings, e.g. a
+    custom clock rate). Supersampled at `px_h*ss` then LANCZOS-downscaled — the
+    hexagon edge + acronym stay crisp through the ≥1080p results bake. Returns
+    (rgba, w, h)."""
+    from PIL import ImageFilter
+    ss = max(int(ss), 1)
+    H = max(int(px_h), 12)
+    txt_px = max(int(round(H * 0.42)), 8)
+    fg = mod_icon_text_color(bg)
+    Hb = H * ss
+    fb = loader(txt_px * ss)
+    try:
+        bx0, by0, bx1, by1 = fb.getbbox(acronym)
+    except AttributeError:
+        bx1, by1 = fb.getsize(acronym); bx0 = by0 = 0   # type: ignore
+    twb, thb = max(bx1 - bx0, 1), max(by1 - by0, 1)
+    Wb = max(int(round(Hb * MOD_HEX_ASPECT)), twb + int(H * 0.66 * ss))
+    W = max(int(round(Wb / ss)), 12)
+    # rounded-hexagon mask (blur + 0.5 threshold rounds the corners uniformly
+    # while holding the shape; LANCZOS downscale re-adds smooth edge AA)
+    corner = max(Hb * 0.13, 2.0)
+    mask = Image.new("L", (Wb, Hb), 0)
+    ImageDraw.Draw(mask).polygon(_hexagon_points(Wb - 1, Hb - 1), fill=255)
+    mask = mask.filter(ImageFilter.GaussianBlur(corner)).point(
+        lambda a: 255 if a >= 128 else 0)
+    img = Image.new("RGBA", (Wb, Hb), (0, 0, 0, 0))
+    bgc = tuple(int(round(c * 255)) for c in bg)
+    img.paste(Image.new("RGBA", (Wb, Hb), (*bgc, 255)), (0, 0), mask)
+    d = ImageDraw.Draw(img)
+    fgc = tuple(int(round(c * 255)) for c in fg)
+    d.text(((Wb - twb) / 2 - bx0, (Hb - thb) / 2 - by0), acronym, font=fb,
+           fill=(*fgc, 255))
+    if cog:
+        _mod_cog(d, int(Wb - Hb * 0.30), int(Hb * 0.26), Hb * 0.15, fg)
+    img = img.resize((W, H), Image.LANCZOS)
+    return _to_rgba(img), W, H
+
+
+def _mod_cog(d, cx, cy, r, color) -> None:
+    """A tiny settings gear (a mod carrying non-default settings), drawn in the
+    acronym colour at the icon's upper-right — lazer's ModIcon cog indicator."""
+    c = tuple(int(round(v * 255)) for v in color)
+    for i in range(6):
+        ang = math.radians(i * 60)
+        d.line([(cx, cy), (cx + r * 1.5 * math.cos(ang),
+                           cy + r * 1.5 * math.sin(ang))],
+               fill=(*c, 255), width=max(int(r * 0.55), 1))
+    d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(*c, 255))
+
+
 def bake_accuracy_base(px: int, ss: int = SHAPE_SS):
-    """The AccuracyCircle background, ported 1:1 (osu.Game/Screens/Ranking/
-    Expanded/Accuracy/{AccuracyCircle,GradedCircles,RankBadge}.cs):
+    """The AccuracyCircle background, ported from osu.Game/Screens/Ranking/
+    Expanded/Accuracy/{AccuracyCircle,GradedCircles}.cs:
 
-      * a dim gray "Background circle" (full ring) behind the achieved arc;
-      * the THIN inner GradedCircles rank ring — the ForRank bands
-        (D→C→B→A→S→X) with the GRADE_SPACING notches, sitting INSIDE the
-        achieved arc (≈0.8× radius);
-      * the six RankBadge pills OUTSIDE the ring, each at its band's
-        Interpolation.Lerp visual position (rank_badge_positions) so they
-        spread cleanly (D lower-right … S/SS top).
+      * a dim gray "Background circle" (OsuColour.Gray(47) @ 0.5), full ring;
+      * the THIN GradedCircles rank ring — the ForRank bands (D→C→B→A→S→X,
+        InnerRadius RANK_CIRCLE_RADIUS 0.05) with the GRADE_SPACING notches,
+        concentric at the achieved arc's OUTER rim.
 
-    Baked once (accuracy-independent). The bright cyan→green achieved arc is
-    a separate sprite (bake_accuracy_arc) drawn over this. Supersampled at
-    `px*ss` then LANCZOS-downscaled so the ring notches and the RankBadge
-    letters stay smooth when the panel is viewed zoomed."""
+    The RankBadges are NOT baked here — they are separate sprites that fade in
+    (RankBadge.Appear, 50 ms) as the sweep passes each one. Baked once
+    (accuracy-independent). The bright cyan→green achieved arc is a separate
+    sprite (bake_accuracy_arc) drawn over this. Supersampled at `px*ss` then
+    LANCZOS-downscaled so the ring notches stay smooth when viewed zoomed."""
     S_target = max(int(px), 64)
     ss = max(int(ss), 1)
     S = S_target * ss
@@ -704,7 +851,7 @@ def bake_accuracy_base(px: int, ss: int = SHAPE_SS):
     W = max(int(round(ACC_ARC_W * S)), 2)
     d.arc([cx - R, cy - R, cx + R, cy + R], 0, 360, fill=(47, 47, 47, 128),
           width=W)
-    # thin inner GradedCircles rank ring (ForRank bands + boundary notches)
+    # thin GradedCircles rank ring (ForRank bands + boundary notches)
     Rg = ACC_GRAD_R * S
     Wg = max(int(round(ACC_GRAD_W * S)), 2)
     gbox = [cx - Rg, cy - Rg, cx + Rg, cy + Rg]
@@ -714,38 +861,48 @@ def bake_accuracy_base(px: int, ss: int = SHAPE_SS):
         a1 = acc_to_angle_deg(hi - half_gap)
         if a1 > a0:
             d.arc(gbox, a0, a1, fill=(*col, 255), width=Wg)
-    # RankBadge pills at their Lerp visual positions, outside the ring
-    for vis, g in rank_badge_positions():
-        ang = math.radians(acc_to_angle_deg(vis))
-        bx = cx + ACC_BADGE_R * S * math.cos(ang)
-        by = cy + ACC_BADGE_R * S * math.sin(ang)
-        _badge_pill(img, bx, by, S, g)
     if ss != 1:
         img = img.resize((S_target, S_target), Image.LANCZOS)
     return _to_rgba(img)
 
 
-def _badge_pill(img, cx, cy, S, grade) -> None:
-    """One RankBadge: a small rounded pill in the rank's ForRank colour with
-    the rank letter, plus a soft drop shadow (the DrawableRank look)."""
+def bake_rank_badge(px_h: int, grade: str, ss: int = TEXT_SS):
+    """One RankBadge as a standalone sprite (so it can fade in with
+    RankBadge.Appear): a small rounded pill in the rank's ForRank colour with
+    the rank letter in a contrasting shade + a soft drop shadow. `px_h` = badge
+    height; width = 2× (lazer 28×14). Returns (rgba, w, h)."""
+    ss = max(int(ss), 1)
+    H = max(int(px_h), 8)
+    W = int(round(H * (ACC_BADGE_W / ACC_BADGE_H)))
+    Hb, Wb = H * ss, W * ss
+    pad = max(int(H * 0.28) * ss, 3)          # room for the shadow
+    img = Image.new("RGBA", (Wb + 2 * pad, Hb + 2 * pad), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
-    w = ACC_BADGE_W * S
-    h = ACC_BADGE_H * S
+    x0, y0 = pad, pad
     col = tuple(int(round(c * 255)) for c in FOR_RANK.get(grade,
                                                           (0.8, 0.8, 0.85)))
-    sh = max(h * 0.10, 1.0)
-    d.rounded_rectangle([cx - w / 2, cy - h / 2 + sh, cx + w / 2,
-                         cy + h / 2 + sh], radius=h / 2, fill=(0, 0, 0, 70))
-    d.rounded_rectangle([cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2],
-                        radius=h / 2, fill=(*col, 255))
-    label = "SS" if grade in ("SS", "X", "XH") else grade
-    font = _load_font(max(int(h * (0.72 if len(label) == 1 else 0.56)), 6))
+    sh = max(Hb * 0.12, 1.0)
+    d.rounded_rectangle([x0, y0 + sh, x0 + Wb, y0 + Hb + sh], radius=Hb / 2,
+                        fill=(0, 0, 0, 90))
+    d.rounded_rectangle([x0, y0, x0 + Wb, y0 + Hb], radius=Hb / 2,
+                        fill=(*col, 255))
+    label = "SS" if grade in ("SS", "X", "XH", "SSH") else grade
+    # letter in the ForRank hue darkened (the DrawableRank look): dark on the
+    # bright badge, matching the mod-icon acronym treatment.
+    lum = 0.299 * col[0] + 0.587 * col[1] + 0.114 * col[2]
+    fg = (255, 255, 255, 255) if lum < 150 else (
+        int(col[0] * 0.25), int(col[1] * 0.25), int(col[2] * 0.25), 255)
+    fpx = max(int(Hb * (0.74 if len(label) == 1 else 0.58)), 6)
+    font = _nunito_loader(800)(fpx)
     try:
-        x0, y0, x1, y1 = font.getbbox(label)
+        lx0, ly0, lx1, ly1 = font.getbbox(label)
     except AttributeError:
-        x1, y1 = font.getsize(label); x0 = y0 = 0    # type: ignore
-    d.text((cx - (x1 - x0) / 2 - x0, cy - (y1 - y0) / 2 - y0), label,
-           font=font, fill=(255, 255, 255, 245))
+        lx1, ly1 = font.getsize(label); lx0 = ly0 = 0    # type: ignore
+    d.text((x0 + (Wb - (lx1 - lx0)) / 2 - lx0,
+            y0 + (Hb - (ly1 - ly0)) / 2 - ly0), label, font=font, fill=fg)
+    img = img.resize(((Wb + 2 * pad) // ss, (Hb + 2 * pad) // ss),
+                     Image.LANCZOS)
+    return _to_rgba(img), float(img.width), float(img.height)
 
 
 _ARC_GRAD_CACHE: dict = {}
@@ -1049,10 +1206,13 @@ class ResultsData:
     perf: object | None                    # pp.PerfBreakdown | None
     pb: dict | None                        # query_pb() row | None
     leaderboard: object | None = None      # leaderboard.BoardData | None
-    # the CURRENT player's Discord user id (render DB → cli looks it up by
-    # player_name), so the FEATURED card resolves a real avatar via the same
-    # path the flanks use. None (fresh render / unlinked player) → procedural.
-    discord_user_id: str | None = None
+    # the FEATURED (current) player's REAL osu! avatar PNG bytes, supplied by
+    # the service via --featured-avatar-png (osu! user → avatar_url → PNG), so
+    # the featured card shows the player's own pfp. None → procedural chip. The
+    # old render-DB Discord-id field was removed: it could resolve to the SITE
+    # OWNER's pfp on the featured card (bug 2026-07-11). Flank cards keep their
+    # own Discord avatars (board entries' discord_user_id, untouched).
+    featured_avatar_png: bytes | None = None
     # played mods for the badge row: the FULL lazer acronym set
     # (meta.lazer_mods, CL/DA/WU/… in the .osr blob's display order) + the
     # custom clock rate (meta.rate_override) for the "DT 1.3×" suffix. Default
@@ -1076,6 +1236,8 @@ class LazerResultsScreen:
         # (`argon_font` kept for signature compat; no longer selects the face.)
         self._font_loader = _load_argon_font                 # Nunito Medium
         self._score_loader = _nunito_loader(RESULTS_SCORE_WEIGHT)  # Nunito Light
+        # heavy weight for the mod-icon acronyms (lazer's Venera Black stand-in)
+        self._mod_loader = _nunito_loader(900)               # Nunito Black-ish
         self.k = self.h / UH
         self.uw = self.w / self.k              # virtual width
         # the scene feeds age in MAP ms; the timeline is WALL ms → divide by
@@ -1185,39 +1347,17 @@ class LazerResultsScreen:
         img = img.resize((W, H), Image.LANCZOS)
         return (self._put(_to_rgba(img)), float(W), float(H))
 
-    def _bake_mod_pill(self, text: str, color):
-        """A single played-mod badge for the results panel: a rounded,
-        category-coloured pill with the acronym (+ any custom-rate suffix like
-        "DT 1.3×") in white. Fixed height (MOD_PILL_VH), width fits the text —
-        so a badge row lines up, mirroring the gameplay HUD mod pills but
-        sized for the ranking screen. Supersampled at TEXT_SS× and
-        LANCZOS-downscaled so the edge/glyphs stay crisp through the ≥1080p
-        results bake. Returns (key, w, h)."""
-        k = self.k
-        H = max(int(round(MOD_PILL_VH * k)), 12)
-        fpx = max(int(round(MOD_PILL_TEXT_VPX * k)), 8)
-        padx = int(round(fpx * 0.62))
-        ss = TEXT_SS
-        Hb = H * ss
-        fb = self._font_loader(fpx * ss)
-        try:
-            bx0, by0, bx1, by1 = fb.getbbox(text)
-        except AttributeError:
-            bx1, by1 = fb.getsize(text); bx0 = by0 = 0    # type: ignore
-        twb, thb = bx1 - bx0, by1 - by0
-        padxb = padx * ss
-        Wb = twb + 2 * padxb
-        W = max(int(round(Wb / ss)), 8)
-        img = Image.new("RGBA", (Wb, Hb), (0, 0, 0, 0))
-        dd = ImageDraw.Draw(img)
-        bgc = tuple(int(round(c * 255)) for c in color)
-        dd.rounded_rectangle([0, 0, Wb - 1, Hb - 1], radius=Hb // 2,
-                             fill=(*bgc, MOD_PILL_ALPHA))
-        # vertically centre the glyphs within the fixed-height pill
-        ty = (Hb - thb) // 2 - by0
-        dd.text((padxb - bx0, ty), text, font=fb, fill=(255, 255, 255, 255))
-        img = img.resize((W, H), Image.LANCZOS)
-        return (self._put(_to_rgba(img)), float(W), float(H))
+    def _bake_mod_icon(self, acr: str, has_settings: bool):
+        """A single played-mod ICON for the results panel — lazer's ModIcon:
+        a ForModType-coloured HEXAGON with the bare acronym centred in a heavy
+        near-black font, plus a small settings cog when the mod carries
+        non-default settings (e.g. a custom clock rate). Replaces the old
+        category text-pill. Fixed height (MOD_ICON_VH), width follows the
+        hexagon aspect. Returns (key, w, h)."""
+        rgba, w, h = bake_mod_hexagon(
+            acr, mod_type_color(acr), max(int(round(MOD_ICON_VH * self.k)), 14),
+            self._mod_loader, cog=has_settings)
+        return (self._put(rgba), float(w), float(h))
 
     def _bake_static(self) -> None:
         k = self.k
@@ -1240,11 +1380,14 @@ class LazerResultsScreen:
         self.avatar_key = self._put(bake_avatar(
             int(52 * k), d.player or "?", self._featured_avatar_bytes()))
         content_w = self.PANEL_W - 48.0                 # panel inner width
-        self.name_row = self._fit_text(d.player or "Player", 30, (1, 1, 1),
+        # fonts tightened toward lazer's ExpandedPanelMiddleContent hierarchy
+        # (title 20 / artist 14 in the 360-wide ScorePanel → scaled into our
+        # 560-wide panel: ×1.55 ≈ title 30 / artist 21; name shares the row).
+        self.name_row = self._fit_text(d.player or "Player", 27, (1, 1, 1),
                                        content_w - 64.0)   # avatar+gap budget
-        self.title_row = self._fit_text(d.title or "", 34, (0.95, 0.96, 1.0),
+        self.title_row = self._fit_text(d.title or "", 30, (0.95, 0.96, 1.0),
                                         content_w)
-        self.artist_row = self._fit_text(d.artist or "", 24,
+        self.artist_row = self._fit_text(d.artist or "", 21,
                                          (0.72, 0.75, 0.85), content_w)
         # accuracy circle
         self.ACC_DISP = 380.0                 # canvas display size (virtual)
@@ -1257,21 +1400,29 @@ class LazerResultsScreen:
             FOR_RANK.get(d.grade, (0.8, 0.8, 0.85)), self._font_loader)
         self.grade_letter = (self._put(_gl_rgba), float(_gl_w), float(_gl_h))
         self.target_arc = target_arc_value(self.acc_frac, d.grade)
+        # RankBadge sprites (28×14) + their sweep positions, so each fades in
+        # (RankBadge.Appear, 50 ms) as the accuracy arc passes it, instead of
+        # being baked static into the ring. (bh_px = badge height in screen px.)
+        bh_px = max(int(round(self.ACC_DISP * k * ACC_BADGE_H)), 8)
+        self._badges = []
+        for vis, g in rank_badge_positions():
+            brgba, bw, bh = bake_rank_badge(bh_px, g)
+            self._badges.append((self._put(brgba), bw, bh, vis))
         # score baked lazily (rolls)
         self.score_row = self._score_text(0)
         # star-rating pill (procedural star icon — the font has no ★ glyph),
         # then diff name + creator
         self.star_pill = self._bake_star_pill()
-        # played-mod badge row (lazer starAndModDisplay ModDisplay): one
-        # category-coloured pill per active mod, from the SAME build_mod_pills
-        # the gameplay HUD uses (full lazer set incl. CL/DA/WU + custom-rate
-        # "DT 1.3×"), so the badges match the HUD. Nomod → empty → no row.
+        # played-mod ICON row (lazer starAndModDisplay ModDisplay): one
+        # ForModType-coloured HEXAGON per active mod (bare acronym + a settings
+        # cog when the mod carries a non-default clock rate), from the SAME
+        # build_mod_pills the gameplay HUD uses. Nomod → empty → no row.
         _mp = build_mod_pills(d.mods, d.lazer_mods, d.rate_override)
         self.mod_pill_texts = tuple(p.text for p in _mp)   # labels (introspect)
         self.mod_pills = [
-            self._bake_mod_pill(p.text, mod_pill_color(p.acr)) for p in _mp]
-        self.diff_row = self._text(_clip(d.diff_name, 28), 26, (0.9, 0.92, 1.0))
-        self.creator_row = self._text(f"mapped by {_clip(d.creator, 22)}", 22,
+            self._bake_mod_icon(p.acr, p.text != p.acr) for p in _mp]
+        self.diff_row = self._text(_clip(d.diff_name, 28), 25, (0.9, 0.92, 1.0))
+        self.creator_row = self._text(f"mapped by {_clip(d.creator, 22)}", 19,
                                       (0.65, 0.68, 0.78))
         # stats grid
         pp_txt = (f"{d.pp:.0f}" if d.pp is not None else "--")
@@ -1299,7 +1450,20 @@ class LazerResultsScreen:
                         for lbl, val, col in self._stat_b]
         self._grid_c = [self._grid_cell(lbl, val, col)
                         for lbl, val, col in self._stat_c]
-        self.date_row = self._text(f"Played on {d.date_str}", 20,
+        # roll metadata for the top-3 stat VALUES (accuracy / max-combo / pp):
+        # lazer's StatisticCounter rolls them over dur/2 (1500 ms) OutQuad. Each
+        # holds its value texture key so _roll_stats re-uploads in place. pp
+        # with no rosu ("--") is na → static.
+        self._roll_cells = [
+            (0, float(d.acc_pct), lambda v: f"{v:.2f}%",
+             (0.95, 0.96, 1.0), False),
+            (1, float(d.max_combo), lambda v: f"{int(round(v))}x",
+             (0.95, 0.96, 1.0), False),
+            (2, float(d.pp or 0.0), lambda v: f"{v:.0f}",
+             (0.6, 0.86, 1.0), d.pp is None),
+        ]
+        self._stats_rolled = False
+        self.date_row = self._text(f"Played on {d.date_str}", 18,
                                    (0.6, 0.63, 0.72))
 
         # --- stats panels (stage 2) -----------------------------------------
@@ -1379,23 +1543,15 @@ class LazerResultsScreen:
         self._bake_leaderboard()
 
     def _featured_avatar_bytes(self):
-        """Discord avatar PNG bytes for the CURRENT (featured) player, or None
-        → the procedural chip. Resolved via the flank cards' resolve_avatar_
-        bytes (on-disk cache → bot fetch through the SOCKS5 proxy), keyed on
-        the render-DB discord_user_id carried on ResultsData (looked up by
-        player_name in cli). None when the player has no DB id (a fresh render
-        not yet in the DB, or an unlinked player) or the module/fetch is
-        unavailable — the featured card then shows the procedural chip, exactly
-        as before. NEVER blocks or raises (the same graceful path as the
-        flanks)."""
-        did = getattr(self.d, "discord_user_id", None)
-        if not did:
-            return None
-        try:
-            from .leaderboard import resolve_avatar_bytes
-            return resolve_avatar_bytes(did)
-        except Exception:  # noqa: BLE001 — avatars never break a bake
-            return None
+        """PNG bytes of the FEATURED (current) player's REAL osu! avatar,
+        supplied by the service via --featured-avatar-png (osu! user →
+        avatar_url → PNG) and carried on ResultsData.featured_avatar_png, or
+        None → the procedural username chip. The old render-DB Discord-id path
+        was REMOVED: a player whose name maps (stale/colliding) to a linked
+        Discord account could resolve to the SITE OWNER's pfp on the featured
+        card (bug 2026-07-11). The flank cards keep their own Discord avatars
+        (board entries' discord_user_id — untouched)."""
+        return getattr(self.d, "featured_avatar_png", None)
 
     def _bake_leaderboard(self) -> None:
         """Bake the flanking ranked cards + the rank-moment banner (owner
@@ -1450,8 +1606,8 @@ class LazerResultsScreen:
             self._lb_moment = (self._put(rgba), w, h)
 
     def _grid_cell(self, label, value, color):
-        return (self._text(label, 16, (0.6, 0.63, 0.73)),
-                self._text(value, 32, color))
+        return (self._text(label, STAT_LABEL_VPX, (0.6, 0.63, 0.73)),
+                self._text(value, STAT_VALUE_VPX, color))
 
     def _score_text(self, value: int):
         rgba, w, h = bake_text(f"{value:,}", int(64 * self.k), (1, 1, 1),
@@ -1538,9 +1694,10 @@ class LazerResultsScreen:
         out.append(Sprite(cx, circ_cy, acc_d, acc_d, self.acc_base_key,
                           (1, 1, 1, a)))
         self._draw_acc_arc(out, age_ms, cx, circ_cy, acc_d, a)
+        self._draw_badges(out, age_ms, cx, circ_cy, acc_d, a)
         self._draw_grade(out, age_ms, cx, circ_cy, a)
         y += acc_d + 6 * k
-        # score (rolls with the sweep)
+        # score (rolls with the sweep — TotalScoreCounter, OutPow10)
         self._roll_score(age_ms)
         y += self._blit(out, self.score_row, cx, y, a) + 12 * k
         # played-mod badge row (lazer starAndModDisplay, just under the score).
@@ -1551,7 +1708,8 @@ class LazerResultsScreen:
             y += mod_h + 14 * k
         # star / diff / creator centred row
         y += self._draw_star_row(out, cx, y, a) + 22 * k
-        # stats grid
+        # stats grid — top-3 values roll (accuracy / max-combo / pp, OutQuad)
+        self._roll_stats(age_ms)
         y += self._draw_grid_row(out, self._grid_a, cx, y, a,
                                  self.PANEL_W * 0.86) + 16 * k
         y += self._draw_grid_row(out, self._grid_b, cx, y, a,
@@ -1561,18 +1719,17 @@ class LazerResultsScreen:
         self._blit(out, self.date_row, cx, y, a)
 
     def _draw_mod_row(self, out, cx, top_y, a) -> float:
-        """The played-mod badge row, centred at `cx` with its TOP at `top_y`.
+        """The played-mod ICON row, centred at `cx` with its TOP at `top_y`.
         Ported placement: lazer's ExpandedPanelMiddleContent puts the mods in
         a `starAndModDisplay` FillFlowContainer (StarRatingDisplay + ModDisplay)
-        directly under the TotalScoreCounter; we give the badges their own
-        centred row in that same spot (our star row already carries the diff
-        name + creator that lazer's row does not). Category-coloured via the
-        HUD's mod_pill_color. Empty (nomod / no lazer mods) → 0 height, so the
-        panel is byte-identical to the pre-badge layout. Returns row height."""
+        directly under the TotalScoreCounter; we give the ForModType-coloured
+        mod hexagons their own centred row in that same spot. Empty (nomod / no
+        lazer mods) → 0 height, so the panel is byte-identical to the no-mods
+        layout. Returns row height."""
         if not self.mod_pills:
             return 0.0
         k = self.k
-        gap = MOD_PILL_GAP_V * k
+        gap = MOD_ICON_GAP_V * k
         total = sum(w for _key, w, _h in self.mod_pills) \
             + gap * (len(self.mod_pills) - 1)
         h = max(hh for _key, _w, hh in self.mod_pills)
@@ -1616,10 +1773,16 @@ class LazerResultsScreen:
             row_h = max(row_h, lh + 6 * k + vh)
         return row_h
 
-    def _draw_acc_arc(self, out, age_ms, cx, cy, acc_d, a) -> None:
-        sweep = ease_out_cubic((age_ms - SWEEP_DELAY_MS) / SWEEP_MS) \
+    def _sweep(self, age_ms) -> float:
+        """The accuracy-transform progress 0→1 — Easing.OutPow10 over
+        ACCURACY_TRANSFORM_DURATION after ACCURACY_TRANSFORM_DELAY. Shared by
+        the arc fill, the score roll and the RankBadge reveal so they move
+        together exactly as in AccuracyCircle.cs."""
+        return ease_out_pow10((age_ms - SWEEP_DELAY_MS) / SWEEP_MS) \
             if age_ms > SWEEP_DELAY_MS else 0.0
-        prog = self.target_arc * sweep
+
+    def _draw_acc_arc(self, out, age_ms, cx, cy, acc_d, a) -> None:
+        prog = self.target_arc * self._sweep(age_ms)
         bucket = round(prog, 3)
         if bucket != self._arc_bucket:
             rgba = bake_accuracy_arc(int(self.ACC_DISP * self.k), prog,
@@ -1631,22 +1794,72 @@ class LazerResultsScreen:
             self._arc_bucket = bucket
         out.append(Sprite(cx, cy, acc_d, acc_d, self._arc_key, (1, 1, 1, a)))
 
+    def _draw_badges(self, out, age_ms, cx, cy, acc_d, a) -> None:
+        """The six RankBadges (D…SS) riding just outside the ring, each fading
+        in (RankBadge.Appear, 50 ms) as the accuracy sweep passes its position.
+        A badge above the achieved accuracy appears once the sweep completes.
+        Angle = acc_to_angle_deg(vis), equivalent to lazer's
+        −π/2 − (1−displayPosition)·2π."""
+        sweep = self._sweep(age_ms)
+        window = BADGE_FADE_MS / SWEEP_MS
+        for key, bw, bh, vis in self._badges:
+            # time (as a sweep fraction) at which the arc tip reaches this badge
+            y = min(vis, self.target_arc) / self.target_arc \
+                if self.target_arc > 1e-6 else 1.0
+            # inverse OutPow10; capped so a badge at/above the achieved accuracy
+            # (e.g. SS on a non-SS play) still fades fully in by sweep = 1.
+            reach = min(1.0 - (1.0 - _clamp01(y)) ** 0.1, 1.0 - window)
+            ba = a * _clamp01((sweep - reach) / window)
+            if ba <= 0.003:
+                continue
+            ang = math.radians(acc_to_angle_deg(vis))
+            bx = cx + ACC_BADGE_R * acc_d * math.cos(ang)
+            by = cy + ACC_BADGE_R * acc_d * math.sin(ang)
+            out.append(Sprite(bx, by, bw, bh, key, (1, 1, 1, ba)))
+
     def _draw_grade(self, out, age_ms, cx, cy, a) -> None:
-        badge_start = SWEEP_DELAY_MS + SWEEP_MS - 130.0
+        # RankText appears TEXT_APPEAR_DELAY (dur/2) into the sweep, then a
+        # short punch settle (lazer's rankText FadeIn/scale on the S+ path).
+        badge_start = SWEEP_DELAY_MS + TEXT_APPEAR_MS
         if age_ms < badge_start:
             return
         p = ease_out_cubic((age_ms - badge_start) / BADGE_MS)
-        scale = _lerp(1.42, 1.0, p)
-        ga = a * _clamp01(p * 1.4)
+        scale = _lerp(1.25, 1.0, p)
+        ga = a * _clamp01(p * 1.6)
         gk, gw, gh = self.grade_letter
         out.append(Sprite(cx, cy, gw * scale, gh * scale, gk, (1, 1, 1, ga)))
 
     def _roll_score(self, age_ms) -> None:
-        sweep = ease_out_cubic((age_ms - SWEEP_DELAY_MS) / SWEEP_MS) \
-            if age_ms > SWEEP_DELAY_MS else 0.0
-        val = int(round(self.d.score * sweep))
+        # TotalScoreCounter: RollingDuration = ACCURACY_TRANSFORM_DURATION,
+        # RollingEasing = OutPow10 — the score rolls in lock-step with the arc.
+        val = int(round(self.d.score * self._sweep(age_ms)))
         if val != self._score_val:
             self.score_row = self._score_text(val)
+
+    def _roll_stats(self, age_ms) -> None:
+        """Roll the top-3 stat values (accuracy / max-combo / pp) 0→target over
+        STAT_ROLL_MS (dur/2) with Easing.OutQuad, re-uploading each value
+        texture in place. Snaps to the exact target once complete (so a
+        non-rounding accuracy doesn't stick short)."""
+        if not self._roll_cells:
+            return
+        done = age_ms >= SWEEP_DELAY_MS + STAT_ROLL_MS
+        if done and self._stats_rolled:
+            return
+        p = ease_out_quad((age_ms - SWEEP_DELAY_MS) / STAT_ROLL_MS) \
+            if age_ms > SWEEP_DELAY_MS else 0.0
+        vpx = int(STAT_VALUE_VPX * self.k)
+        for gi, target, fmt, color, na in self._roll_cells:
+            if na:
+                continue
+            cur = target if done else target * p
+            rgba, w, h = bake_text(fmt(cur), vpx, color, self._font_loader)
+            vkey = self._grid_a[gi][1][0]
+            self.spr.upload_texture(vkey, rgba)
+            self._grid_a[gi] = (self._grid_a[gi][0],
+                                (vkey, float(w), float(h)))
+        if done:
+            self._stats_rolled = True
 
     # -- stats panels ------------------------------------------------------------
 

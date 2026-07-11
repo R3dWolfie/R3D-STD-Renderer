@@ -520,6 +520,105 @@ def bake_wireframe_dot(width: int = ARGON_SEG_W, height: int = ARGON_SEG_H,
     return rgba
 
 
+# --- Argon counter: REAL `argon-counter` sprites (pixel-exact to lazer) -------
+# The procedural 7-segment bake above (bake_argon_segment / bake_argon_seg_glyphs
+# / bake_wireframe_*) reads a touch too bold/round vs lazer's actual counter.
+# Red OK'd ripping the Argon art, so when the sprite dir is present we load
+# lazer's real `argon-counter-*.png` glyphs (CC-BY-NC — Argon default skin) and
+# use them for the ARGON score/accuracy/combo counters. Missing dir (stripped
+# checkout) → the procedural bake is the fallback (the `or bake_*()` sites in
+# TextureBank). This is the ARGON path ONLY: the legacy / custom-skin score
+# font (lg_* / bake_legacy_font) is a separate texture set and is untouched.
+#
+# lazer's argon-counter is a FIXED-WIDTH square font: every digit ships on a
+# 240x240 canvas (~31 px pad, digit centred), '.' on a narrow 52x240 canvas,
+# and '%'/'x'/'wireframes' on 240x240. We normalise every glyph onto one common
+# square cell so the counter run stays fixed-width — the run advance derives
+# from the reference-glyph aspect (argon_seg_advance = argon_seg_aspect["8"]),
+# which becomes the real square metric so digits render undistorted at
+# ARGON_DIGIT_H. Anchors/heights/right-alignment in hud.py are unchanged (it
+# reads argon_seg_advance dynamically); only the glyph art + true fixed-width
+# spacing change.
+ARGON_COUNTER_DIR = os.path.normpath(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "argon_assets"))
+ARGON_COUNTER_CELL = ARGON_SEG_H          # 240 — common square cell (glyph height)
+
+_ARGON_COUNTER_FILES = {
+    **{ch: f"argon-counter-{ch}.png" for ch in "0123456789"},
+    ".": "argon-counter-dot.png",
+    "%": "argon-counter-percentage.png",
+    "x": "argon-counter-x.png",
+}
+_ARGON_WIREFRAME_FILE = "argon-counter-wireframes.png"
+_ARGON_WIREFRAME_DOT_FILE = "argon-counter-dot.png"
+
+
+def _load_argon_counter_png(name: str) -> np.ndarray | None:
+    """Load one ripped argon-counter sprite as RGBA uint8, or None if the
+    file is absent / unreadable (→ procedural fallback)."""
+    path = os.path.join(ARGON_COUNTER_DIR, name)
+    if not os.path.isfile(path):
+        return None
+    try:
+        im = Image.open(path).convert("RGBA")
+    except Exception:
+        return None
+    return np.asarray(im, dtype=np.uint8).copy()
+
+
+def _argon_counter_cell(im: np.ndarray,
+                        cell: int = ARGON_COUNTER_CELL) -> np.ndarray:
+    """Normalise a real argon-counter sprite onto a `cell`x`cell` square:
+    scaled by height, horizontally centred, RGB forced WHITE (tintable —
+    the counters are drawn with a combo/flash colour), alpha preserved. Keeps
+    every glyph the SAME cell aspect so the run stays fixed-width."""
+    h, w = im.shape[:2]
+    if h != cell:
+        new_w = max(1, int(round(w * cell / h)))
+        im = np.asarray(Image.fromarray(im).resize((new_w, cell),
+                                                    Image.LANCZOS),
+                        dtype=np.uint8)
+        h, w = im.shape[:2]
+    if w > cell:                                # defensive (real art is <= cell)
+        new_h = max(1, int(round(h * cell / w)))
+        im = np.asarray(Image.fromarray(im).resize((cell, new_h),
+                                                    Image.LANCZOS),
+                        dtype=np.uint8)
+        h, w = im.shape[:2]
+    canvas = np.zeros((cell, cell, 4), dtype=np.uint8)
+    y0, x0 = (cell - h) // 2, (cell - w) // 2
+    canvas[y0:y0 + h, x0:x0 + w] = im
+    canvas[..., 0:3] = 255                      # white → tint does the colour
+    return canvas
+
+
+def load_argon_seg_glyphs() -> dict[str, np.ndarray] | None:
+    """Real lit argon-counter glyph set {char: rgba} (digits + . % x) from
+    the ripped sprite dir, each normalised onto the common square cell.
+    Returns None if ANY sprite is missing → caller falls back to the
+    procedural bake_argon_seg_glyphs()."""
+    out: dict[str, np.ndarray] = {}
+    for ch, name in _ARGON_COUNTER_FILES.items():
+        im = _load_argon_counter_png(name)
+        if im is None:
+            return None
+        out[ch] = _argon_counter_cell(im)
+    return out
+
+
+def load_argon_wireframe_cell() -> np.ndarray | None:
+    """Real all-glyph 'wireframes' ghost backing (WireframeOpacity 0.25),
+    normalised onto the common cell. None → fallback bake_wireframe_cell()."""
+    im = _load_argon_counter_png(_ARGON_WIREFRAME_FILE)
+    return None if im is None else _argon_counter_cell(im)
+
+
+def load_argon_wireframe_dot() -> np.ndarray | None:
+    """Real '.' ghost backing (the dot cell). None → bake_wireframe_dot()."""
+    im = _load_argon_counter_png(_ARGON_WIREFRAME_DOT_FILE)
+    return None if im is None else _argon_counter_cell(im)
+
+
 WEDGE_W = 380.0                 # ArgonWedgePiece size in the default layout
 WEDGE_H = 72.0
 WEDGE_SHEAR = 0.8               # osu!framework Shear = (0.8, 0): x' = x - 0.8y
@@ -1128,19 +1227,28 @@ class TextureBank:
 
         # --- Argon HUD set (skinless default) --------------------------------
         renderer.upload_texture("pill", bake_pill())
-        renderer.upload_texture("argon_wireframe", bake_wireframe_cell())
-        renderer.upload_texture("argon_wireframe_dot", bake_wireframe_dot())
+        # ARGON score/acc/combo counter font: prefer the REAL ripped
+        # `argon-counter` sprites (pixel-exact to lazer); fall back to the
+        # procedural 7-segment bake when argon_assets/ is absent (stripped
+        # checkout). ARGON path ONLY — the legacy / custom-skin score font
+        # (lg_*) below is a separate set and stays byte-identical.
+        seg_glyphs = load_argon_seg_glyphs() or bake_argon_seg_glyphs()
+        wf = load_argon_wireframe_cell()
+        wf = bake_wireframe_cell() if wf is None else wf
+        wf_dot = load_argon_wireframe_dot()
+        wf_dot = bake_wireframe_dot() if wf_dot is None else wf_dot
+        renderer.upload_texture("argon_wireframe", wf)
+        renderer.upload_texture("argon_wireframe_dot", wf_dot)
         renderer.upload_texture("argon_wedge", bake_wedge())
-        wf = bake_wireframe_cell()
         self.wireframe_aspect = wf.shape[1] / wf.shape[0]
-        # procedural 7-segment lit glyphs (same geometry as the wireframe →
-        # lit + ghost align by construction; the phantom-8 fix)
+        # lit glyphs (real argon-counter sprites, else procedural fallback);
+        # lit + ghost share the same cell so they register by construction.
         self.argon_seg_aspect: dict[str, float] = {}
-        for ch, rgba in bake_argon_seg_glyphs().items():
+        for ch, rgba in seg_glyphs.items():
             key = {".": "dot", "%": "pct", "x": "x"}.get(ch, ch)
             renderer.upload_texture(f"aseg_{key}", rgba)
             self.argon_seg_aspect[ch] = rgba.shape[1] / rgba.shape[0]
-        # fixed-width digit advance (7-seg digits are naturally monospace)
+        # fixed-width digit advance (argon-counter digits are monospace)
         self.argon_seg_advance = self.argon_seg_aspect["8"]
 
         # --- legacy-default HUD set (custom-skin fallback, classic look) -----

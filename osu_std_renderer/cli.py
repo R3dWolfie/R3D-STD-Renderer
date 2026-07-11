@@ -265,6 +265,13 @@ def build_parser() -> argparse.ArgumentParser:
                     help="subtle white outline of the playfield bounds: "
                          "'full' = thin border box, 'edges' = corner "
                          "markers only")
+    ap.add_argument("--featured-avatar-png", type=Path, default=None,
+                    help="PNG of the FEATURED (current) player's REAL osu! "
+                         "avatar for the results CENTRE card. Set -> that "
+                         "image is shown; absent -> the procedural username "
+                         "chip. The service passes the player's osu! pfp; the "
+                         "old render-DB Discord-id lookup is GONE, so the "
+                         "featured card can never show the owner's pfp.")
     ap.add_argument("--watermark", default="")
     ap.add_argument("--music-volume", type=int, default=100)
     ap.add_argument("--hitsound-volume", type=int, default=100)
@@ -376,7 +383,6 @@ def _build_lazer_results(spr, settings, beatmap, meta, judgments, hud, fv,
     from .render.lazer_results import (LazerResultsScreen, ResultsData,
                                        query_pb, slider_stats)
     from .render.leaderboard import (build_board, query_leaderboard,
-                                     query_player_discord_id,
                                      rows_from_osu_json)
     from .render.pp import build_performance_breakdown, star_rating
 
@@ -461,18 +467,27 @@ def _build_lazer_results(spr, settings, beatmap, meta, judgments, hud, fv,
                   f"{len(board.left)} left + {len(board.right)} right"
                   f"{moment} ({_src})", file=sys.stderr)
 
-    # featured (centre) card avatar: the CURRENT player's Discord id from the
-    # render DB (mapped by player_name — the .osr carries only the name). The
-    # featured card always shows, so this is looked up regardless of the
-    # leaderboard toggle. None → the procedural chip (a fresh render not yet in
-    # the DB, or an unlinked player). Read-only, fail-soft.
-    featured_did = query_player_discord_id(PB_DB_PATH, meta.player_name,
-                                           meta.beatmap_md5)
-    if featured_did:
-        print(f"avatar: featured player Discord id {featured_did} "
-              "(render DB) — real avatar attempted", file=sys.stderr)
+    # featured (centre) card avatar: the FEATURED (current) player's REAL osu!
+    # avatar PNG, supplied by the service via --featured-avatar-png (it resolves
+    # the osu! user -> avatar_url -> PNG). None -> the procedural username chip.
+    # The old render-DB Discord-id lookup was REMOVED: for a player whose name
+    # maps (stale/colliding) to a linked Discord account it could resolve to the
+    # SITE OWNER's pfp on the featured card (bug 2026-07-11). Fail-soft read.
+    featured_avatar_png = None
+    _fap = getattr(args, "featured_avatar_png", None)
+    if _fap is not None:
+        try:
+            featured_avatar_png = Path(_fap).read_bytes()
+        except OSError as _e:
+            print(f"avatar: featured avatar PNG unreadable ({_e}) -- "
+                  "procedural chip", file=sys.stderr)
+            featured_avatar_png = None
+    if featured_avatar_png:
+        print(f"avatar: featured player osu! avatar "
+              f"({len(featured_avatar_png)}B) -- real osu! pfp",
+              file=sys.stderr)
     else:
-        print("avatar: no render-DB Discord id for the featured player — "
+        print("avatar: no osu! avatar for the featured player -- "
               "procedural chip", file=sys.stderr)
 
     data = ResultsData(
@@ -487,7 +502,7 @@ def _build_lazer_results(spr, settings, beatmap, meta, judgments, hud, fv,
         err_deltas=list(hud.data.err_deltas),
         windows=(hud.hw.great, hud.hw.ok, hud.hw.meh),
         aim_points=aim_points, perf=perf, pb=pb, leaderboard=board,
-        discord_user_id=featured_did,
+        featured_avatar_png=featured_avatar_png,
         lazer_mods=meta.lazer_mods, rate_override=meta.rate_override)
     dur_wall_ms = max(settings.results_screen_time,
                       LAZER_RESULTS_MIN_SECONDS) * 1000.0
