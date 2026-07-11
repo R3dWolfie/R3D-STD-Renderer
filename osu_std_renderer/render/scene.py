@@ -1836,8 +1836,6 @@ class StdScene:
             bub = self._bubble_sprites(t)
             if bub:
                 self.spr.draw(bub)
-        if self.draw_cursor and self.frames:
-            self.spr.draw(self._cursor_sprites(t))
         # BR: the playfield spin ends here — the bloom post-pass, blinds,
         # flashlight, fade + HUD are all screen-space (must NOT rotate).
         self._uninstall_barrel()
@@ -1858,6 +1856,13 @@ class StdScene:
             # Overlay storyboard layer: over the gameplay, under the HUD
             # (Player proxies it into createOverlayComponents).
             self.storyboard.draw_overlay(t, self._sb_dim(t))
+        # Cursor: topmost gameplay element — ABOVE the storyboard Overlay
+        # layer (osu draws the cursor over every SB layer), under the HUD.
+        # Re-install the BR playfield spin so Barrel Roll still rotates it.
+        if self.draw_cursor and self.frames:
+            self._install_barrel(t)
+            self.spr.draw(self._cursor_sprites(t))
+            self._uninstall_barrel()
         if self.hud is not None:
             self.hud.draw(t)          # §5.3 draw order: … → cursors → HUD
         if self.fade_start_ms is not None and self.fade_len_ms > 0.0:
