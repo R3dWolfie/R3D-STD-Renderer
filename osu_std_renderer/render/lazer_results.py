@@ -1514,7 +1514,9 @@ class LazerResultsScreen:
 
         # --- PB card (stage 1, left of the panel) ---------------------------
         self.pb_parts = None
-        if d.pb is not None:
+        # PB "PERSONAL BEST" card removed 2026-07-11 (Red: unneeded);
+        # keep pb_parts None so _draw_pb (guarded on pb_parts) never fires.
+        if False and d.pb is not None:
             self.PB_W = 300.0
             self.PB_H = 178.0
             self.pb_bg = self._put(bake_round_panel(
