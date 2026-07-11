@@ -141,6 +141,7 @@ from __future__ import annotations
 
 import bisect
 import math
+import os
 from dataclasses import replace
 
 import numpy as np
@@ -213,6 +214,7 @@ EXPLODE_SCALE = 1.5            # §2.5 hit-explosion end scale (skin v2+).
                                # expands slightly larger, matching danser (the
                                # soft halo is the retained subtle hit lighting).
 NUMBER_FADE_OUT = 60.0         # §3.2 v2+ combo-number quick fade (ms)
+_COMBO_NUMBER_SCALE = float(os.environ.get("R3D_COMBO_NUMBER_SCALE", "0.8"))  # LIVE 0.8 (Red-approved 2026-07-11: circle/slider combo numbers were oversized); env can override
 MISS_FADE_OUT = 60.0           # missed circle: quick fade at window close
 RESULT_HOLD = 250.0            # M-2: judgment popups hold full opacity this
                                # long after fade-in before ResultFadeOut
@@ -2479,7 +2481,7 @@ class StdScene:
         sk = self.skin
         out: list[Sprite] = []
         if sk is not None and sk.has("digits"):
-            k = self.circle_k
+            k = self.circle_k * _COMBO_NUMBER_SCALE
             for ch, dx, w, h in layout_skin_digits(number, sk.digit_sizes,
                                                    sk.info.hit_circle_overlap):
                 out.append(Sprite(x + dx * k, y, w * k, h * k,
@@ -2487,13 +2489,13 @@ class StdScene:
                                   (1.0, 1.0, 1.0, num_alpha)))
             return out
         if self.skin is None:               # Argon league → bundled font
-            h = self.radius_px * ARGON_DIGIT_CAP_SCALE
+            h = self.radius_px * ARGON_DIGIT_CAP_SCALE * _COMBO_NUMBER_SCALE
             for ch, dx, w in layout_digits(number, self.bank.argon_digit_aspect,
                                            h):
                 out.append(Sprite(x + dx, y, w, h, f"adigit_{ch}",
                                   (1.0, 1.0, 1.0, num_alpha)))
             return out
-        h = self.radius_px  # digit height = half the circle diameter
+        h = self.radius_px * _COMBO_NUMBER_SCALE  # digit height = half the circle diameter (x held scale)
         for ch, dx, w in layout_digits(number, self.bank.digit_aspect, h):
             out.append(Sprite(x + dx, y, w, h, f"digit_{ch}",
                               (1.0, 1.0, 1.0, num_alpha)))
