@@ -140,6 +140,10 @@ class StdRenderSettings:
     default_skin_dir: Path | None = None
     skin_combo_colors: bool = True        # UseColorsFromSkin
     use_beatmap_colors: bool = False      # UseBeatmapColors ([Colours] wins)
+    # "beatmap-force" CLI/preset value → the pre-2026-07 blunt rule: the
+    # map's [Colours] beat even a USER skin that ships its own (escape
+    # hatch). Plain "beatmap" now lets such a skin win — cli.py §3.5/§4.7.
+    beatmap_colors_forced: bool = False
 
     # audio (§4.4; volumes 0..100 like every in-house engine)
     music_volume: int = 100
@@ -305,8 +309,10 @@ class StdRenderSettings:
             k = cls._PRESET_ALIASES.get(k, k)
             if k == "skin_combo_colors" and isinstance(v, str):
                 mode = v.strip().lower()
-                kwargs["use_beatmap_colors"] = mode == "beatmap"
-                kwargs["skin_combo_colors"] = mode != "beatmap"
+                _bm = mode in ("beatmap", "beatmap-force")
+                kwargs["use_beatmap_colors"] = _bm
+                kwargs["skin_combo_colors"] = not _bm
+                kwargs["beatmap_colors_forced"] = mode == "beatmap-force"
                 continue
             if k not in known:
                 continue

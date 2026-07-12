@@ -45,6 +45,12 @@ class SkinInfo:
     cursor_rotate: bool = True
     combo_colors: list[tuple[int, int, int]] = field(
         default_factory=lambda: list(DEFAULT_COMBO_COLORS))
+    # True only when the skin.ini itself defined Combo1..N — combo_colors
+    # above always holds SOMETHING (the osu! defaults), so the combo-colour
+    # precedence (cli.py §3.5/§4.7) needs this to know the skin actually
+    # ships its own [Colours] palette (lazer: such a skin keeps its colours
+    # even in "beatmap" mode).
+    combo_colors_custom: bool = False
     default_skin_followpoint_behavior: bool = False
     slider_ball_tint: bool = False          # AllowSliderBallTint
     slider_ball_flip: bool = False
@@ -187,6 +193,7 @@ def parse_skin_ini(text: str) -> SkinInfo:
         info.version = 1.0  # §3.2: Version key ABSENT → 1.0
     if combo_seen:
         info.combo_colors = [combo_seen[i] for i in sorted(combo_seen)]
+        info.combo_colors_custom = True
     return info
 
 

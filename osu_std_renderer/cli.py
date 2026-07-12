@@ -320,11 +320,15 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--logo", action=BA, default=False,
                     help="show_logo: the R3D 'R' tile splash during the "
                          "intro, fading out as gameplay starts")
-    ap.add_argument("--combo-colors", choices=("skin", "beatmap"),
+    ap.add_argument("--combo-colors",
+                    choices=("skin", "beatmap", "beatmap-force"),
                     default="skin",
                     help="skin_combo_colors preset key: 'skin' = skin.ini "
                          "Combo1.. (default); 'beatmap' = the .osu "
-                         "[Colours] when the map defines them")
+                         "[Colours] when the map defines them UNLESS the "
+                         "loaded USER skin ships its own Combo1.. — then "
+                         "the skin wins (lazer's rule); 'beatmap-force' = "
+                         "the old blunt rule (map [Colours] always)")
     ap.add_argument("--results-seconds", type=float, default=None)
     ap.add_argument("--no-replay", action="store_true",
                     help="render without a replay: perfect play at object "
@@ -773,14 +777,29 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
         results_start_ms = (fail_time + fail_anim_len_ms
                             if fail_time is not None else gameplay_end_ms)
 
-    # §3.5/§4.7 combo colour source: the .osu [Colours] when the preset
-    # says "beatmap" AND the map defines them; the skin.ini set otherwise
+    # §3.5/§4.7 combo colour source — lazer precedence. "beatmap" mode:
+    # the .osu [Colours] win UNLESS the loaded USER skin ships its own
+    # Combo1..N in skin.ini — then the skin's palette wins (what osu!
+    # really does: a skin that defines colours keeps them even with
+    # beatmap colours enabled). The bundled service default skin
+    # ("_default-source", Night05) DOES define Combo1..4 but is nobody's
+    # choice, so it never blocks the map's palette. "beatmap-force"
+    # restores the old blunt rule; "skin" still forces skin.ini.
+    _skin_ships_colours = (
+        skin_info.combo_colors_custom
+        and settings.skin_dir is not None
+        and Path(settings.skin_dir).name != "_default-source")
     color_src = skin_info.combo_colors
     combo_colors_from_beatmap = False
-    if settings.use_beatmap_colors and beatmap.combo_colors:
+    if (settings.use_beatmap_colors and beatmap.combo_colors
+            and (settings.beatmap_colors_forced or not _skin_ships_colours)):
         color_src = beatmap.combo_colors
         combo_colors_from_beatmap = True
         print(f"colors: beatmap [Colours] ({len(color_src)} combo colours)",
+              file=sys.stderr)
+    elif settings.use_beatmap_colors and _skin_ships_colours:
+        print(f"colors: skin.ini Combo1..{len(color_src)} — user skin ships "
+              "its own [Colours], wins over the beatmap's (lazer rule)",
               file=sys.stderr)
     combo_colors = [(r / 255.0, g / 255.0, b / 255.0)
                     for r, g, b in color_src]
@@ -1274,8 +1293,10 @@ def main(argv: list[str] | None = None) -> int:
         seizure_warning=args.seizure_warning,
         bloom=args.bloom, bloom_to_beat=args.bloom_to_beat,
         show_logo=args.logo,
-        use_beatmap_colors=(args.combo_colors == "beatmap"),
-        skin_combo_colors=(args.combo_colors != "beatmap"),
+        use_beatmap_colors=(args.combo_colors
+                            in ("beatmap", "beatmap-force")),
+        skin_combo_colors=(args.combo_colors == "skin"),
+        beatmap_colors_forced=(args.combo_colors == "beatmap-force"),
     )
     if args.fade_out is not None:
         settings.fade_out_time = max(args.fade_out, 0.0)
