@@ -69,7 +69,7 @@ def rate_audio_filter(rate: float, pitch: bool = False) -> str:
 
 
 def decode_to_pcm(path: Path, *, rate: float = 1.0,
-                  pitch: bool = False) -> np.ndarray:
+                  pitch: bool = False, loudnorm: bool = False) -> np.ndarray:
     """Decode any audio file → float32 stereo 48 kHz, shape (N, 2).
 
     `rate` != 1 applies the clock-rate change. `pitch=False` (DT/HT) is a
@@ -80,6 +80,12 @@ def decode_to_pcm(path: Path, *, rate: float = 1.0,
         raise AudioError("ffmpeg not found on PATH")
     cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-i", str(path)]
     af = rate_audio_filter(rate, pitch)
+    if loudnorm:
+        # LOUDNORM DUCK FIX (#17): normalise the MUSIC ALONE here (music-only,
+        # no hit transients) so the encode does NOT loudnorm the song+hits mix
+        # (that ducked the song ~4 dB under every hitsound). Hits are numpy-mixed
+        # on top afterwards; the encode applies only a clamp-only peak limiter.
+        af = (af + "," if af else "") + "loudnorm=I=-10:TP=-1.5:LRA=11"
     if af:
         cmd += ["-af", af]
     cmd += ["-f", "f32le", "-acodec", "pcm_f32le",

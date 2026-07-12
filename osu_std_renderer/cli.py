@@ -1015,7 +1015,7 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
                 # warp_music_pcm). adjust_pitch True (WU/WD default) shifts
                 # pitch with the rate; False keeps pitch (tempo-only).
                 from .record.audio import warp_music_pcm
-                pcm = decode_to_pcm(afile, rate=1.0)
+                pcm = decode_to_pcm(afile, rate=1.0, loudnorm=True)
                 pcm = warp_music_pcm(pcm, warp,
                                      adjust_pitch=meta.ramp_pitch)
             else:
@@ -1023,7 +1023,8 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
                 # standard/bitmask rate, where rate_pitch is False) change
                 # tempo only.
                 pcm = decode_to_pcm(afile, rate=speed,
-                                    pitch=(meta is not None and meta.rate_pitch))
+                                    pitch=(meta is not None and meta.rate_pitch),
+                                    loudnorm=True)
             # the map-time render start lands at wall t=0: the (already
             # rate-adjusted / ramp-warped) music is laid at the wall position
             # of map time 0 — mix_at clips a negative head; a pre-roll delays
@@ -1147,7 +1148,7 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
     cmd = build_ffmpeg_cmd(
         encoder=encoder, resolution=(w, h), fps=settings.fps,
         output_path=output, audio_path=audio_path,
-        audio_offset_ms=settings.audio_offset)
+        audio_offset_ms=settings.audio_offset, loudnorm=False)
 
     total_wall_ms = m2w(end_ms)
     last_pct = [-1]

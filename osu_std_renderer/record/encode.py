@@ -72,7 +72,12 @@ def build_ffmpeg_cmd(*, encoder: str, resolution: tuple[int, int], fps: int,
         cmd += ["-b:v", video_bitrate]
     cmd += ["-pix_fmt", "yuv420p"]
     if audio_path is not None:
-        af = [LOUDNORM] if loudnorm else []
+        # LOUDNORM DUCK FIX (#17): when the music was pre-normalised upstream
+        # (loudnorm=False), do NOT loudnorm the mixed song+hits (that ducked the
+        # song under hits) -- apply only a clamp-only true-peak limiter to catch
+        # summed peaks without ducking.
+        af = ([LOUDNORM] if loudnorm
+              else ["alimiter=limit=0.95:level=disabled:attack=1:release=20"])
         if af:
             cmd += ["-af", ",".join(af)]
         cmd += ["-c:a", "aac", "-b:a", audio_bitrate, "-ar", "48000", "-shortest"]
