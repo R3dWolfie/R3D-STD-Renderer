@@ -128,6 +128,7 @@ _CORE_ELEMENTS: dict[str, tuple[bool, bool, bool]] = {
     "cursor": (False, False, False),
     "cursortrail": (False, False, False),
     "cursormiddle": (False, False, False),
+    "cursor-smoke": (False, False, False),   # replay Smoke dab (bit 16)
     "hit0": (True, True, False),        # hit0-0.png.. animation, dashed
     "hit50": (True, True, False),
     "hit100": (True, True, False),

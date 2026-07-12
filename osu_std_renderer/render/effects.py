@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import colorsys
 import math
+import random
 
 # --- bg triangles ---------------------------------------------------------------
 TRI_COUNT = 24                 # triangles alive at any moment
@@ -233,3 +234,173 @@ def rainbow_rgb(t: float, cycle_ms: float = RAINBOW_CYCLE_MS,
     """Hue-cycled tint at time t (§4.8 EnableRainbow, danser-ish pace)."""
     hue = (t / cycle_ms) % 1.0
     return colorsys.hsv_to_rgb(hue, RAINBOW_SATURATION, 1.0)
+
+
+# --- replay Smoke (key bit 16) --------------------------------------------------------
+# Port of osu!(lazer) osu.Game.Rulesets.Osu/Skinning/SmokeSegment.cs +
+# UI/SmokeContainer.cs (MIT). While the player holds Smoke, dabs are dropped
+# along the cursor path; each fades over seconds and the whole stroke burns
+# away after release. Constants are lazer's verbatim.
+SMOKE_KEY_BIT = 16             # replay key bitfield bit (== replay.KEY_SMOKE)
+
+SMOKE_INITIAL_FADE_MS = 4000.0   # initial_fade_out_duration
+SMOKE_REFADE_SPEED    = 3.0      # re_fade_in_speed
+SMOKE_REFADE_MS       = 50.0     # re_fade_in_duration
+SMOKE_FINAL_SPEED     = 2.0      # final_fade_out_speed
+SMOKE_FINAL_FADE_MS   = 8000.0   # final_fade_out_duration
+SMOKE_INITIAL_ALPHA   = 0.6      # initial_alpha
+SMOKE_REFADE_ALPHA    = 1.0      # re_fade_in_alpha
+
+SMOKE_SCALE_MS      = 1200.0     # scale_duration (out-quint 0.65 -> 1.0)
+SMOKE_INITIAL_SCALE = 0.65       # initial_scale
+SMOKE_ROT_MS        = 500.0      # rotation_duration (out-quint settle)
+SMOKE_MAX_ROT       = 0.25       # max_rotation, radians
+
+# lazer default cursor-smoke texture is 64px @2x -> 32 logical px; SmokeSegment
+# width = DisplayWidth * 0.165 -> ~5.28 osu!px. Used when no skin cursor-smoke.
+SMOKE_DEFAULT_WIDTH_OSU = 32.0 * 0.165        # ~5.28
+# safety cap: a pathological all-map smoke hold can't blow memory up
+SMOKE_MAX_POINTS_PER_SEG = 8192
+
+
+class SmokeSeg:
+    """One held-Smoke stroke, resampled to dabs (SmokeContainer segment).
+
+    pts   : [(x_osu, y_osu, spawn_ms, angle_rad, settle_rad)] in draw order
+    times : [spawn_ms] parallel to pts, non-decreasing (bisect index)
+    start_ms/end_ms : press / release map-ms (end == last frame if never
+                      released before the replay ended)
+    kill_ms : lazer LifetimeEnd — after this the stroke is fully gone."""
+    __slots__ = ("start_ms", "end_ms", "kill_ms", "pts", "times")
+
+    def __init__(self, start_ms, end_ms, kill_ms, pts, times):
+        self.start_ms = start_ms
+        self.end_ms = end_ms
+        self.kill_ms = kill_ms
+        self.pts = pts
+        self.times = times
+
+
+class _SegBuilder:
+    """Reproduces SmokeSegment.StartDrawing/AddPosition point placement:
+    one dab per `interval` osu!px of cursor travel, the first at the press
+    position. Positions are interpolated along each replay-frame segment;
+    every dab added on one frame shares that frame's timestamp (lazer stamps
+    them all with Time.Current). Angles/settle come from a per-SEGMENT RNG
+    (seeded by segment index) so re-renders are byte-reproducible."""
+
+    def __init__(self, frame, interval: float, rng: "random.Random"):
+        self.interval = interval
+        self.rng = rng
+        self.start_ms = float(frame.time_ms)
+        self.pts: list = []
+        self.last_pos = None
+        self.total = interval          # StartDrawing: totalDistance = pointInterval
+        self._add_position(float(frame.x), float(frame.y), self.start_ms)
+
+    def _add_position(self, x: float, y: float, t: float) -> None:
+        if self.last_pos is None:
+            self.last_pos = (x, y)
+        lx, ly = self.last_pos
+        dx, dy = x - lx, y - ly
+        delta = math.hypot(dx, dy)
+        self.total += delta
+        count = int(self.total / self.interval)
+        if count > 0:
+            count = min(count, SMOKE_MAX_POINTS_PER_SEG - len(self.pts))
+        if count > 0:
+            if delta > 1e-12:
+                nx, ny = dx / delta, dy / delta
+            else:
+                nx, ny = 0.0, 0.0
+            start_off = self.interval - (self.total - delta)
+            px, py = start_off * nx + lx, start_off * ny + ly
+            ix, iy = nx * self.interval, ny * self.interval
+            self.total %= self.interval
+            # lazer's monotonic guard: only append if the batch is in order
+            if not self.pts or self.pts[-1][2] <= t:
+                for _ in range(count):
+                    angle = self.rng.uniform(0.0, 2.0 * math.pi)
+                    settle = SMOKE_MAX_ROT * (self.rng.random() * 2.0 - 1.0)
+                    self.pts.append((px, py, t, angle, settle))
+                    px += ix
+                    py += iy
+        self.last_pos = (x, y)
+
+    def feed(self, frame) -> None:
+        self._add_position(float(frame.x), float(frame.y), float(frame.time_ms))
+
+    def finish(self, end_ms: float) -> SmokeSeg:
+        # SmokeSegment.FinishDrawing: LifetimeEnd = end + final_fade_out_duration
+        #   + trunc/re_fade_in_speed + trunc/final_fade_out_speed
+        trunc = min(SMOKE_INITIAL_FADE_MS, end_ms - self.start_ms)
+        kill_ms = (end_ms + SMOKE_FINAL_FADE_MS
+                   + trunc / SMOKE_REFADE_SPEED
+                   + trunc / SMOKE_FINAL_SPEED)
+        times = [p[2] for p in self.pts]
+        return SmokeSeg(self.start_ms, end_ms, kill_ms, self.pts, times)
+
+
+def smoke_segments(frames, interval_osu: float) -> list:
+    """[SmokeSeg] — one per maximal run of frames holding the Smoke bit.
+
+    Returns [] when the replay never pressed Smoke (the gate that keeps every
+    non-smoke render byte-identical: the scene's draw self-gates on this being
+    non-empty). `interval_osu` is pointInterval = width * 7/8 in osu!px."""
+    if not frames:
+        return []
+    interval = max(float(interval_osu), 1e-3)
+    segs: list = []
+    cur = None
+    seg_index = 0
+    prev = 0
+    for f in frames:
+        keys = int(f.keys)
+        held = keys & SMOKE_KEY_BIT
+        was = prev & SMOKE_KEY_BIT
+        if held and not was:
+            cur = _SegBuilder(f, interval, random.Random(seg_index))
+            seg_index += 1
+        elif held and cur is not None:
+            cur.feed(f)
+        elif (not held) and was and cur is not None:
+            segs.append(cur.finish(float(f.time_ms)))
+            cur = None
+        prev = keys
+    if cur is not None:
+        segs.append(cur.finish(float(frames[-1].time_ms)))
+    return segs
+
+
+def smoke_point_alpha(pt_ms: float, t: float,
+                      start_ms: float, end_ms: float) -> float:
+    """Alpha 0..1 of one dab at map-time t — exact port of
+    SmokeDrawNode.ApplyState + PointColour (SmokeSegment.cs). Three phases:
+    linear initial fade-out (0.6 -> 0 over 4 s while held); on release a
+    re-brighten wave to 1.0 (out-quint, 50 ms) sweeping at speed 3; then a
+    final fade to 0 (^5 ease, up to 8 s) sweeping at speed 2."""
+    trunc = min(SMOKE_INITIAL_FADE_MS, end_ms - start_ms)
+    fvpt = end_ms - trunc                      # firstVisiblePointTimeAfterSmokeEnded
+    initial_fo_time = min(t, end_ms)
+    refade_time = t - trunc - fvpt * (1.0 - 1.0 / SMOKE_REFADE_SPEED)
+    final_fo_time = t - trunc - fvpt * (1.0 - 1.0 / SMOKE_FINAL_SPEED)
+
+    time_final = final_fo_time - pt_ms / SMOKE_FINAL_SPEED
+    if time_final > 0.0 and pt_ms >= fvpt:
+        frac = _clamp01(time_final / SMOKE_FINAL_FADE_MS) ** 5
+        return (1.0 - frac) * SMOKE_REFADE_ALPHA
+
+    a = 1.0                                    # Color4.White default (A = 1):
+    # a dab sampled at its exact spawn instant stays at 1.0 (bright leading
+    # edge at the cursor); one tick later the initial-fade branch drops it to
+    # ~initial_alpha (0.6) and fades from there.
+    time_init = initial_fo_time - pt_ms
+    if time_init > 0.0:
+        frac = _clamp01(time_init / SMOKE_INITIAL_FADE_MS)
+        a = (1.0 - frac) * SMOKE_INITIAL_ALPHA
+    if pt_ms > fvpt:
+        time_re = refade_time - pt_ms / SMOKE_REFADE_SPEED
+        if time_re > 0.0:
+            frac = 1.0 - (1.0 - _clamp01(time_re / SMOKE_REFADE_MS)) ** 5
+            a = frac * (SMOKE_REFADE_ALPHA - a) + a
+    return a

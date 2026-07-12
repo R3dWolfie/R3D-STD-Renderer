@@ -145,6 +145,19 @@ def bake_glow(size: int = GLOW_SIZE, power: float = 2.2) -> np.ndarray:
     return rgba
 
 
+def bake_smoke_puff(size: int = 64, power: float = 1.7,
+                    core: float = 0.16) -> np.ndarray:
+    """Soft round smoke dab for the replay-Smoke trail (additive)."""
+    d = _dist_grid(size)
+    radius = size / 2.0 - 1.0
+    r = np.clip(d / radius, 0.0, 1.0)
+    shoulder = np.clip((1.0 - r) / (1.0 - core), 0.0, 1.0) ** power
+    alpha = np.where(r <= core, 1.0, shoulder)
+    rgba = np.full((size, size, 4), 255, dtype=np.uint8)
+    rgba[..., 3] = np.round(alpha * 255.0).astype(np.uint8)
+    return rgba
+
+
 def bake_flashlight(size: int = 1024, core: float = 0.45) -> np.ndarray:
     """OsuModFlashlight overlay texture: BLACK RGB with a radial alpha ramp —
     fully transparent in the lit core, smoothstep up to fully opaque at the
@@ -1182,6 +1195,8 @@ class TextureBank:
         renderer.upload_texture("approach",
                                 bake_ring(APPROACH_SIZE, APPROACH_THICKNESS))
         renderer.upload_texture("glow", bake_glow())
+        # replay Smoke fallback dab (no skin cursor-smoke / Argon league)
+        renderer.upload_texture("smoke", bake_smoke_puff())
         # OsuModFlashlight overlay: clamp-to-edge so uv beyond the cutout
         # samples solid black (see bake_flashlight / scene flashlight quad)
         renderer.upload_texture("flashlight", bake_flashlight(), clamp=True)

@@ -153,10 +153,13 @@ from ..replay.replay import cursor_at
 from ..ruleset import JudgmentKind
 from .background import PARALLAX_SCALE, flash_factor, parallax_offset
 from .bloom import beat_strength
-from .effects import (LOGO_UI_SIZE, break_resume_anchors, fade_to_black_alpha,
-                      logo_alpha, logo_scale, rainbow_rgb, ripple_events,
-                      ripple_states, seizure_alpha, triangle_field,
-                      triangle_states, warning_arrow_alpha)
+from .effects import (LOGO_UI_SIZE, SMOKE_DEFAULT_WIDTH_OSU,
+                      SMOKE_INITIAL_FADE_MS, SMOKE_INITIAL_SCALE,
+                      SMOKE_ROT_MS, SMOKE_SCALE_MS, break_resume_anchors,
+                      fade_to_black_alpha, logo_alpha, logo_scale,
+                      rainbow_rgb, ripple_events, ripple_states,
+                      seizure_alpha, smoke_point_alpha, smoke_segments,
+                      triangle_field, triangle_states, warning_arrow_alpha)
 from .gl import Sprite
 from .hud import layout_run
 from .mods import (MOD_FLASHLIGHT, MOD_HIDDEN, build_flashlight_timeline,
@@ -1167,6 +1170,18 @@ class StdScene:
         if cursor_ripples and frames:
             self._ripple_evs = ripple_events(frames)
             self._ripple_times = [e[0] for e in self._ripple_evs]
+        # replay Smoke (key bit 16): lazer SmokeContainer/SmokeSegment.
+        # Self-gates on the bit: no smoke bit -> zero segments -> the
+        # draw in _render_frame never fires (byte-identical render).
+        if skin_elems is not None and skin_elems.has("cursor-smoke"):
+            self._smoke_tex = skin_elems.key("cursor-smoke")
+            self._smoke_width_osu = skin_elems.size["cursor-smoke"][0] * 0.165
+        else:
+            self._smoke_tex = "smoke"
+            self._smoke_width_osu = SMOKE_DEFAULT_WIDTH_OSU
+        self._smoke_segs = (smoke_segments(frames,
+                                           self._smoke_width_osu * 7.0 / 8.0)
+                            if frames else [])
         # playfield borders: precomputed subtle white rects (screen px)
         self._border_rects: list[tuple[float, float, float, float]] = []
         if playfield_borders in ("edges", "full"):
@@ -1791,6 +1806,10 @@ class StdScene:
         # post_xform / body xform so objects, deferred approach rings, popups
         # and the cursor all ride it. Background/borders above stay fixed.
         self._install_barrel(t)
+        if self._smoke_segs:
+            smoke = self._smoke_sprites(t)
+            if smoke:
+                self.spr.draw(smoke)
         per_obj = (bool(self.tmod) or self.depth_mod is not None
                    or bool(self.rm_mod))
         if self.draw_follow_points and self._fp_dots:
@@ -3389,6 +3408,37 @@ class StdScene:
         initial = _sm.no_scope_alpha(0, self.no_scope.hidden_combo_count)
         return _sm.combo_value_at(self._ns_timeline, t,
                                   _sm.NO_SCOPE_TRANSITION_MS, initial)
+
+    def _smoke_sprites(self, t: float) -> list[Sprite]:
+        """Replay Smoke (bit 16): additive white dabs along the held cursor
+        path, alpha per lazer SmokeSegment.PointColour. Empty when the
+        replay never pressed Smoke (self._smoke_segs == [])."""
+        out: list[Sprite] = []
+        base_d = 2.0 * self.cam.len_to_screen(self._smoke_width_osu)
+        for seg in self._smoke_segs:
+            if t < seg.start_ms or t > seg.kill_ms:
+                continue
+            trunc = min(SMOKE_INITIAL_FADE_MS, seg.end_ms - seg.start_ms)
+            lo = bisect.bisect_left(seg.times, min(seg.end_ms, t) - trunc)
+            hi = bisect.bisect_right(seg.times, t)
+            for i in range(lo, hi):
+                x, y, pt, angle, settle = seg.pts[i]
+                a = smoke_point_alpha(pt, t, seg.start_ms, seg.end_ms)
+                if a <= 0.0:
+                    continue
+                age = t - pt
+                ks = 1.0 - (1.0 - _clamp01(age / SMOKE_SCALE_MS)) ** 5
+                scale = SMOKE_INITIAL_SCALE + ks * (1.0 - SMOKE_INITIAL_SCALE)
+                if scale <= 0.0:
+                    continue
+                kr = 1.0 - (1.0 - _clamp01(age / SMOKE_ROT_MS)) ** 5
+                rot = angle + kr * settle
+                sx, sy = self.cam.to_screen(x, y)
+                d = base_d * scale
+                out.append(Sprite(sx, sy, d, d, self._smoke_tex,
+                                  (1.0, 1.0, 1.0, a), rotation=rot,
+                                  additive=True))
+        return out
 
     def _cursor_sprites(self, t: float) -> list[Sprite]:
         sprites = self._base_cursor_sprites(t)
