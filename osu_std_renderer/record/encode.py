@@ -25,7 +25,7 @@ from pathlib import Path
 
 from ..render import perf
 
-LOUDNORM = "loudnorm=I=-14:TP=-1.5"
+LOUDNORM = "loudnorm=I=-10:TP=-1.5:LRA=11"
 
 
 class EncoderError(RuntimeError):
