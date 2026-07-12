@@ -100,7 +100,7 @@ from pathlib import Path
 from .beatmap import load_full
 from .beatmap.difficulty import HIT_FADE_OUT
 from .beatmap.objects import Slider, Spinner
-from .replay import (is_relax_meta, parse_replay,
+from .replay import (KEY_SMOKE, is_relax_meta, parse_replay,
                      synthesize_relax_frames)
 from .settings import StdRenderSettings
 from .skin.skin_ini import load as load_skin_ini
@@ -1433,6 +1433,31 @@ def main(argv: list[str] | None = None) -> int:
     if args.skip_intro and args.start is None and beatmap.hit_objects:
         first_t = min(o.get_start_time() for o in beatmap.hit_objects)
         t0 = (first_t - beatmap.diff.preempt - 1000.0) / 1000.0
+        if t0 > 2.0:
+            # smoke-aware trim: the player can DRAW with the Smoke key
+            # (keys bit 16) during the lead-in BEFORE the trimmed window
+            # — never cut a drawing off. Frame times are MAP time
+            # (replay/replay.py), the same timebase as t0/first_t, so
+            # they compare directly and the warp-aware start/pre-roll
+            # math downstream of args.start (§4.10) is untouched under
+            # DT/HT/WU/WD. The 300 ms pad is map-time, mirroring the
+            # 1000 ms approach buffer above; clamped to 0.0 (frame
+            # times are >= 0 and 0 == the untrimmed baseline, never
+            # pre-audio). No smoke / smoke only inside the window ->
+            # t0 untouched (silent intros stay trimmed).
+            _smoke_t = min(
+                (f.time_ms for f in frames if f.keys & KEY_SMOKE),
+                default=None)
+            if _smoke_t is not None and _smoke_t < t0 * 1000.0:
+                t0 = max(0.0, (_smoke_t - 300.0) / 1000.0)
+                if t0 > 2.0:
+                    print(f"smoke:  drawn from {_smoke_t / 1000.0:.1f}s "
+                          f"— intro trim pulled back to {t0:.1f}s",
+                          file=sys.stderr)
+                else:
+                    print(f"smoke:  drawn from {_smoke_t / 1000.0:.1f}s "
+                          f"— intro trim disabled (drawing starts too "
+                          f"early)", file=sys.stderr)
         if t0 > 2.0:
             args.start = t0
             print(f"skip:   intro trimmed to {t0:.1f}s (first object at "
