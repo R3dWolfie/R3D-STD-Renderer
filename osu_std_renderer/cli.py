@@ -1084,9 +1084,20 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
     if have_audio and (seizure_ms or lead_ms):
         mixer.silence_before(m2w(start_ms))
 
-    # §4.10 FadeOutTime, audio side: the track fades with the video
-    if have_audio and fade_len_ms > 0.0 and fail_time is None:
-        mixer.fade_out(m2w(fade_start_ms), m2w(gameplay_end_ms))
+    # §4.10 FadeOutTime, audio side.
+    if have_audio and fail_time is None:
+        if results is None:
+            # No outro: the video ends on the map-end fade, so the music
+            # fades to black with it (§4.10 FadeOutTime — unchanged).
+            if fade_len_ms > 0.0:
+                mixer.fade_out(m2w(fade_start_ms), m2w(gameplay_end_ms))
+        else:
+            # Results outro present: the song KEEPS PLAYING under the
+            # results screen (osu!/lazer behaviour) up to its natural end,
+            # with a short fade at the very end of the video so the cut is
+            # clean (parity with mania v2's 600 ms tail fade).
+            tail = m2w(end_ms)
+            mixer.fade_out(max(0.0, tail - 600.0), tail)
 
     # FAIL audio: the FailAnimation bends the track frequency to 0 over the
     # 2500 ms fall (a slowdown + pitch drop). We can't pitch-bend offline
