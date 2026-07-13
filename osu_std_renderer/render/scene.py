@@ -964,7 +964,15 @@ class StdScene:
                  health=None,
                  fail_time_ms: float | None = None,
                  fail_anim_len_ms: float = FAIL_DURATION_MS,
-                 storyboard=None):
+                 storyboard=None,
+                 merge_cursors=None,
+                 merge_board=None,
+                 merge_misses=None):
+        self.merge_cursors = merge_cursors or []   # showdown!mrgd
+        self.merge_board = merge_board             # showdown!mrgd board or None
+        self.merge_misses = merge_misses or []     # showdown!mrgd [(misses,color)]
+        self._merge_trail_cache = {}               # id(frames) -> (pts, times)
+        self._merge_smoke_cache = {}               # id(frames) -> [SmokeSeg]
         self.beatmap = beatmap
         self.diff = beatmap.diff
         self.storyboard = storyboard   # render/storyboard_render.StoryboardRenderer | None
@@ -1878,7 +1886,26 @@ class StdScene:
         # Cursor: topmost gameplay element — ABOVE the storyboard Overlay
         # layer (osu draws the cursor over every SB layer), under the HUD.
         # Re-install the BR playfield spin so Barrel Roll still rotates it.
-        if self.draw_cursor and self.frames:
+        if self.merge_cursors:
+            self._install_barrel(t)
+            for _mc_frames, _mc_color, _mc_end in self.merge_cursors:
+                _sm = self._merge_smoke_cache.get(id(_mc_frames))
+                if _sm is None:
+                    _sm = smoke_segments(_mc_frames, self._smoke_width_osu * 7.0 / 8.0)
+                    self._merge_smoke_cache[id(_mc_frames)] = _sm
+                if _sm:
+                    self.spr.draw(self._merge_smoke_sprites(_sm, _mc_color, t))
+            for _mc_frames, _mc_color, _mc_end in self.merge_cursors:
+                self.spr.draw(self._merge_cursor_sprites(_mc_frames, _mc_color, t, _mc_end))
+            for _mm_misses, _mm_color in self.merge_misses:
+                self.spr.draw(self._merge_miss_sprites(_mm_misses, _mm_color, t))
+            self._uninstall_barrel()
+            if self.merge_board is not None:
+                _bw, _bh, _brgba = self.merge_board.render(t)
+                self.spr.upload_texture("mrgd_board", _brgba)
+                self.spr.draw([Sprite(_bw / 2.0, _bh / 2.0, _bw, _bh,
+                                      "mrgd_board", (1.0, 1.0, 1.0, 1.0))])
+        elif self.draw_cursor and self.frames:
             self._install_barrel(t)
             self.spr.draw(self._cursor_sprites(t))
             self._uninstall_barrel()
@@ -3460,6 +3487,125 @@ class StdScene:
                                w=sp.w * scale, h=sp.h * scale, color=col))
         return out
 
+    def _merge_smoke_sprites(self, segs, color, t):
+        """showdown!mrgd: one player's replay Smoke (bit 16), TINTED to `color`
+        (osu draws it white). Ported from _smoke_sprites."""
+        out: list[Sprite] = []
+        base_d = 2.0 * self.cam.len_to_screen(self._smoke_width_osu)
+        for seg in segs:
+            if t < seg.start_ms or t > seg.kill_ms:
+                continue
+            trunc = min(SMOKE_INITIAL_FADE_MS, seg.end_ms - seg.start_ms)
+            lo = bisect.bisect_left(seg.times, min(seg.end_ms, t) - trunc)
+            hi = bisect.bisect_right(seg.times, t)
+            for i in range(lo, hi):
+                x, y, pt, angle, settle = seg.pts[i]
+                a = smoke_point_alpha(pt, t, seg.start_ms, seg.end_ms)
+                if a <= 0.0:
+                    continue
+                age = t - pt
+                ks = 1.0 - (1.0 - _clamp01(age / SMOKE_SCALE_MS)) ** 5
+                scale = SMOKE_INITIAL_SCALE + ks * (1.0 - SMOKE_INITIAL_SCALE)
+                if scale <= 0.0:
+                    continue
+                kr = 1.0 - (1.0 - _clamp01(age / SMOKE_ROT_MS)) ** 5
+                rot = angle + kr * settle
+                sx, sy = self.cam.to_screen(x, y)
+                d = base_d * scale
+                out.append(Sprite(sx, sy, d, d, self._smoke_tex,
+                                  (*color, a), rotation=rot, additive=True))
+        return out
+
+    def _merge_miss_sprites(self, misses, color, t):
+        """showdown!mrgd: a bold per-player colored X at each MISS — pops in,
+        holds, fades over ~1.1 s — so you can see WHO choked. A solid bar +
+        an additive glow layer per stroke. misses = [(time_ms, (x,y) osu)]."""
+        out: list[Sprite] = []
+        dur = 1100.0
+        r = self.radius_px
+        for _mtime, _mpos in misses:
+            age = t - _mtime
+            if age < 0.0 or age > dur:
+                continue
+            pop = min(1.0, age / 80.0)                     # quick pop-in
+            f = pop * ((1.0 - age / dur) ** 0.5)
+            sx, sy = self.cam.to_screen(_mpos[0], _mpos[1])
+            out.append(Sprite(sx, sy, r * 3.4, r * 3.4, "glow",
+                              (*color, 0.55 * f), additive=True))
+            for _rot in (0.7853981633974483, -0.7853981633974483):
+                out.append(Sprite(sx, sy, r * 2.4, r * 0.5, "disc",
+                                  (*color, f), rotation=_rot))
+                out.append(Sprite(sx, sy, r * 2.4, r * 0.5, "disc",
+                                  (*color, 0.7 * f), rotation=_rot, additive=True))
+        return out
+
+    def _merge_cursor_sprites(self, frames, accent, t, end_ms=None):
+        """showdown!mrgd: one player's cursor, tinted to `accent`. Skin cursor
+        + SPARSE stateless trail (scales to N) if skinned, else procedural glow.
+        Instant shrink to 0.75 on keypress; fades out over 500 ms once the
+        player's replay has ended (death / partial replay)."""
+        fade = 1.0
+        if end_ms is not None and t > end_ms:
+            fade = 1.0 - (t - end_ms) / 500.0
+            if fade <= 0.0:
+                return []
+        sk = self.skin
+        out: list[Sprite] = []
+        if sk is not None and sk.has("cursor"):
+            k = (self.cam.screen_h / CURSOR_UI_HEIGHT) * self.cursor_scale
+            centre = sk.info.cursor_centre
+            if sk.has("cursortrail"):
+                tw, th = sk.size["cursortrail"]
+                tw, th = tw * self.trail_scale, th * self.trail_scale
+                ox, oy = (0.0, 0.0) if centre else (tw * k / 2.0, th * k / 2.0)
+                if self.long_trail:            # cursormiddle present -> connected ribbon
+                    _tp = self._merge_trail_cache.get(id(frames))
+                    if _tp is None:
+                        _pts = build_distance_trail(frames)
+                        _tp = (_pts, [p[2] for p in _pts])
+                        self._merge_trail_cache[id(frames)] = _tp
+                    for x, y, strength in long_trail_points(_tp[0], _tp[1], t):
+                        sx, sy = self.cam.to_screen(x, y)
+                        out.append(Sprite(sx + ox, sy + oy, tw * k, th * k,
+                                          "sk_cursortrail", (*accent, 0.85 * strength),
+                                          additive=True))   # glowing trail (adds onto pixels below)
+                else:
+                    for ti, strength in sparse_trail_times(t):
+                        x, y, _ = cursor_at(frames, ti)
+                        sx, sy = self.cam.to_screen(x, y)
+                        out.append(Sprite(sx + ox, sy + oy, tw * k, th * k,
+                                          "sk_cursortrail", (*accent, 0.85 * strength),
+                                          additive=True))   # glowing trail (adds onto pixels below)
+            x, y, keys = cursor_at(frames, t)
+            sx, sy = self.cam.to_screen(x, y)
+            cs = 0.75 if (keys & 0b1111) else 1.0
+            cw, ch = sk.size["cursor"]
+            ox, oy = (0.0, 0.0) if centre else (cw * k / 2.0, ch * k / 2.0)
+            out.append(Sprite(sx + ox, sy + oy, cw * k * cs, ch * k * cs,
+                              "sk_cursor", (*accent, 1.0)))
+            if sk.has("cursormiddle"):
+                mw, mh = sk.size["cursormiddle"]
+                out.append(Sprite(sx, sy, mw * k * cs, mh * k * cs,
+                                  "sk_cursormiddle", (*accent, 1.0)))
+        else:
+            d_glow = 2.0 * self.cam.len_to_screen(CURSOR_RADIUS_OSU) * self.cursor_scale
+            for ti, kk in trail_times(t):
+                x, y, _ = cursor_at(frames, ti)
+                sx, sy = self.cam.to_screen(x, y)
+                ss = d_glow * (0.55 + 0.35 * kk) * self.trail_scale
+                out.append(Sprite(sx, sy, ss, ss, "glow", (*accent, 0.28 * kk), additive=True))
+            x, y, keys = cursor_at(frames, t)
+            sx, sy = self.cam.to_screen(x, y)
+            core = d_glow * 0.62 * (0.75 if (keys & 0b1111) else 1.0)
+            out.append(Sprite(sx, sy, core, core, "disc", (1.0, 1.0, 1.0, 1.0)))
+            out.append(Sprite(sx, sy, core, core, "ring", (*accent, 0.9)))
+            out.append(Sprite(sx, sy, d_glow * 1.6, d_glow * 1.6, "glow",
+                              (*accent, 0.5), additive=True))
+        if fade < 1.0:
+            out = [replace(sp, color=(sp.color[0], sp.color[1], sp.color[2],
+                                      sp.color[3] * fade)) for sp in out]
+        return out
+
     def _base_cursor_sprites(self, t: float) -> list[Sprite]:
         if self.use_skin_cursor:
             return self._skin_cursor_sprites(t)
@@ -3547,14 +3693,16 @@ class StdScene:
                     sx, sy = self.cam.to_screen(x, y)
                     out.append(Sprite(sx + ox, sy + oy, tw * k, th * k,
                                       "sk_cursortrail",
-                                      (*tint, 0.85 * strength)))
+                                      (*tint, 0.85 * strength),
+                                      additive=True))
             else:
                 for ti, strength in sparse_trail_times(t):
                     x, y, _ = cursor_at(self.frames, ti)
                     sx, sy = self.cam.to_screen(x, y)
                     out.append(Sprite(sx + ox, sy + oy, tw * k, th * k,
                                       "sk_cursortrail",
-                                      (*tint, 0.85 * strength)))
+                                      (*tint, 0.85 * strength),
+                                      additive=True))
         x, y, _ = cursor_at(self.frames, t)
         sx, sy = self.cam.to_screen(x, y)
         cw, ch = sk.size["cursor"]

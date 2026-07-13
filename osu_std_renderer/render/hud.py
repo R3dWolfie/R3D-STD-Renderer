@@ -2480,7 +2480,8 @@ class StdHud:
                      else BAND_100 if a <= self.hw.ok else BAND_50)
             out.append(Sprite(x * k, cy * k, ERR_TICK_W * es * k,
                               ERR_TICK_H * es * k,
-                              None, (*color, 0.85 * fade * self.op)))
+                              None, (*color, 0.85 * fade * self.op),
+                              additive=True))
         ur, avg, n = d.ur_at(t)
         if n > 0:
             ax = cx + max(-1.0, min(1.0, avg / meh)) * half_w
@@ -2530,7 +2531,8 @@ class StdHud:
                 color = (BAND_300 if mag <= self.hw.great
                          else BAND_100 if mag <= self.hw.ok else BAND_50)
                 out.append(Sprite(cx * k, y * k, tick_len * k, tick_th * k,
-                                  None, (*color, 0.85 * fade * self.op)))
+                                  None, (*color, 0.85 * fade * self.op),
+                                  additive=True))
             if n > 0:
                 ay = cy + max(-1.0, min(1.0, avg / meh)) * half_h
                 ax = cx - side * (bar_w / 2.0 + 7.0 * es)
