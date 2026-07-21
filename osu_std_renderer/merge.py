@@ -194,10 +194,10 @@ class MergeBoard:
         from PIL import Image, ImageDraw, ImageFilter
         img = Image.new("RGBA", (self.W, self.H), (0, 0, 0, 0))
         rows = []
-        for name, col, hud, end_ms in self.entries:
+        for _eidx, (name, col, hud, end_ms) in enumerate(self.entries):
             sc = hud.score_at(t); ac = hud.acc_at(t) * 100.0
             dead = end_ms is not None and t > end_ms + 500.0
-            rows.append((sc, ac, name, col, dead))
+            rows.append((sc, ac, name, col, dead, _eidx))
         rows.sort(key=lambda r: (-r[0], -self._final.get(r[2], 0)))  # tie → final result
         dt = 0.0 if self._last_t is None else max(0.0, t - self._last_t)
         self._last_t = t
@@ -218,11 +218,11 @@ class MergeBoard:
 
         # smoothed layout once (shared by the bloom + sharp passes)
         laid = []
-        for i, (sc, ac, name, col, dead) in enumerate(rows[:self.N]):
+        for i, (sc, ac, name, col, dead, _eidx) in enumerate(rows[:self.N]):
             target = y0 + i * rh
-            cur = self._ypos.get(name, target)
+            cur = self._ypos.get(_eidx, target)   # stable per-entry key
             cur += (target - cur) * a
-            self._ypos[name] = cur
+            self._ypos[_eidx] = cur
             laid.append((i, int(round(cur)), sc, ac, name, col, dead, i == 0))
         # Bar length = score RELATIVE to the leader (Red 2026-07-16): the gap
         # you see is the real score deficit, not accuracy. Leader = full.
