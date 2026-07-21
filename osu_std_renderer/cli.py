@@ -234,7 +234,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--show-hp", action=BA, default=True)
     ap.add_argument("--show-grade", action=BA, default=True)
     ap.add_argument("--show-mods", action=BA, default=True)
-    ap.add_argument("--show-progress", action=BA, default=True)
+    ap.add_argument("--show-progress", action=BA, default=False)  # R3D: pie off by default (clashes w/ modern skins; Red 2026-07-21)
     ap.add_argument("--progress-style", choices=("pie", "bar"), default="pie")
     ap.add_argument("--hud-scale", type=float, default=1.0)
     ap.add_argument("--hud-opacity", type=float, default=1.0)
@@ -512,7 +512,11 @@ def _build_lazer_results(spr, settings, beatmap, meta, judgments, hud, fv,
                       LAZER_RESULTS_MIN_SECONDS) * 1000.0
     screen = LazerResultsScreen(spr, data, dur_wall_ms, speed=speed,
                                 argon_font=settings.skin_dir is None)
-    return screen, dur_wall_ms
+    # the screen floors its own timeline to MIN_TOTAL_MS (5.4 s since the
+    # lazer-exact 3 s sweep, deaa1ec) — budget the outro from the SAME
+    # floored length or end_ms lands before the stage-2 unfold + hold end.
+    # total_ms = max(dur_wall_ms, 5400) so this can only extend, never cut.
+    return screen, screen.total_ms
 
 
 def _render(args, settings: StdRenderSettings, beatmap, frames,
@@ -615,6 +619,33 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
         print(f"health: drain {health.drain_rate * 1000.0:.3f} hp/s "
               f"(target min {health.target_min:.2f}), "
               f"end {health.final_hp * 100.0:.0f}%", file=sys.stderr)
+
+        # --- empty-lifebar death/quit fallback (see replay.detect_fail_time) --
+        # detect_fail_time returns None when the .osr carries no life-bar graph
+        # (the common case for these replays). Confirm a NON-completed play from
+        # a hard fact instead: a completed play judges EVERY object, so the
+        # replay's 300/100/50/miss sum equals the object count (the same
+        # invariant reconcile trusts). judged < object-count => the player died
+        # or quit, so FREEZE at their last input rather than auto-missing the
+        # unreached tail (which tanks sim accuracy and false-trips the honesty
+        # gate). A pass can NEVER judge fewer objects than the map holds, so this
+        # cannot false-fail a pass. Fail-immune NoFail/Autopilot and
+        # --no-fail-animation still render as a pass. Kept here (after judgments
+        # is built) so the sim stays reconcile=ON — its slider-part combo
+        # reconcile is what keeps the frozen max-combo exact.
+        from .replay.replay import _FAIL_IMMUNE_MODS
+        if (fail_time is None and not args.no_fail_animation
+                and meta is not None and frames
+                and not (meta.mods & _FAIL_IMMUNE_MODS)):
+            _judged = (meta.count_300 + meta.count_100
+                       + meta.count_50 + meta.count_miss)
+            if 0 < _judged < len(beatmap.hit_objects):
+                fail_time = float(frames[-1].time_ms)
+                _how = "died (hp 0%)" if health.final_hp <= 1e-3 else "quit"
+                print(f"fail:   no life-bar in .osr; {_how} — judged "
+                      f"{_judged}/{len(beatmap.hit_objects)} objects; freezing "
+                      f"at last input {fail_time / 1000.0:.2f}s (grade F)",
+                      file=sys.stderr)
 
         # --- §4.6 pp counter / strain graph / aim error data (fail-soft) --
         pp_timeline = strain = None

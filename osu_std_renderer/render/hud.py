@@ -2313,6 +2313,8 @@ class StdHud:
         from .pp import pp_at
         es = self.es
         v = pp_at(self.pp_pts, self._pp_times, t)
+        if v != v or v in (float("inf"), float("-inf")):  # NaN/inf -> 0pp, never crash the render
+            v = 0.0
         num = str(int(round(v)))
         h = PP_DIGIT_H * es
         x = PP_LEFT_X * es

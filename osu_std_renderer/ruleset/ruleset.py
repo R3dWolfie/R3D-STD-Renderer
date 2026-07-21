@@ -89,6 +89,37 @@ MISS_WINDOW = 400.0                 # OsuHitWindows.MISS_WINDOW (== HittableRang
 BASE_SCORE = {"300": 300, "100": 100, "50": 50, "miss": 0}
 BASE_LARGE_TICK = 30
 COMBO_EXPONENT = 0.5                # ScoreProcessor.COMBO_EXPONENT
+SMALL_BONUS_SCORE = 10             # Judgement.SMALL_BONUS_SCORE (bonus portion)
+LARGE_BONUS_SCORE = 50             # Judgement.LARGE_BONUS_SCORE (bonus portion)
+
+# osu!lazer ScoreV3 total-score mod multipliers — UPDATED per ppy/osu#37967
+# ("Update score multipliers based on user feedback", the 2026 rebalance).
+# The lazer standardised total is multiplied by the product of the active
+# mods' ScoreMultiplier. Rate mods (DT/HT) are truly rate-dependent; these
+# are the STANDARD-rate values (DT 1.5x -> 1.23, HT 0.75x -> 0.55). Any mod
+# not listed (NF/SD/PF/AT/cosmetic) is 1.0.  Keyed by the osu! mod bit.
+_MOD_SCORE_MULT = {
+    1 << 1:  0.80,    # EZ  Easy         (was 0.5)
+    1 << 3:  1.04,    # HD  Hidden       (was 1.06)
+    1 << 4:  1.09,    # HR  Hard Rock    (was 1.06)
+    1 << 6:  1.23,    # DT  Double Time  (was 1.1, standard 1.5x)
+    1 << 8:  0.55,    # HT  Half Time    (was 0.3, standard 0.75x)
+    1 << 9:  1.23,    # NC  Nightcore == DT
+    1 << 10: 1.20,    # FL  Flashlight   (was 1.12)
+    1 << 12: 0.95,    # SO  Spun Out     (was 0.9)
+}
+
+
+def mods_score_multiplier(mods: int) -> float:
+    """Product of the active mods' ScoreV3 multipliers (ppy/osu#37967)."""
+    mods = int(mods or 0)
+    if mods & (1 << 9):        # NC stored as DT|NC — count the speed mult once
+        mods &= ~(1 << 6)
+    m = 1.0
+    for bit, mult in _MOD_SCORE_MULT.items():
+        if mods & bit:
+            m *= mult
+    return m
 
 
 class JudgmentKind(Enum):
@@ -1426,6 +1457,21 @@ class StdRuleset:
         cur_base = cur_max_base = 0.0
         obj_base = 0.0
         obj_n = 0
+        # lazer ScoreProcessor bonus portion: SmallBonus/LargeBonus spins add
+        # a flat term ON TOP of the 500k combo + 500k accuracy split. The sim
+        # does not model individual bonus spins, so fold the .osr's achieved
+        # bonus counts in as a constant. For a near-empty play whose combo AND
+        # accuracy portions both round to 0, this bonus is the ENTIRE score —
+        # without it the honesty gate sees sim 0 vs a nonzero replay total.
+        _st = self.lazer_stats
+        _bonus_portion = (SMALL_BONUS_SCORE * getattr(_st, "small_bonus", 0)
+                          + LARGE_BONUS_SCORE * getattr(_st, "large_bonus", 0)
+                          ) if _st is not None else 0.0
+        # ScoreV3 total is scaled by the play's mod multiplier (ppy/osu#37967)
+        # — EZ 0.8x, HR 1.09x, DT 1.23x, HT 0.55x, HD 1.04x, FL 1.2x, SO 0.95x.
+        # This was previously NOT applied, so EZ scores weren't reduced and
+        # HR/DT weren't boosted — the versus-board discrepancy Red flagged.
+        _mod_mult = mods_score_multiplier(getattr(self.meta, "mods", 0) or 0)
         for t, kind, is_obj, s, b, bmax, mode, hit in lattice:
             cur_base += b
             cur_max_base += bmax
@@ -1446,7 +1492,8 @@ class StdRuleset:
             acc = obj_base / (300.0 * obj_n)
             if max_combo_portion > 0 and max_base_total > 0:
                 score = (500_000.0 * acc * (combo_portion / max_combo_portion)
-                         + 500_000.0 * (acc ** 5) * (cur_max_base / max_base_total))
+                         + 500_000.0 * (acc ** 5) * (cur_max_base / max_base_total)
+                         + _bonus_portion) * _mod_mult
             else:
                 score = 0.0
             px, py = self._popup_pos(s)

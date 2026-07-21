@@ -217,7 +217,7 @@ EXPLODE_SCALE = 1.5            # §2.5 hit-explosion end scale (skin v2+).
                                # expands slightly larger, matching danser (the
                                # soft halo is the retained subtle hit lighting).
 NUMBER_FADE_OUT = 60.0         # §3.2 v2+ combo-number quick fade (ms)
-_COMBO_NUMBER_SCALE = float(os.environ.get("R3D_COMBO_NUMBER_SCALE", "0.8"))  # LIVE 0.8 (Red-approved 2026-07-11: circle/slider combo numbers were oversized); env can override
+_COMBO_NUMBER_SCALE = float(os.environ.get("R3D_COMBO_NUMBER_SCALE", "0.72"))  # LIVE 0.8 (Red-approved 2026-07-11: circle/slider combo numbers were oversized); env can override
 MISS_FADE_OUT = 60.0           # missed circle: quick fade at window close
 RESULT_HOLD = 250.0            # M-2: judgment popups hold full opacity this
                                # long after fade-in before ResultFadeOut
@@ -3517,9 +3517,11 @@ class StdScene:
         return out
 
     def _merge_miss_sprites(self, misses, color, t):
-        """showdown!mrgd: a bold per-player colored X at each MISS — pops in,
+        """showdown!mrgd: a small, clean per-player colored X at each MISS — pops in,
         holds, fades over ~1.1 s — so you can see WHO choked. A solid bar +
-        an additive glow layer per stroke. misses = [(time_ms, (x,y) osu)]."""
+        an additive glow layer per stroke. misses = [(time_ms, (x,y) osu)];
+        the position is the PLAYER'S CURSOR at the miss moment (set in merge.py),
+        so several players missing the same note don't stack into one pile."""
         out: list[Sprite] = []
         dur = 1100.0
         r = self.radius_px
@@ -3530,13 +3532,15 @@ class StdScene:
             pop = min(1.0, age / 80.0)                     # quick pop-in
             f = pop * ((1.0 - age / dur) ** 0.5)
             sx, sy = self.cam.to_screen(_mpos[0], _mpos[1])
-            out.append(Sprite(sx, sy, r * 3.4, r * 3.4, "glow",
-                              (*color, 0.55 * f), additive=True))
+            # small, clean X centred on the player's cursor at the miss moment
+            # (~circle-sized) with a soft same-colour halo.
+            out.append(Sprite(sx, sy, r * 0.95, r * 0.95, "glow",
+                              (*color, 0.30 * f), additive=True))
             for _rot in (0.7853981633974483, -0.7853981633974483):
-                out.append(Sprite(sx, sy, r * 2.4, r * 0.5, "disc",
+                out.append(Sprite(sx, sy, r * 1.15, r * 0.15, "disc",
                                   (*color, f), rotation=_rot))
-                out.append(Sprite(sx, sy, r * 2.4, r * 0.5, "disc",
-                                  (*color, 0.7 * f), rotation=_rot, additive=True))
+                out.append(Sprite(sx, sy, r * 1.15, r * 0.08, "disc",
+                                  (*color, 0.85 * f), rotation=_rot, additive=True))
         return out
 
     def _merge_cursor_sprites(self, frames, accent, t, end_ms=None):

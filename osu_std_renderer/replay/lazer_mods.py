@@ -174,6 +174,8 @@ class LazerStatistics:
     slider_tail_hit: int
     max_large_tick: int          # maximum_statistics.large_tick_hit (FC total)
     max_slider_tail: int         # maximum_statistics.slider_tail_hit (FC total)
+    small_bonus: int = 0         # statistics.small_bonus (achieved bonus spins)
+    large_bonus: int = 0         # statistics.large_bonus (achieved bonus spins)
 
 
 def lazer_statistics_from_info(info: "dict | None") -> "LazerStatistics | None":
@@ -203,6 +205,8 @@ def lazer_statistics_from_info(info: "dict | None") -> "LazerStatistics | None":
         slider_tail_hit=g(stats, "slider_tail_hit"),
         max_large_tick=max_lt,
         max_slider_tail=max_st,
+        small_bonus=g(stats, "small_bonus"),
+        large_bonus=g(stats, "large_bonus"),
     )
 
 
