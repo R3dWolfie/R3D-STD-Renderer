@@ -68,6 +68,18 @@ def build_ffmpeg_cmd(*, encoder: str, resolution: tuple[int, int], fps: int,
     cmd += ["-c:v", encoder]
     if encoder == "libx264":
         cmd += ["-crf", str(crf), "-preset", "faster", "-profile:v", "high"]
+    elif encoder in ("h264_nvenc", "hevc_nvenc"):
+        # Constant-quality (VBR+CQ, -b:v 0 = pure CQ) so bitrate tracks
+        # resolution/motion. Previously NO rate control was set for NVENC, so
+        # it fell back to its ~2 Mbps default -- starving 1440p/120fps (looked
+        # like 720p). cq = crf+4 for comparable quality; resolution-scaled
+        # maxrate caps worst-case file size.
+        _mbps = max(6, round((w * h) / 150_000))
+        if int(fps) >= 120:              # 120fps needs ~1.5x the bits for
+            _mbps = round(_mbps * 1.5)    # equal quality (Red 2026-07-21)
+        cmd += ["-rc", "vbr", "-cq", str(crf + 4), "-b:v", "0",
+                "-maxrate", f"{_mbps}M", "-bufsize", f"{2 * _mbps}M",
+                "-profile:v", "high"]
     elif video_bitrate:
         cmd += ["-b:v", video_bitrate]
     cmd += ["-pix_fmt", "yuv420p"]
