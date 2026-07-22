@@ -158,6 +158,16 @@ class MergeBoard:
         self.fcredit = _pf(_JB6, self.hh * 0.36, mono=True)
         self._ypos = {}
         self._last_t = None
+        # PERF (byte-identical) render caches:
+        #   _panel: the static glassy gradient panel + its rounded mask,
+        #     baked once (it depends only on panel_h, which is constant).
+        #   _memo_*: whole-frame memo — the pixels are a pure function of
+        #     (laid, max_sc, panel_h); between score changes (and once the
+        #     row-slide settles) consecutive frames are identical, so the
+        #     previous bytes are returned as-is.
+        self._panel = None
+        self._memo_key = None
+        self._memo_arr = None
         self._grades = self._load_grades(skin_dirs, int(self.rh * 0.95))
         # final-result score per player → tiebreak when current scores tie
         # (bias the eventual winner higher, per Red)
@@ -192,7 +202,6 @@ class MergeBoard:
 
     def render(self, t):
         from PIL import Image, ImageDraw, ImageFilter
-        img = Image.new("RGBA", (self.W, self.H), (0, 0, 0, 0))
         rows = []
         for _eidx, (name, col, hud, end_ms) in enumerate(self.entries):
             sc = hud.score_at(t); ac = hud.acc_at(t) * 100.0
@@ -228,20 +237,40 @@ class MergeBoard:
         # you see is the real score deficit, not accuracy. Leader = full.
         max_sc = max(1.0, float(laid[0][2])) if laid else 1.0
         panel_h = min(self.H - 1, y0 + n * rh + 6)
+        # PERF: nothing is ever drawn below panel_h (rows/ring/texts all sit
+        # inside the panel), and the bloom blur spreads content < 32px — so
+        # the board is built on a cropped (W, panel_h+32) canvas instead of a
+        # full screen-height one. Bytes within the crop are identical, and
+        # everything below it was fully transparent in both; the callers
+        # (scene.py sprite at the returned size / hud paste at (0,0)) are
+        # size-agnostic, so the composited output is unchanged.
+        gh = min(self.H, panel_h + 32)
+        # PERF: whole-frame memo — the pixels below are a pure function of
+        # (laid, max_sc, panel_h). Consecutive frames where no score changed
+        # and the row-slide has settled render identically: reuse the bytes.
+        # (_ypos/_last_t were already advanced above, so animation state
+        # marches on exactly as before.)
+        _key = (tuple(laid), max_sc, panel_h)
+        if _key == self._memo_key and self._memo_arr is not None:
+            return self.W, gh, self._memo_arr
+        img = Image.new("RGBA", (self.W, gh), (0, 0, 0, 0))
 
-        # ── glassy panel: vertical gradient, rounded, masked ──
-        f = np.linspace(0.0, 1.0, panel_h)[:, None]
-        top = np.array([23.0, 24.0, 31.0]); bot = np.array([9.0, 10.0, 14.0])
-        pg = np.empty((panel_h, self.W, 4), dtype=np.uint8)
-        pg[:, :, :3] = (top * (1 - f) + bot * f)[:, None, :].astype(np.uint8)
-        pg[:, :, 3] = 212
-        pmask = Image.new("L", (self.W, panel_h), 0)
-        ImageDraw.Draw(pmask).rounded_rectangle(
-            [1, 1, self.W - 2, panel_h - 2], radius=13, fill=255)
-        img.paste(Image.fromarray(pg, "RGBA"), (0, 0), pmask)
+        # ── glassy panel: vertical gradient, rounded, masked (baked once —
+        # it depends only on panel_h, which is constant per render) ──
+        if self._panel is None or self._panel[0] != panel_h:
+            f = np.linspace(0.0, 1.0, panel_h)[:, None]
+            top = np.array([23.0, 24.0, 31.0]); bot = np.array([9.0, 10.0, 14.0])
+            pg = np.empty((panel_h, self.W, 4), dtype=np.uint8)
+            pg[:, :, :3] = (top * (1 - f) + bot * f)[:, None, :].astype(np.uint8)
+            pg[:, :, 3] = 212
+            pmask = Image.new("L", (self.W, panel_h), 0)
+            ImageDraw.Draw(pmask).rounded_rectangle(
+                [1, 1, self.W - 2, panel_h - 2], radius=13, fill=255)
+            self._panel = (panel_h, Image.fromarray(pg, "RGBA"), pmask)
+        img.paste(self._panel[1], (0, 0), self._panel[2])
 
         # ── bloom pass: emissive meters + leader ring, blurred, added under ──
-        glow = Image.new("RGBA", (self.W, self.H), (0, 0, 0, 0))
+        glow = Image.new("RGBA", (self.W, gh), (0, 0, 0, 0))
         gd = ImageDraw.Draw(glow)
         for (i, y, sc, ac, name, col, dead, lead) in laid:
             if dead:
@@ -312,7 +341,9 @@ class MergeBoard:
                    fill=(0, 0, 0, int(120 * ra)), anchor="rm")
             d.text((R - 5, cy), scr, font=self.f_score,
                    fill=(*scol, int(255 * ra)), anchor="rm")
-        return self.W, self.H, np.asarray(img, dtype=np.uint8)
+        arr = np.asarray(img, dtype=np.uint8)
+        self._memo_key, self._memo_arr = _key, arr
+        return self.W, gh, arr
 
 
 class _PerfectSim:
