@@ -63,8 +63,12 @@ def build_ffmpeg_cmd(*, encoder: str, resolution: tuple[int, int], fps: int,
         if audio_offset_ms:
             cmd += ["-itsoffset", f"{audio_offset_ms / 1000.0:.3f}"]
         cmd += ["-i", str(audio_path)]
-    if extra_vf:
-        cmd += ["-vf", extra_vf]
+    # Frames arrive BOTTOM-UP on stdin and ffmpeg's vflip filter restores
+    # them (an exact row reorder on rawvideo — zero pixel math; the mania
+    # v2 prod encoder ships the same shape). This lets the writer hand
+    # the GL readback buffer to the pipe zero-copy instead of paying a
+    # ~6 MB negative-stride flip copy per frame — see FfmpegPipe._writer.
+    cmd += ["-vf", "vflip" + ("," + extra_vf if extra_vf else "")]
     cmd += ["-c:v", encoder]
     if encoder == "libx264":
         cmd += ["-crf", str(crf), "-preset", "faster", "-profile:v", "high"]
@@ -143,11 +147,23 @@ class FfmpegPipe:
             if self._werr is not None:
                 continue          # drain (never write after an error)
             try:
-                data = frame.tobytes()
                 if self._hash is not None:
-                    self._hash.update(data)
+                    # R3D_FRAME_MD5 hashes the TOP-DOWN semantic stream —
+                    # the same bytes the pre-vflip pipe pushed, so digests
+                    # stay comparable across the pipeline change.
+                    self._hash.update(frame.tobytes())
                     self._hash_frames += 1
-                stdin.write(data)
+                # ffmpeg runs `vflip` (build_ffmpeg_cmd), so the pipe wants
+                # the frame BOTTOM-UP. PBO frames are flipud views over a
+                # contiguous readback buffer, so frame[::-1] recovers that
+                # buffer C-contiguous → a zero-copy pipe write. Fresh
+                # top-down frames (the SSAA results tail) fall back to the
+                # same negative-stride flip copy the old path did.
+                flipped = frame[::-1]
+                if flipped.flags["C_CONTIGUOUS"]:
+                    stdin.write(flipped)
+                else:
+                    stdin.write(flipped.tobytes())
             except BaseException as e:  # noqa: BLE001 - surfaced on push()
                 self._werr = e
 

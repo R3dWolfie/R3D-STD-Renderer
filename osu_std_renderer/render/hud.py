@@ -1017,7 +1017,13 @@ class ArgonBarField:
                                             0.0, 1.0)
         self._s1 = np.empty((gh, gw))
         self._s2 = np.empty((gh, gw))
+        self._s3 = np.empty((gh, gw))
+        self._s4 = np.empty((gh, gw))
+        self._s5 = np.empty((gh, gw))
         self._end_cache: dict = {}
+        self._endc_cache: dict = {}    # clipped endpoint fields (bar_rgba)
+        self._dclip_cache: dict = {}   # radius → np.clip(self.d, 0, radius)
+        self._out_bufs: dict = {}      # out_key → [u8 buffer, sig, prev box]
         self._band_cache: dict[float, tuple[int, int, int, int]] = {}
 
     @staticmethod
@@ -1084,6 +1090,46 @@ class ArgonBarField:
             self._end_cache[key] = d
         return d
 
+    def _dist_clip_to(self, p: tuple[float, float], box,
+                      radius: float) -> np.ndarray:
+        """np.clip(_dist_to(p, box), 0, radius) — the form bar_rgba
+        consumes (its D is clipped to radius) — cached like _dist_to.
+        Returned arrays are never written to."""
+        key = (p, box, radius)
+        d = self._endc_cache.get(key)
+        if d is None:
+            if len(self._endc_cache) >= 16:
+                self._endc_cache.clear()
+            y0, y1, x0, x1 = box
+            d = np.hypot(self.xx[y0:y1, x0:x1] - p[0],
+                         self.yy[y0:y1, x0:x1] - p[1])
+            np.clip(d, 0.0, radius, out=d)
+            self._endc_cache[key] = d
+        return d
+
+    def _d_clipped(self, radius: float) -> np.ndarray:
+        """np.clip(self.d, 0, radius), cached per radius (frame-invariant;
+        two radii exist). Never written to."""
+        d = self._dclip_cache.get(radius)
+        if d is None:
+            d = np.clip(self.d, 0.0, radius)
+            self._dclip_cache[radius] = d
+        return d
+
+    def _win(self, p: tuple[float, float], radius: float, box
+             ) -> tuple[int, int, int, int]:
+        """Sub-window of `box` that conservatively contains every texel
+        with hypot(xx-p0, yy-p1) < radius (same index mapping + padding
+        as _sub_box). Outside it the clipped endpoint distance is exactly
+        radius."""
+        y0, y1, x0, x1 = box
+        m, sc = self.margin, self.scale
+        wx0 = max(x0, int(np.floor((p[0] - radius + m) * sc - 0.5)) - 1)
+        wx1 = min(x1, int(np.ceil((p[0] + radius + m) * sc - 0.5)) + 2)
+        wy0 = max(y0, int(np.floor((p[1] - radius + m) * sc - 0.5)) - 1)
+        wy1 = min(y1, int(np.ceil((p[1] + radius + m) * sc - 0.5)) + 2)
+        return wy0, wy1, wx0, wx1
+
     def _live_box(self, radius: float) -> tuple[int, int, int, int]:
         """Bounding box of {d < radius}: every texel OUTSIDE it has
         sub_distance ≥ d ≥ radius for ANY sub-path (a sub-path's distance
@@ -1111,6 +1157,47 @@ class ArgonBarField:
             self._band_cache[radius] = box
         return box
 
+    def _sub_box(self, a: float, b: float, radius: float
+                 ) -> tuple[int, int, int, int]:
+        """Conservative pixel bbox of {sub_distance(a,b) < radius}: the
+        sub-path's xy extent dilated by radius, mapped to grid indices.
+        Every texel OUTSIDE it is ≥ radius from every point of the
+        sub-path, so its sub_distance clips to radius and lands in
+        bar_rgba's constant far-field — intersecting the live box with
+        this bbox is value-preserving by the exact argument _live_box
+        documents. A polyline sub-path attains its x/y extrema at
+        pos(a), pos(b) or an interior vertex, so the extent is exact.
+        Edges are padded then quantized OUTWARD to 16-px steps (only
+        widens the box; steady stretches repeat the box exactly, which
+        keeps _dist_to's (endpoint, box) cache hitting)."""
+        lo, hi = _clamp01(a), _clamp01(b)
+        if hi < lo:
+            hi = lo
+        cn = self._cum_n
+        i0 = int(np.searchsorted(cn, lo, side="right"))
+        i1 = int(np.searchsorted(cn, hi, side="left"))
+        xa, ya = self.pos(lo)
+        xb, yb = self.pos(hi)
+        xmin, xmax = (xa, xb) if xa <= xb else (xb, xa)
+        ymin, ymax = (ya, yb) if ya <= yb else (yb, ya)
+        if i1 > i0:
+            seg = self._pts[i0:i1]
+            xmin = min(xmin, float(seg[:, 0].min()))
+            xmax = max(xmax, float(seg[:, 0].max()))
+            ymin = min(ymin, float(seg[:, 1].min()))
+            ymax = max(ymax, float(seg[:, 1].max()))
+        m, sc = self.margin, self.scale
+        # texel centre x = (px + 0.5) / sc - m  →  px = (x + m) * sc - 0.5
+        x0 = int(np.floor((xmin - radius + m) * sc - 0.5)) - 1
+        x1 = int(np.ceil((xmax + radius + m) * sc - 0.5)) + 2
+        y0 = int(np.floor((ymin - radius + m) * sc - 0.5)) - 1
+        y1 = int(np.ceil((ymax + radius + m) * sc - 0.5)) + 2
+        x0 = max(0, (x0 // 16) * 16)
+        y0 = max(0, (y0 // 16) * 16)
+        x1 = min(self.gw, ((x1 + 15) // 16) * 16)
+        y1 = min(self.gh, ((y1 + 15) // 16) * 16)
+        return y0, y1, x0, x1
+
     def sub_distance(self, a: float, b: float, box=None) -> np.ndarray:
         """Distance field to the sub-path [a, b] (b ≥ a), over the whole
         field or a (y0, y1, x0, x1) sub-box."""
@@ -1124,10 +1211,47 @@ class ArgonBarField:
                          self._dist_to(self.pos(b), box))
         return np.where(inside, self.d[y0:y1, x0:x1], cap)
 
+    def _out_buffer(self, out_key, glow_rgba, box) -> np.ndarray:
+        """The (gh, gw, 4) u8 output array for one bar_rgba call, with the
+        far-field constant (rgb = rint(glow·255) — what core=0/mixv=0
+        yields — alpha = 0) established everywhere OUTSIDE `box`. With an
+        out_key the buffer is PERSISTENT: only the previous call's live
+        box needs re-filling (the far field elsewhere is untouched from
+        the last call), instead of a fresh alloc + four full-plane fills.
+        A glow-colour change re-fills every plane (exactly what the
+        fresh-alloc path wrote each call). box is recorded for the next
+        call; equal colours produce equal u8 fills, so buffer contents are
+        indistinguishable from the fresh-alloc path's."""
+        sig = (int(np.uint8(np.rint(glow_rgba[0] * 255.0))),
+               int(np.uint8(np.rint(glow_rgba[1] * 255.0))),
+               int(np.uint8(np.rint(glow_rgba[2] * 255.0))))
+        # one u32 store per texel instead of four strided u8 plane fills:
+        # "<u4" pins little-endian, so the four bytes land as R,G,B,A=0 —
+        # byte-identical to the per-plane fills
+        val = np.uint32(sig[0] | (sig[1] << 8) | (sig[2] << 16))
+        if out_key is None:
+            out = np.empty((self.gh, self.gw, 4), dtype=np.uint8)
+            out.view("<u4")[...] = val
+            return out
+        ent = self._out_bufs.get(out_key)
+        if ent is None:
+            ent = [np.empty((self.gh, self.gw, 4), dtype=np.uint8),
+                   None, None]
+            self._out_bufs[out_key] = ent
+        out, psig, pbox = ent
+        if psig != sig:
+            out.view("<u4")[...] = val
+        elif pbox is not None:
+            py0, py1, px0, px1 = pbox
+            out.view("<u4")[py0:py1, px0:px1] = val
+        ent[1] = sig
+        ent[2] = box
+        return out
+
     def bar_rgba(self, a: float, b: float, radius: float,
                  glow_portion: float, bar_rgb, glow_rgba,
                  xgrad: bool = False, alpha_mult: float = 1.0,
-                 ) -> np.ndarray:
+                 out_key: str | None = None) -> np.ndarray:
         """sh_ArgonBarPath.fs getColour over the sub-path field: solid
         barColour core, 1 px blend, then the glow falloff (mix^8)."""
         # Restructured for speed (hoisted invariants, scratch buffers,
@@ -1141,38 +1265,91 @@ class ArgonBarField:
         # (the same values the full-field math produced there) -- so the
         # heavy math runs only on the live box. Requires agp > 0 (all
         # real callers): at agp <= 0 the far field is NOT constant.
+        # Further perf restructures, each an exact element-wise identity:
+        #   * the box is ∩ed with _sub_box (far-field argument above);
+        #   * D = clip(sub_distance, 0, radius) is rebuilt as
+        #     where(inside, clip(d), min(clip(da), clip(db))) — clip is
+        #     monotone and element-wise, so it commutes with where and
+        #     minimum; clip(d)/clip(da) are frame-invariant caches and
+        #     clip(db) is radius outside _win's window (|Δ| ≥ radius on
+        #     at least one axis ⇒ hypot ≥ radius ⇒ clips to radius);
+        #   * s ∈ [0, 1] makes the (s >= a) term all-True for a ≤ 0;
+        #   * scalar-first operands keep each original op order (e.g.
+        #     (radius - agp) - D, ((D - radius) + agp) / agp);
+        #   * bar_rgb[c] == 1.0 skips core*1.0 (exact f64 identity);
+        #   * ndarray**8 is np.power(·, 8), reproduced with out=.
         if radius * glow_portion > 0.0:
-            y0, y1, x0, x1 = self._live_box(radius)
+            ly0, ly1, lx0, lx1 = self._live_box(radius)
+            sy0, sy1, sx0, sx1 = self._sub_box(a, b, radius)
+            y0, x0 = max(ly0, sy0), max(lx0, sx0)
+            y1, x1 = min(ly1, sy1), min(lx1, sx1)
+            if y1 <= y0 or x1 <= x0:
+                # live band ∩ sub-path band empty — the whole texture is
+                # the constant far-field (core=0 → glow rgb, mixv=0 → a=0)
+                return self._out_buffer(out_key, glow_rgba, (0, 0, 0, 0))
         else:
             y0, y1, x0, x1 = 0, self.gh, 0, self.gw
-        D = np.clip(self.sub_distance(a, b, (y0, y1, x0, x1)), 0.0, radius)
-        agp = radius * glow_portion
-        core = np.clip((radius - agp - D), 0.0, 1.0)       # 1 px blend edge
-        mixv = np.clip(1.0 - (D - radius + agp) / max(agp, 1e-9), 0.0, 1.0)
-        glow_a = glow_rgba[3] * mixv ** 8
-        inv = 1.0 - core
+        box = (y0, y1, x0, x1)
         rows, cols = y1 - y0, x1 - x0
-        boxed = (rows, cols) != (self.gh, self.gw)
-        t1 = self._s1[:rows, :cols]
-        t2 = self._s2[:rows, :cols]
-        out = np.empty((self.gh, self.gw, 4), dtype=np.uint8)
+        if b <= a + 1e-9:
+            # point sub-path: D = clip(dist to pos(a)) directly (cached)
+            D = self._dist_clip_to(self.pos(a), box, radius)
+        else:
+            s_box = self.s[y0:y1, x0:x1]
+            inside = (s_box <= b) if a <= 0.0 else \
+                ((s_box >= a) & (s_box <= b))
+            da = self._dist_clip_to(self.pos(a), box, radius)
+            pb = self.pos(b)
+            Dbuf = self._s3[:rows, :cols]
+            Dbuf[...] = radius                     # clip(db) far value
+            wy0, wy1, wx0, wx1 = self._win(pb, radius, box)
+            if wy1 > wy0 and wx1 > wx0:
+                dw = np.hypot(self.xx[wy0:wy1, wx0:wx1] - pb[0],
+                              self.yy[wy0:wy1, wx0:wx1] - pb[1])
+                np.clip(dw, 0.0, radius, out=dw)
+                Dbuf[wy0 - y0:wy1 - y0, wx0 - x0:wx1 - x0] = dw
+            np.minimum(da, Dbuf, out=Dbuf)         # min(clip da, clip db)
+            np.copyto(Dbuf, self._d_clipped(radius)[y0:y1, x0:x1],
+                      where=inside)                # where(inside, clip d, ·)
+            D = Dbuf
+        agp = radius * glow_portion
+        core = self._s4[:rows, :cols]
+        np.subtract(radius - agp, D, out=core)     # (radius - agp) - D
+        np.clip(core, 0.0, 1.0, out=core)          # 1 px blend edge
+        ga = self._s5[:rows, :cols]                # mixv → glow_a in place
+        np.subtract(D, radius, out=ga)
+        np.add(ga, agp, out=ga)                    # ((D - radius) + agp)
+        np.divide(ga, max(agp, 1e-9), out=ga)
+        np.subtract(1.0, ga, out=ga)
+        np.clip(ga, 0.0, 1.0, out=ga)              # mixv
+        np.power(ga, 8, out=ga)
+        np.multiply(ga, glow_rgba[3], out=ga)      # glow_a = A·mixv**8
+        inv = self._s1[:rows, :cols]
+        np.subtract(1.0, core, out=inv)
+        t1 = self._s2[:rows, :cols]
+        # D (when it was _s3 scratch) is dead past this point — reuse it
+        # for t2; the point-case cached D is a different array and _s3 is
+        # free there too.
+        t2 = self._s3[:rows, :cols]
+        out = self._out_buffer(out_key, glow_rgba, box)
         for c in range(3):
-            if boxed:
-                # far-field constant: core=0 -> 0*bar + 1*glow == glow
-                out[..., c] = np.uint8(np.rint(glow_rgba[c] * 255.0))
-            np.multiply(core, bar_rgb[c], out=t1)
-            np.multiply(inv, glow_rgba[c], out=t2)
-            np.add(t1, t2, out=t1)
-            np.multiply(t1, 255.0, out=t1)
-            np.rint(t1, out=t1)
-            out[y0:y1, x0:x1, c] = t1
-        if boxed:
-            out[..., 3] = 0                # far-field alpha: glow_a=0 -> 0
-        np.multiply(inv, glow_a, out=t2)
+            bc = bar_rgb[c]
+            if bc == 1.0:                          # core*1.0 == core exact
+                np.multiply(inv, glow_rgba[c], out=t2)
+                np.add(core, t2, out=t2)
+            else:
+                np.multiply(core, bc, out=t2)
+                np.multiply(inv, glow_rgba[c], out=t1)
+                np.add(t2, t1, out=t2)
+            np.multiply(t2, 255.0, out=t2)
+            np.rint(t2, out=t2)
+            out[y0:y1, x0:x1, c] = t2
+        np.multiply(inv, ga, out=t2)
         np.add(core, t2, out=t2)
         if xgrad:
             np.multiply(t2, self._xgrad_g[y0:y1, x0:x1], out=t2)
-        np.multiply(t2, alpha_mult, out=t2)
+        if alpha_mult != 1.0:      # x * 1.0 is an exact f64 identity
+            np.multiply(t2, alpha_mult, out=t2)
         np.clip(t2, 0.0, 1.0, out=t2)
         np.multiply(t2, 255.0, out=t2)
         np.rint(t2, out=t2)
@@ -1742,14 +1919,16 @@ class StdHud:
                 seg_lo, seg_hi, HP_GLOW_RADIUS,
                 (HP_GLOW_RADIUS - HP_MAIN_RADIUS
                  * (1.0 - HP_MAIN_GLOW_PORTION)) / HP_GLOW_RADIUS,
-                gbar_rgb, ggl, xgrad=True, alpha_mult=0.9)
+                gbar_rgb, ggl, xgrad=True, alpha_mult=0.9,
+                out_key="hp_glow")
             self.spr.write_texture("hud_hp_glow", glow_tex)
         mkey = (hp_now, bar_rgb, glow_rgba, alpha_main)
         if mkey != self._hp_main_key:
             self._hp_main_key = mkey
             main_tex = field.bar_rgba(0.0, hp_now, HP_MAIN_RADIUS,
                                       HP_MAIN_GLOW_PORTION, bar_rgb,
-                                      glow_rgba, alpha_mult=alpha_main)
+                                      glow_rgba, alpha_mult=alpha_main,
+                                      out_key="hp_main")
             self.spr.write_texture("hud_hp_main", main_tex)
         # content top-left at HP_POS minus the main radius padding row
         x0 = (HP_POS[0] - field.margin) * es

@@ -164,6 +164,11 @@ class SpriteRenderer:
         idx = (np.arange(cap, dtype="u4")[:, None] * 4
                + np.array([0, 1, 2, 2, 1, 3], dtype="u4")[None, :])
         self._ibo = self.ctx.buffer(np.ascontiguousarray(idx))
+        # persistent vertex scratch: the unit-quad corner/uv block of every
+        # row is constant, so it is written once here and _draw only fills
+        # the per-sprite attribute columns (same bytes as a fresh build)
+        self._verts = np.empty((cap, 4, _VERT_FLOATS), dtype="f4")
+        self._verts[:, :, 0:4] = self._corners
         self.vao = self.ctx.vertex_array(
             self.prog,
             [(self.vbo, "2f 2f 2f 2f 1f 4f 2f 2f",
@@ -273,25 +278,30 @@ class SpriteRenderer:
             return
         # painter's order per pass: every non-additive sprite in order,
         # THEN every additive sprite in order (the exact two-phase order
-        # the per-sprite loop produced)
-        n_norm = 0
-        if any(sp.additive for sp in sprites):
-            normal = [sp for sp in sprites if not sp.additive]
+        # the per-sprite loop produced) — one partition pass
+        normal: list = []
+        additive: list = []
+        for sp in sprites:
+            (additive if sp.additive else normal).append(sp)
+        if additive:
+            ordered = normal + additive
             n_norm = len(normal)
-            ordered = normal + [sp for sp in sprites if sp.additive]
         else:
             ordered = sprites
-            n_norm = len(ordered)
+            n_norm = len(sprites)
         n = len(ordered)
         self._ensure_capacity(n)
 
-        params = np.array(
-            [(sp.x, sp.y, sp.w, sp.h, sp.rotation,
-              sp.color[0], sp.color[1], sp.color[2], sp.color[3],
-              sp.uv_off[0], sp.uv_off[1], sp.uv_scale[0], sp.uv_scale[1])
-             for sp in ordered], dtype="f4")
-        verts = np.empty((n, 4, _VERT_FLOATS), dtype="f4")
-        verts[:, :, 0:4] = self._corners
+        # np.fromiter into a preallocated (n, 13) block — the same scalars
+        # in the same order as the old list-of-tuples np.array (identical
+        # f4 casts), without its per-element dtype discovery
+        params = np.fromiter(
+            (v for sp in ordered for v in (
+                sp.x, sp.y, sp.w, sp.h, sp.rotation,
+                sp.color[0], sp.color[1], sp.color[2], sp.color[3],
+                sp.uv_off[0], sp.uv_off[1], sp.uv_scale[0], sp.uv_scale[1])),
+            dtype="f4", count=n * 13).reshape(n, 13)
+        verts = self._verts[:n]          # corners/uv pre-filled, constant
         verts[:, :, 4:] = params[:, None, :]
         self.vbo.orphan()
         self.vbo.write(verts)
