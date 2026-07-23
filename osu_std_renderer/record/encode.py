@@ -49,6 +49,21 @@ def probe_encoder(encoder: str = "auto") -> str:
     return "libx264"
 
 
+def nvenc_target_bps(w: int, h: int, fps: float) -> int:
+    """Resolution-scaled NVENC bitrate ladder (R3D cross-engine policy, 2026-07).
+
+    Replaces the flat per-engine bitrate: scale a 4 Mbps 720p30 reference
+    by pixel rate with a perceptual exponent (0.70 -- deliberately NOT
+    linear), clamped to [2.5, 16] Mbps.  Anchors: 720p30=4.0M,
+    720p60=6.5M, 1080p30=7.1M, 1080p60=11.5M, 1440p60/1080p120+=16M cap.
+    Callers pair the target with maxrate=1.5x / bufsize=2x for NVENC VBR.
+    Same formula in all four engines (catch/taiko/std/mania v2).
+    """
+    ref = 1280.0 * 720.0 * 30.0
+    target = 4_000_000.0 * ((float(w) * float(h) * float(fps)) / ref) ** 0.70
+    return int(min(16_000_000.0, max(2_500_000.0, target)))
+
+
 def build_ffmpeg_cmd(*, encoder: str, resolution: tuple[int, int], fps: int,
                      output_path: Path, audio_path: Path | None = None,
                      audio_offset_ms: int = 0, video_bitrate: str | None = None,
@@ -73,16 +88,13 @@ def build_ffmpeg_cmd(*, encoder: str, resolution: tuple[int, int], fps: int,
     if encoder == "libx264":
         cmd += ["-crf", str(crf), "-preset", "faster", "-profile:v", "high"]
     elif encoder in ("h264_nvenc", "hevc_nvenc"):
-        # Constant-quality (VBR+CQ, -b:v 0 = pure CQ) so bitrate tracks
-        # resolution/motion. Previously NO rate control was set for NVENC, so
-        # it fell back to its ~2 Mbps default -- starving 1440p/120fps (looked
-        # like 720p). cq = crf+4 for comparable quality; resolution-scaled
-        # maxrate caps worst-case file size.
-        _mbps = max(6, round((w * h) / 150_000))
-        if int(fps) >= 120:              # 120fps needs ~1.5x the bits for
-            _mbps = round(_mbps * 1.5)    # equal quality (Red 2026-07-21)
-        cmd += ["-rc", "vbr", "-cq", str(crf + 4), "-b:v", "0",
-                "-maxrate", f"{_mbps}M", "-bufsize", f"{2 * _mbps}M",
+        # Resolution-scaled NVENC bitrate ladder (R3D cross-engine policy,
+        # 2026-07): replaces the 2026-07-21 CQ scheme (cq=crf+4, -b:v 0,
+        # maxrate (w*h)/150k) with the shared target-VBR ladder so all four
+        # engines land on the same size/quality curve -- see nvenc_target_bps.
+        _tgt = nvenc_target_bps(w, h, fps)
+        cmd += ["-rc", "vbr", "-b:v", str(_tgt),
+                "-maxrate", str(int(_tgt * 1.5)), "-bufsize", str(_tgt * 2),
                 "-profile:v", "high"]
     elif video_bitrate:
         cmd += ["-b:v", video_bitrate]
