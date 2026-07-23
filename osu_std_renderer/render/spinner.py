@@ -11,12 +11,15 @@ styles share `spinner-approachcircle`, `spinner-clear`, `spinner-spin`,
 
 ROTATION (SpinnerTrack): the visual rotation tracks the replay cursor
 continuously — per-frame signed angle deltas around the spinner centre
-(256,192), accumulated ONLY while a key is held (matching the ruleset's
-_evaluate_spinner accumulation, which sums |delta| for progress; the same
-deltas drive both, so the metre agrees with the judgment). Between replay
-frames the rotation is lerped. Without a replay (--no-replay perfect
-play) the track auto-spins at the reference constant RPMS = 0.00795
-rev/ms (§2.5) = 477 RPM, the stable auto-spin/display cap.
+(256,192), accumulated ONLY while a key is held. The clear/metre
+REQUIREMENT comes from required_rotations(), which mirrors the ruleset's
+engine-split judgment models (stable half-spin requirement / lazer
+SpinsRequired); the visual track sums raw |delta| without stable's
+velocity smoothing, so the metre can run a hair ahead of the judged
+scoring — noted cosmetic approximation. Between replay frames the
+rotation is lerped. Without a replay (--no-replay perfect play) the
+track auto-spins at the reference constant RPMS = 0.00795 rev/ms (§2.5)
+= 477 RPM, the stable auto-spin/display cap.
 
 Reference behaviors ported from lazer's legacy skins
 (osu.Game.Rulesets.Osu/Skinning/Legacy/):
@@ -118,10 +121,23 @@ def detect_spinner_style(loaded: set[str]) -> str:
     return "none"
 
 
-def required_rotations(spinner_ratio: float, duration_ms: float) -> float:
-    """Full spins needed to clear: duration_s × SpinnerRatio (§2.4; the
-    same formula the ruleset judges with)."""
-    return duration_ms / 1000.0 * spinner_ratio
+def required_rotations(spinner_ratio: float, duration_ms: float,
+                       lazer: bool = False,
+                       lz_min_rps: float | None = None) -> float:
+    """FULL spins of cursor rotation needed to clear, matching the ruleset's
+    judgment models (ruleset._spin_stable/_spin_lazer):
+      * stable: the requirement int(duration_s × SpinnerRatio) counts
+        HALF-spins — SpinnerRatio (3/5/7.5 across OD) is half-spins/sec,
+        so the full-spin equivalent is HALF of it (the old code fed the
+        raw ratio in as full spins and the metre demanded 2× reality);
+      * lazer: SpinsRequired = int(lz_min_rps × duration_s + 0.0001).
+    The visual track accumulates raw cursor angle (no stable velocity
+    smoothing) — the metre/clear may run a hair AHEAD of the judged
+    scoring, a noted cosmetic approximation."""
+    sec = duration_ms / 1000.0
+    if lazer and lz_min_rps is not None:
+        return float(int(lz_min_rps * sec + 0.0001))
+    return int(sec * spinner_ratio) / 2.0
 
 
 class SpinnerTrack:

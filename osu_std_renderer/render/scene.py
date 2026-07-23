@@ -1718,7 +1718,10 @@ class StdScene:
 
     def _build_spinner_track(self, obj) -> SpinnerTrack:
         start, end = obj.get_start_time(), obj.get_end_time()
-        spins = required_rotations(self.diff.spinner_ratio, end - start)
+        spins = required_rotations(
+            self.diff.spinner_ratio, end - start,
+            lazer=bool(getattr(self.judgments, "lazer", False)),
+            lz_min_rps=self.diff.lz_spinner_min_rps)
         if self.frames:
             return SpinnerTrack.from_frames(self.frames, start, end, spins)
         return SpinnerTrack.auto(start, end, spins)   # --no-replay perfect play

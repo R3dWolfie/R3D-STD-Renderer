@@ -10,7 +10,8 @@ PORTED LOGIC (MIT, ppy/osu master — file+class cited per function):
     osu.Game.Rulesets.Osu/Objects/Drawables/DrawableSliderBall.cs  FOLLOW_AREA = 2.4
     osu.Game.Rulesets.Osu/Objects/Drawables/SliderInputManager.cs  follow-area tracking
     osu.Game/Rulesets/Objects/SliderEventGenerator.cs          TAIL_LENIENCY=-36, legacy-last-tick time
-    osu.Game.Rulesets.Osu/Objects/Drawables/DrawableSpinner.cs     spinner result tiers
+    osu.Game.Rulesets.Osu/Objects/Spinner.cs                   lazer SpinsRequired (CLEAR_RPM_RANGE 90/150/225, duration_error)
+    osu.Game.Rulesets.Osu/Objects/Drawables/DrawableSpinner.cs     lazer spinner result tiers (Progress ≥1/>0.9/>0.75)
 
 STABLE-vs-LAZER CHOICES — the engine is AUTO-DETECTED from the .osr's
 game_version (< 30000000 = stable, else lazer; overridable):
@@ -52,10 +53,26 @@ game_version (< 30000000 = stable, else lazer; overridable):
     head's 50-window); reconcile absorbs any resulting count drift.
 
 SIMPLIFICATIONS (logged, reconcile keeps totals exact):
-  * spinners: rotations accumulated from per-frame cursor angle deltas
-    while a key is held; required spins = duration_s × SpinnerRatio (§2.4);
-    result tiers per DrawableSpinner (progress ≥1 → 300, >0.9 → 100,
-    >0.75 → 50, else miss). No spin-bonus score events.
+  * spinners: BOTH scoring models are ported, selected by the same
+    stable-vs-lazer engine switch as notelock (the old shared model
+    compared FULL rotations against stable's HALF-spin ratio — every
+    spinner demanded ~2× the real requirement and popped bogus 50s):
+      - STABLE (danser-go's replay-verified port of the stable decompile):
+        requirement = int(duration_s × DifficultyRate(od, 3, 5, 7.5)) in
+        HALF-spins; rotation runs through stable's velocity model (the
+        cursor angle sets a theoretical velocity, the actual velocity
+        chases it under an acceleration cap and a hard ±0.05 rad/ms cap
+        = 477 rpm, physics in REAL time under rate mods) and scores one
+        scoringRotation per completed half-spin. Tiers (the 20190510.2
+        scoring change, keyed on .osr game_version): ≥req+1 → 300,
+        ≥req−1 → 100, ≥req//4 → 50, else miss (req 0 → 300); pre-2019
+        replays keep the old ≥req+2 / ≥req+1 / ≥req tiers.
+      - LAZER (ppy/osu master): SpinsRequired = int(minRps·duration_s +
+        0.0001), minRps = DifficultyRange(od, 90, 150, 225)/60 — FULL
+        spins; per-spin max-|rotation| tracking (reversals don't stack),
+        deltas ×clock-rate; Progress ≥1 → 300, >0.9 → 100, >0.75 → 50.
+    No spin-bonus score events. Rate-RAMP (WU/WD) replays use their base
+    rate for spinner physics — noted approximation, reconcile absorbs.
   * HP drain: deferred entirely.
   * score: lazer "standardised" shape (ScoreProcessor semantics, same
     formula versus_telemetry ships):
@@ -84,6 +101,16 @@ FOLLOW_CIRCLE_RADIUS_MULT = 2.4     # DrawableSliderBall.FOLLOW_AREA
 TAIL_LENIENCY = -36.0               # SliderEventGenerator.TAIL_LENIENCY
 NOTELOCK_END_LENIENCY = 3.0         # LegacyHitPolicy "3ms of extra leniency"
 MISS_WINDOW = 400.0                 # OsuHitWindows.MISS_WINDOW (== HittableRange)
+
+# spinners — stable's velocity physics (decompile-derived constants, identical
+# in danser-go's replay-verified stable port) + lazer's Spinner.cs values
+SPINNER_CENTRE = (256.0, 192.0)     # stable pins spinners to the centre
+SPINNER_FRAME_TIME = 1000.0 / 60.0  # stable's nominal frame cadence (ms)
+SPINNER_VEL_CAP = 0.05              # rad/ms hard velocity cap (= 477 rpm)
+SPINNER_AUTO_VEL = 0.03             # rad/ms SpunOut/Autopilot constant spin
+LAZER_SPIN_DURATION_ERROR = 0.0001  # Spinner.ApplyDefaultsToSelf duration_error
+NEW_SPINNER_SCORING_VERSION = 20190510  # stable build that re-tiered spinners
+                                        # (cuttingedge/20190510.2 changelog)
 
 # lazer ScoreProcessor.GetBaseScoreForResult (Great/Ok/Meh/LargeTickHit)
 BASE_SCORE = {"300": 300, "100": 100, "50": 50, "miss": 0}
@@ -369,7 +396,8 @@ class SimResult:
                          f"reconcile against; max combo {self.sim_max_combo})")
         if self.spinner_count:
             lines.append(f"ruleset: {self.spinner_count} spinner(s) judged by the "
-                         "simplified rotation model (reconcile keeps totals exact)")
+                         f"{engine.split()[0]} spinner model "
+                         "(reconcile keeps totals exact)")
         lines.extend(self.detail_lines)
         return lines
 
@@ -393,6 +421,11 @@ class _ObjSim:
     tracking: list[tuple[float, float]] = field(default_factory=list)
     breaks: list[float] = field(default_factory=list)
     final: JudgmentKind = JudgmentKind.MISS
+    # spinner diagnostics: the judged requirement and the achieved amount,
+    # in the ENGINE's own unit (stable: half-spins scored vs required;
+    # lazer: full spins achieved vs SpinsRequired)
+    spin_req: int = 0
+    spin_got: float = 0.0
 
 
 # --- the ruleset -------------------------------------------------------------------
@@ -554,7 +587,7 @@ class StdRuleset:
             if s.kind == "slider":
                 self._evaluate_slider(s, held)
             elif s.kind == "spinner":
-                self._evaluate_spinner(s, held)
+                self._evaluate_spinner(s)
             else:
                 s.final = s.head_result if s.head_hit else JudgmentKind.MISS
             s.quality = self._quality(s)
@@ -773,57 +806,231 @@ class StdRuleset:
         else:
             s.final = _classic_slider_aggregate(s.parts)
 
-    # ---- phase 3: spinners (simplified) ----------------------------------------------
+    # ---- phase 3: spinners (stable + lazer ports) --------------------------------------
 
-    def _evaluate_spinner(self, s: _ObjSim, held: HeldState) -> None:
-        """SIMPLIFIED spinner model: rotation accumulated from per-frame
-        cursor angle deltas around the playfield centre while a key is held;
-        required spins = duration_s × SpinnerRatio (§2.4). Result tiers per
-        DrawableSpinner.CheckForResult (progress ≥1 → Great, >0.9 → Ok,
-        >0.75 → Meh, else Miss). No per-spin bonus."""
-        cx, cy = 256.0, 192.0
-        total = 0.0
-        prev_angle: float | None = None
-        prev_held = False
-        for f in self.frames:
-            if f.time_ms < s.start:
-                continue
-            if f.time_ms > s.end:
-                break
-            ang = math.atan2(f.y - cy, f.x - cx)
-            is_held = bool(f.keys & (_CH1 | _CH2))
-            if prev_angle is not None and is_held and prev_held:
-                d = math.atan2(math.sin(ang - prev_angle),
-                               math.cos(ang - prev_angle))
-                total += abs(d)
-            prev_angle = ang
-            prev_held = is_held
-        rotations = total / (2.0 * math.pi)
-        # osu! SpinsRequired is an INTEGER count of full spins — both engines
-        # truncate it (Spinner.ApplyDefaultsToSelf / stable's rotation
-        # requirement are `(int)(...)`), NOT the continuous fraction the
-        # progress meter draws. A spinner too short to require even one full
-        # spin (SpinsRequired == 0) is already complete: Progress → 1 → Great,
-        # no spin needed. Aspire micro-spinners (e.g. Time Traveler's 23 ms
-        # centre spinners) live here — the old un-truncated fractional
-        # requirement demanded a fraction of a spin the player never made in
-        # ~1 frame and wrongly MISSED every one of them. Truncation only ever
-        # lowers the requirement, so it cannot manufacture a new over-miss.
-        seconds_duration = (s.end - s.start) / 1000.0
-        spins_required = int(seconds_duration * self.diff.spinner_ratio)
-        progress = 1.0 if spins_required <= 0 else rotations / spins_required
-        if progress >= 1.0:
-            s.final = JudgmentKind.HIT300
-        elif progress > 0.9:
-            s.final = JudgmentKind.HIT100
-        elif progress > 0.75:
-            s.final = JudgmentKind.HIT50
+    def _clock_rate(self) -> float:
+        """Effective clock rate of the play: lazer custom speed_change
+        (meta.rate_override) wins, else the legacy bitmask (DT/NC 1.5,
+        HT 0.75), else 1.0. Rate-RAMP (WU/WD) replays fall back to this
+        base rate for spinner physics — noted approximation."""
+        m = self.meta
+        if m is None:
+            return 1.0
+        override = getattr(m, "rate_override", None)
+        if override:
+            return float(override)
+        mods = int(getattr(m, "mods", 0) or 0)
+        if mods & ((1 << 6) | (1 << 9)):        # DT / NC
+            return 1.5
+        if mods & (1 << 8):                     # HT
+            return 0.75
+        return 1.0
+
+    def _evaluate_spinner(self, s: _ObjSim) -> None:
+        """Judge one spinner with the engine matching the replay — the
+        stable/lazer requirement formulas AND tier ladders differ (module
+        docstring has both models; the shared old model under-credited every
+        spin ~2× and popped bogus 50s — the Mayume bug)."""
+        if self.lazer:
+            requirement, got, tier = self._spin_lazer(s)
         else:
-            s.final = JudgmentKind.MISS
+            requirement, got, tier = self._spin_stable(s)
+        s.spin_req = requirement
+        s.spin_got = got
+        s.final = tier
         s.head_judged = True
         s.head_hit = s.final is not JudgmentKind.MISS
         s.hit_time = s.end if s.head_hit else None
         s.delta = 0.0 if s.head_hit else None
+
+    def _spin_stable(self, s: _ObjSim) -> tuple[int, float, JudgmentKind]:
+        """osu!stable spinner scoring — the model every stable replay was
+        actually judged under (constants and structure cross-checked against
+        danser-go's stable port, which is verified against leaderboard
+        replays at scale; danser-go app/rulesets/osu/spinner.go
+        processStable/UpdatePostFor):
+
+          * REQUIREMENT = int(duration_s × SpinnerRatio) in HALF-spins,
+            SpinnerRatio = DifficultyRate(od, 3, 5, 7.5) (difficulty.py) —
+            i.e. 1.5/2.5/3.75 full spins per second, NOT 3/5/7.5.
+          * PHYSICS per replay frame strictly inside (start, end): the
+            cursor angle around the centre sets a THEORETICAL velocity
+            (angleDiff/16.67 ms at stable frame pacing; angleDiff/realDt
+            when the frame cadence runs slow); the ACTUAL velocity chases
+            it under an acceleration budget (0.00008 + max(0, (5000 −
+            duration)/1000/2000) rad/ms² — short spinners spin up faster)
+            and a hard ±0.05 rad/ms cap (477 rpm). No key held → the angle
+            input is zeroed, so the velocity DECAYS but residual rotation
+            still credits (stable behaviour). Zero cursor movement decays
+            the theoretical velocity /3 then to 0. SpunOut/Autopilot pin
+            the velocity at 0.03 rad/ms. Under rate mods the physics run
+            in REAL time (danser GetModifiedTime): the acceleration budget
+            and the slow-cadence velocity divide by the clock rate while
+            rotation credits over MAP-time dt — this is why DT stable
+            replays legitimately bank ~rate× the raw cursor angle (a real
+            HD,DT ESSE CARA! replay in the test set NEEDS this to reach
+            its recorded 300s).
+          * SCORING: rotationCountF accumulates |velocity·dt|/π (HALF-spin
+            units); scoringRotationCount ticks once per completed half-spin.
+          * TIERS at the spinner end — modern scoring (the cuttingedge/
+            20190510.2 change, keyed on .osr game_version): req == 0 → 300,
+            scoring ≥ req+1 → 300, ≥ req−1 → 100, ≥ req//4 → 50, else miss
+            (yes: a req-1 spinner can never miss, a req≤3 spinner never
+            drops below 50 — stable's real post-2019 leniency). Pre-2019
+            replays: ≥ req+2 → 300, ≥ req+1 → 100, ≥ req → 50, else miss.
+        """
+        cx, cy = SPINNER_CENTRE
+        speed = self._clock_rate()
+        dur = s.end - s.start
+        requirement = int(dur / 1000.0 * self.diff.spinner_ratio)
+        max_accel = 0.00008 + max(0.0, (5000.0 - dur) / 1000.0 / 2000.0)
+        mods = int(getattr(self.meta, "mods", 0) or 0)
+        auto_spin = bool(mods & ((1 << 12) | (1 << 13)))    # SO / Autopilot
+        relax = bool(mods & (1 << 7))
+        vel = theo = 0.0
+        last_angle = 0.0
+        seen_angle = False
+        zero_count = 0
+        frame_var = SPINNER_FRAME_TIME
+        rot_f = 0.0                 # accumulated half-spins (float)
+        scoring = 0
+        last_count = 0
+        prev_t: float | None = None
+        for f in self.frames:
+            t = f.time_ms
+            if not (s.start < t < s.end):
+                prev_t = t          # frame pacing spans the whole replay
+                continue
+            dt = (t - prev_t) if prev_t is not None else SPINNER_FRAME_TIME
+            prev_t = t
+            # actual velocity chases the previous frame's theoretical one
+            accel = max_accel * dt / speed
+            if auto_spin:
+                vel = SPINNER_AUTO_VEL
+            elif theo > vel:
+                a = accel / 4.0 if (vel < 0.0 and relax) else accel
+                vel += min(theo - vel, a)
+            else:
+                a = accel / 4.0 if (vel > 0.0 and relax) else accel
+                vel -= min(vel - theo, a)
+            vel = max(-SPINNER_VEL_CAP, min(vel, SPINNER_VEL_CAP))
+            # new theoretical velocity from this frame's cursor angle
+            ang = math.atan2(f.y - cy, f.x - cx)
+            if not seen_angle:
+                last_angle = ang    # first frame contributes no delta
+                seen_angle = True
+            d = ang - last_angle
+            if d < -math.pi:
+                d += 2.0 * math.pi
+            elif d > math.pi:
+                d -= 2.0 * math.pi
+            decay = 0.999 ** dt
+            frame_var = decay * frame_var + (1.0 - decay) * dt
+            if d == 0.0:
+                zero_count += 1
+                theo = theo / 3.0 if zero_count < 2 else 0.0
+            else:
+                zero_count = 0
+                if not (f.keys & (_CH1 | _CH2)) and not relax:
+                    d = 0.0
+                if abs(d) < math.pi:
+                    if frame_var / speed > SPINNER_FRAME_TIME * 1.04:
+                        theo = (d / (dt / speed)) if dt > 0 else 0.0
+                    else:
+                        theo = d / SPINNER_FRAME_TIME
+                else:
+                    theo = 0.0
+            last_angle = ang
+            rot_f += abs(vel * dt) / math.pi
+            count = int(rot_f)
+            if count != last_count:
+                scoring += 1
+                last_count = count
+        gv = int(getattr(self.meta, "game_version", 0) or 0)
+        if 0 < gv < NEW_SPINNER_SCORING_VERSION:    # pre-2019 stable tiers
+            if scoring >= requirement + 2:
+                tier = JudgmentKind.HIT300
+            elif scoring >= requirement + 1:
+                tier = JudgmentKind.HIT100
+            elif scoring >= requirement:
+                tier = JudgmentKind.HIT50
+            else:
+                tier = JudgmentKind.MISS
+        elif requirement == 0 or scoring >= requirement + 1:
+            tier = JudgmentKind.HIT300
+        elif scoring >= requirement - 1:
+            tier = JudgmentKind.HIT100
+        elif scoring >= requirement // 4:
+            tier = JudgmentKind.HIT50
+        else:
+            tier = JudgmentKind.MISS
+        return requirement, float(scoring), tier
+
+    def _spin_lazer(self, s: _ObjSim) -> tuple[int, float, JudgmentKind]:
+        """lazer spinner scoring (ppy/osu master — Objects/Spinner.cs
+        ApplyDefaultsToSelf + Drawables/DrawableSpinner.cs Progress/
+        CheckForResult + Skinning/SpinnerRotationTracker semantics, cross-
+        checked against danser-go processLazer):
+
+          * SpinsRequired = int(minRps × duration_s + duration_error),
+            minRps = DifficultyRange(od, CLEAR_RPM_RANGE 90/150/225)/60
+            (difficulty.py's lz_spinner_min_rps) — FULL spins.
+          * rotation: per-frame angle delta in degrees (±180-wrapped),
+            counted while a button is held (or Relax), ×clock-rate (the
+            tracker rate-compensates so DT/HT spins score the same); a
+            spin completes when the MAX |rotation| within the current
+            spin reaches 360° — direction reversals do not stack.
+          * Progress = TotalRotation/360/SpinsRequired (1 when none
+            required); ≥1 → 300, >0.9 → 100, >0.75 → 50, else miss.
+        """
+        cx, cy = SPINNER_CENTRE
+        speed = self._clock_rate()
+        dur = s.end - s.start
+        requirement = int(self.diff.lz_spinner_min_rps * (dur / 1000.0)
+                          + LAZER_SPIN_DURATION_ERROR)
+        mods = int(getattr(self.meta, "mods", 0) or 0)
+        relax = bool(mods & (1 << 7))
+        total_acc = 0.0             # signed accumulated degrees
+        acc_at_completion = 0.0     # accumulated value when the last spin closed
+        cur_max = 0.0               # max |rotation| within the current spin
+        rotation_count = 0
+        last_angle = 0.0
+        seen_angle = False
+        for f in self.frames:
+            if f.time_ms < s.start or f.time_ms > s.end:
+                continue
+            ang = math.degrees(math.atan2(f.y - cy, f.x - cx))
+            d = (ang - last_angle) if seen_angle else 0.0
+            seen_angle = True
+            last_angle = ang
+            if d > 180.0:
+                d -= 360.0
+            elif d < -180.0:
+                d += 360.0
+            if not (f.keys & (_CH1 | _CH2)) and not relax:
+                continue
+            d *= speed
+            if d == 0.0:
+                continue
+            total_acc += d
+            cur_max = max(cur_max, abs(total_acc - acc_at_completion))
+            while cur_max >= 360.0:
+                direction = 1.0 if (total_acc - acc_at_completion) >= 0.0 else -1.0
+                rotation_count += 1
+                acc_at_completion += direction * 360.0
+                cur_max = abs(total_acc - acc_at_completion)
+        total_rotation = 360.0 * rotation_count + cur_max
+        spins = total_rotation / 360.0
+        progress = 1.0 if requirement <= 0 else spins / requirement
+        if progress >= 1.0:
+            tier = JudgmentKind.HIT300
+        elif progress > 0.9:
+            tier = JudgmentKind.HIT100
+        elif progress > 0.75:
+            tier = JudgmentKind.HIT50
+        else:
+            tier = JudgmentKind.MISS
+        return requirement, spins, tier
 
     # ---- reconcile (mania v2 judgments.py pattern) ------------------------------------
 

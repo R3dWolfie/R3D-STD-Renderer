@@ -73,13 +73,17 @@ def _perfect_replay_frames(bm) -> list[StdFrame]:
         key = KEY_K1 if i % 2 == 0 else KEY_K2
         start, end = obj.get_start_time(), obj.get_end_time()
         if isinstance(obj, Spinner):
+            # 16 ms cadence (real stable replays record ~60 fps): stable's
+            # spinner physics credit velocity·dt with velocity built from
+            # angle/16.67 REGARDLESS of frame spacing, so a 5 ms-cadence
+            # synthetic spin undercredits 3× and stops "perfect" clears.
             t = start
             while t <= end:
                 a = 2.0 * math.pi * 0.008 * (t - start)
                 frames.append(StdFrame(
                     time_ms=int(t), x=256.0 + 50.0 * math.cos(a),
                     y=192.0 + 50.0 * math.sin(a), keys=key))
-                t += 5.0
+                t += 16.0
         elif isinstance(obj, Slider):
             t = start
             while t <= end:

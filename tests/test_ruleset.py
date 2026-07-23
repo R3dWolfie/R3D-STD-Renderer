@@ -377,17 +377,27 @@ def test_lazer_slider_head_is_timing_judged():
     assert missed.verdict_for(slider).kind is JudgmentKind.MISS
 
 
-# --- spinner (simplified model) --------------------------------------------------------
+# --- spinner (stable + lazer models) ---------------------------------------------------
+
+def _spin_frames(full_spins: float, start: int = 1000, dur: int = 1000,
+                 n: int = 100):
+    """n+1 frames spinning `full_spins` rotations around the centre, key
+    held throughout."""
+    out = []
+    for i in range(n + 1):
+        ang = 2.0 * math.pi * full_spins * i / float(n)
+        out.append((start + i * dur // n, 256 + 100 * math.cos(ang),
+                    192 + 100 * math.sin(ang), KEY_K1))
+    return _frames(out)
+
 
 def test_spinner_spin_vs_no_spin():
-    # OD7 → SpinnerRatio 6.0; 1s spinner needs 6 rotations
+    # OD7 → SpinnerRatio 6.0 HALF-spins/s; a 1 s spinner requires 6
+    # half-spins (+1 for the 300). 8 full spins = 16 raw half-spins —
+    # ~9.5 after stable's velocity model — clears it; an idle cursor
+    # (0 < req//4 = 1) is a real miss.
     bm = _map("256,192,1000,12,0,2000,0:0:0:0:\n")
-    spins = []
-    for i in range(101):
-        ang = 2.0 * math.pi * 8.0 * i / 100.0
-        spins.append((1000 + i * 10, 256 + 100 * math.cos(ang),
-                      192 + 100 * math.sin(ang), KEY_K1))
-    sim = StdRuleset(bm, _frames(spins)).run()
+    sim = StdRuleset(bm, _spin_frames(8.0)).run()
     assert sim.verdict_for(bm.hit_objects[0]).kind is JudgmentKind.HIT300
 
     idle = StdRuleset(bm, _frames([(1500, 256, 100, KEY_K1)])).run()
@@ -412,14 +422,40 @@ def test_micro_spinner_auto_completes_without_spinning():
     assert none.verdict_for(bm.hit_objects[0]).kind is JudgmentKind.HIT300
 
 
-def test_short_spinner_needing_one_spin_still_missable():
-    """Guard the boundary the fix must NOT cross: a spinner just long enough
-    to require one integer spin (int(0.2·6.0) = 1) is a real MISS when the
-    player never rotates — truncation lowers the bar to 0 only BELOW one
-    spin, not at/above it."""
+def test_short_spinner_req1_can_never_miss():
+    """Modern stable tiers (the 20190510.2 scoring, danser
+    getRequirementOk = requirement − 1): a spinner requiring one half-spin
+    (int(0.2·6.0) = 1) floors at HIT100 even when the player never rotates
+    — 0 scored ≥ req−1 = 0. Stable's real post-2019 leniency (the old
+    model wrongly MISSED it)."""
     bm = _map("256,192,1000,12,0,1200,0:0:0:0:\n")
     idle = StdRuleset(bm, _frames([(1100, 256, 192, KEY_K1)])).run()
+    assert idle.verdict_for(bm.hit_objects[0]).kind is JudgmentKind.HIT100
+
+
+def test_spinner_stable_miss_boundary():
+    """req//4 is modern stable's 50-floor: an unspun 700 ms spinner
+    (req = int(0.7·6.0) = 4 → floor 1 > 0 scored) is a real MISS —
+    the leniency of req ≤ 3 spinners does NOT extend here."""
+    bm = _map("256,192,1000,12,0,1700,0:0:0:0:\n")
+    idle = StdRuleset(bm, _frames([(1350, 256, 100, KEY_K1)])).run()
     assert idle.verdict_for(bm.hit_objects[0]).kind is JudgmentKind.MISS
+
+
+def test_spinner_lazer_requirement_and_tiers():
+    """lazer SpinsRequired = int(minRps·sec + 1e-4) FULL spins with the
+    DrawableSpinner Progress tiers. OD7 → minRps = DifficultyRange(7,
+    90,150,225)/60 = 3.0 → a 1 s spinner needs 3 full spins (stable
+    demands 6 half-spins + 1 — the engines genuinely differ):
+    3.2 spins → 300; 2.8 (progress 0.93) → 100; 2.4 (0.8) → 50;
+    2.0 (0.67) → miss."""
+    bm = _map("256,192,1000,12,0,2000,0:0:0:0:\n")
+    want = [(3.2, JudgmentKind.HIT300), (2.8, JudgmentKind.HIT100),
+            (2.4, JudgmentKind.HIT50), (2.0, JudgmentKind.MISS)]
+    for spins, kind in want:
+        sim = StdRuleset(bm, _spin_frames(spins), lazer=True).run()
+        got = sim.verdict_for(bm.hit_objects[0]).kind
+        assert got is kind, f"{spins} spins: {got} != {kind}"
 
 
 # --- reconcile snap ----------------------------------------------------------------------
