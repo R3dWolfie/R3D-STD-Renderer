@@ -92,6 +92,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import math
 import os
 import sys
 import time
@@ -374,6 +375,41 @@ PB_DB_PATH = os.environ.get("R3D_RENDER_DB",
 LAZER_RESULTS_MIN_SECONDS = 4.5   # floor so both stages + a hold fit
 
 
+def _display_acc_pct(meta, judgments) -> float:
+    """The results screen's accuracy percentage. Stable replays (and CL —
+    the Classic mod is an explicit stable-semantics request): the
+    .osr-header round(acc·100, 2) as before. LAZER replays with a
+    ScoreInfo blob: lazer's canonical tick/tail-inclusive accuracy,
+    TRUNCATED the way lazer's FormatAccuracy does (floor to 2 display
+    decimals) — the exact digits the player saw in-game and the value the
+    site card's DB row carries (forum bug 11 item 1: 98.88% shown for a
+    play lazer called 98.91%)."""
+    if (judgments is not None and getattr(judgments, "lazer", False)
+            and getattr(meta, "lazer_accuracy", None) is not None):
+        return math.floor(meta.lazer_accuracy * 10000.0) / 100.0
+    return meta.accuracy
+
+
+def _spinner_stats(meta, judgments) -> tuple[tuple[int, int],
+                                             tuple[int, int]] | None:
+    """((spins, max_spins), (bonus, max_bonus)) for the results screens'
+    SPINNER SPIN / SPINNER BONUS rows, or None to omit them. Data exists
+    only in a lazer .osr's ScoreInfo blob (small_bonus = spinner spins,
+    large_bonus = bonus spins — OsuRuleset's display names); a stable
+    .osr carries no spin statistics, so stable renders keep the previous
+    screen exactly (honest gap, same rule as the PP line). Only shown
+    when the map actually has spinners (a zero max on both = no
+    spinners → None)."""
+    st = getattr(meta, "lazer_statistics", None) if meta is not None else None
+    if st is None:
+        return None
+    if (getattr(st, "max_small_bonus", 0) <= 0
+            and getattr(st, "max_large_bonus", 0) <= 0):
+        return None
+    return ((st.small_bonus, st.max_small_bonus),
+            (st.large_bonus, st.max_large_bonus))
+
+
 def _build_lazer_results(spr, settings, beatmap, meta, judgments, hud, fv,
                          frames, osu_path, args, speed, frozen=None):
     """Assemble the lazer ranking screen (render/lazer_results.py) — gather
@@ -401,7 +437,7 @@ def _build_lazer_results(spr, settings, beatmap, meta, judgments, hud, fv,
         counts = (meta.count_300, meta.count_100, meta.count_50,
                   meta.count_miss)
         grade = meta.grade
-        acc_pct = meta.accuracy
+        acc_pct = _display_acc_pct(meta, judgments)
         score = int(meta.score or fv["score"])
         max_combo = meta.max_combo
     stars = star_rating(osu_path, meta.mods)
@@ -494,6 +530,10 @@ def _build_lazer_results(spr, settings, beatmap, meta, judgments, hud, fv,
         print("avatar: no osu! avatar for the featured player -- "
               "procedural chip", file=sys.stderr)
 
+    # SPINNER SPIN / SPINNER BONUS rows (lazer's results statistics for
+    # spinner maps — forum bug 11 item 3); None (stable replay / no
+    # spinners) keeps the panel byte-identical to the previous layout.
+    spin_stats = _spinner_stats(meta, judgments)
     data = ResultsData(
         player=meta.player_name, grade=grade, acc_pct=acc_pct,
         score=score, max_combo=max_combo,
@@ -503,6 +543,8 @@ def _build_lazer_results(spr, settings, beatmap, meta, judgments, hud, fv,
         date_str=(meta.played_at or "—"), ur=fv["ur"],
         slider_ticks=(tick_hit, tick_total),
         slider_ends=(end_hit, end_total),
+        spinner_spins=spin_stats[0] if spin_stats else None,
+        spinner_bonus=spin_stats[1] if spin_stats else None,
         err_deltas=list(hud.data.err_deltas),
         windows=(hud.hw.great, hud.hw.ok, hud.hw.meh),
         aim_points=aim_points, perf=perf, pb=pb, leaderboard=board,
@@ -781,7 +823,8 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
             r_counts = frozen["counts"] if frozen else (
                 meta.count_300, meta.count_100, meta.count_50, meta.count_miss)
             r_grade = frozen["grade"] if frozen else meta.grade
-            r_acc = frozen["acc_pct"] if frozen else meta.accuracy
+            r_acc = (frozen["acc_pct"] if frozen
+                     else _display_acc_pct(meta, judgments))
             r_score = frozen["score"] if frozen else (meta.score or fv["score"])
             r_combo = frozen["max_combo"] if frozen else meta.max_combo
             # a lazer replay shows the FULL mod set (incl. lazer-only mods +
@@ -801,7 +844,8 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
                 diff_name=beatmap.difficulty_name, mods=meta.mods,
                 use_skin_ranks=not settings.renderer_default_font_and_ranks,
                 argon_font=settings.skin_dir is None,
-                mods_display=mods_display)
+                mods_display=mods_display,
+                spinner_stats=_spinner_stats(meta, judgments))
             results.set_windows(hud.hw.great, hud.hw.ok)
             results_dur_wall_ms = settings.results_screen_time * 1000.0
         # PASS → results after the map-end fade; FAIL → after the fall
@@ -1247,6 +1291,12 @@ def _print_hud_final_values(hud, judgments, meta=None, frozen=None) -> None:
         total = c3 + c1 + c5 + cm
         real_acc = ((300 * c3 + 100 * c1 + 50 * c5) / (300.0 * total)
                     if total else 1.0)
+        # a LAZER replay's authoritative accuracy is the ScoreInfo blob's
+        # tick/tail-inclusive value, not the header-count formula — the
+        # ruleset pins the final displayed acc to it (forum bug 11 item 1)
+        if (judgments.lazer and meta is not None
+                and getattr(meta, "lazer_accuracy", None) is not None):
+            real_acc = meta.lazer_accuracy
         ok = "==" if abs(real_acc - fv["acc"]) < 5e-5 else "!= MISMATCH"
         acc_line += f" (replay {real_acc * 100.0:.2f}% {ok})"
     hp_part = ""

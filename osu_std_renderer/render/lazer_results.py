@@ -1220,6 +1220,13 @@ class ResultsData:
     # pure-nomod play yields no badges (no row).
     lazer_mods: tuple = ()                 # meta.lazer_mods (display order)
     rate_override: float | None = None     # meta.rate_override custom rate
+    # SPINNER SPIN / SPINNER BONUS statistics — lazer's results-panel rows
+    # for spinner maps (OsuRuleset display names: SmallBonus → "spinner
+    # spin", LargeBonus → "spinner bonus"), (achieved, max) from the .osr
+    # ScoreInfo blob. None (stable replay / no spinners) → the row is
+    # omitted and the panel stays byte-identical to the previous layout.
+    spinner_spins: tuple[int, int] | None = None
+    spinner_bonus: tuple[int, int] | None = None
 
 
 class LazerResultsScreen:
@@ -1444,12 +1451,27 @@ class LazerResultsScreen:
             ("SLIDER TICK", f"{th}/{tt}", (0.85, 0.88, 0.95)),
             ("SLIDER END", f"{eh}/{et}", (0.85, 0.88, 0.95)),
         ]
+        # SPINNER SPIN / SPINNER BONUS row (lazer's spinner statistics,
+        # OsuRuleset display names) — only on spinner maps whose replay
+        # carries the ScoreInfo bonus counts; absent → no row, the panel
+        # layout is byte-identical to the previous screen.
+        self._stat_d = []
+        if d.spinner_spins is not None:
+            sh_, st_ = d.spinner_spins
+            self._stat_d.append(("SPINNER SPIN", f"{sh_}/{st_}",
+                                 (0.85, 0.88, 0.95)))
+        if d.spinner_bonus is not None:
+            bh_, bt_ = d.spinner_bonus
+            self._stat_d.append(("SPINNER BONUS", f"{bh_}/{bt_}",
+                                 (0.85, 0.88, 0.95)))
         self._grid_a = [self._grid_cell(lbl, val, col)
                         for lbl, val, col in self._stat_a]
         self._grid_b = [self._grid_cell(lbl, val, col)
                         for lbl, val, col in self._stat_b]
         self._grid_c = [self._grid_cell(lbl, val, col)
                         for lbl, val, col in self._stat_c]
+        self._grid_d = [self._grid_cell(lbl, val, col)
+                        for lbl, val, col in self._stat_d]
         # roll metadata for the top-3 stat VALUES (accuracy / max-combo / pp):
         # lazer's StatisticCounter rolls them over dur/2 (1500 ms) OutQuad. Each
         # holds its value texture key so _roll_stats re-uploads in place. pp
@@ -1712,12 +1734,20 @@ class LazerResultsScreen:
         y += self._draw_star_row(out, cx, y, a) + 22 * k
         # stats grid — top-3 values roll (accuracy / max-combo / pp, OutQuad)
         self._roll_stats(age_ms)
+        # with the spinner row present the grid gaps tighten (16/14/16 →
+        # 12/10/10 + 12) so the extra row fits the fixed-height panel; a
+        # spinner-less/stable panel keeps the exact previous spacing.
+        has_d = bool(self._grid_d)
+        g_a, g_b, g_c = (12, 10, 10) if has_d else (16, 14, 16)
         y += self._draw_grid_row(out, self._grid_a, cx, y, a,
-                                 self.PANEL_W * 0.86) + 16 * k
+                                 self.PANEL_W * 0.86) + g_a * k
         y += self._draw_grid_row(out, self._grid_b, cx, y, a,
-                                 self.PANEL_W * 0.86) + 14 * k
+                                 self.PANEL_W * 0.86) + g_b * k
         y += self._draw_grid_row(out, self._grid_c, cx, y, a,
-                                 self.PANEL_W * 0.62) + 16 * k
+                                 self.PANEL_W * 0.62) + g_c * k
+        if has_d:
+            y += self._draw_grid_row(out, self._grid_d, cx, y, a,
+                                     self.PANEL_W * 0.62) + 12 * k
         self._blit(out, self.date_row, cx, y, a)
 
     def _draw_mod_row(self, out, cx, top_y, a) -> float:

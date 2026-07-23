@@ -88,6 +88,7 @@ delta is reported as the sim-accuracy metric.
 from __future__ import annotations
 
 import bisect
+import dataclasses
 import math
 import sys
 from dataclasses import dataclass, field
@@ -115,6 +116,10 @@ NEW_SPINNER_SCORING_VERSION = 20190510  # stable build that re-tiered spinners
 # lazer ScoreProcessor.GetBaseScoreForResult (Great/Ok/Meh/LargeTickHit)
 BASE_SCORE = {"300": 300, "100": 100, "50": 50, "miss": 0}
 BASE_LARGE_TICK = 30
+LAZER_TAIL_ACC = 150               # HitResult.SliderTailHit numeric — the
+                                   # slider TAIL's weight in lazer's
+                                   # accuracy (a missed tail is IgnoreMiss,
+                                   # 0 of 150 — the denominator still grows)
 COMBO_EXPONENT = 0.5                # ScoreProcessor.COMBO_EXPONENT
 SMALL_BONUS_SCORE = 10             # Judgement.SMALL_BONUS_SCORE (bonus portion)
 LARGE_BONUS_SCORE = 50             # Judgement.LARGE_BONUS_SCORE (bonus portion)
@@ -173,6 +178,10 @@ class JudgmentEvent:
     y: float
     combo_after: int
     score_after: int
+    # running accuracy RATIO after this judgment. Stable engine: the
+    # standard 300/100/50 object formula; lazer engine: ScoreProcessor's
+    # tick/tail-inclusive accuracy (slider parts between popups fold into
+    # the NEXT popup's value; the LAST event carries the reconciled final).
     acc_after: float = 1.0
 
 
@@ -1591,14 +1600,17 @@ class StdRuleset:
                 c[JudgmentKind.HIT50], c[JudgmentKind.MISS])
 
     def _lattice(self, sims: list[_ObjSim]):
-        """(time, kind, is_object, sim, base, base_max, combo_mode) events.
-        combo_mode: 'inc' = +1 on hit / RESET on miss (circles, spinners,
-        slider heads, ticks and repeats — head/tick/repeat misses are all
-        sliderbreaks; the head's reset lands at its miss moment, the
-        window close); 'inc_noreset' = +1 on hit, no reset on miss (the
-        slider TAIL — stable's only lenient part); 'none' = no combo
-        contribution (the slider's aggregate judgment — stable combo
-        comes from the parts)."""
+        """(time, kind, is_object, sim, base, base_max, combo_mode, hit,
+        part_kind) events. combo_mode: 'inc' = +1 on hit / RESET on miss
+        (circles, spinners, slider heads, ticks and repeats —
+        head/tick/repeat misses are all sliderbreaks; the head's reset
+        lands at its miss moment, the window close); 'inc_noreset' = +1 on
+        hit, no reset on miss (the slider TAIL — stable's only lenient
+        part); 'none' = no combo contribution (the slider's aggregate
+        judgment — stable combo comes from the parts). part_kind is the
+        slider PartOutcome kind ("head"|"tick"|"repeat"|"tail") for part
+        events, None for object judgments — the lazer accuracy
+        accumulation weighs ticks/tails by it."""
         ev = []
         for s in sims:
             if s.kind == "slider":
@@ -1613,7 +1625,7 @@ class StdRuleset:
                             t = s.hit_time
                     ev.append((t, s.final, False, s,
                                BASE_LARGE_TICK if p.hit else 0,
-                               BASE_LARGE_TICK, mode, p.hit))
+                               BASE_LARGE_TICK, mode, p.hit, p.kind))
                 # the slider's counted judgment: stable = classic aggregate
                 # at the slider end; lazer = the head's timing judgment at
                 # its own moment (that's where the popup shows)
@@ -1624,32 +1636,41 @@ class StdRuleset:
                     obj_t = s.end
                 ev.append((obj_t, s.final, True, s,
                            BASE_SCORE[s.final.value], 300, "none",
-                           s.final is not JudgmentKind.MISS))
+                           s.final is not JudgmentKind.MISS, None))
             else:
                 t = s.hit_time if s.hit_time is not None else \
                     (s.deadline if s.kind == "circle" else s.end)
                 ev.append((t, s.final, True, s,
                            BASE_SCORE[s.final.value], 300, "inc",
-                           s.final is not JudgmentKind.MISS))
+                           s.final is not JudgmentKind.MISS, None))
         ev.sort(key=lambda e: e[0])
         return ev
 
     def _build_events(
             self, sims: list[_ObjSim],
     ) -> tuple[list[JudgmentEvent], int, list[tuple[float, int]]]:
-        """Combo (stable semantics), accuracy (standard std formula over
-        object judgments) and lazer-standardised score over the full event
-        lattice; emits one JudgmentEvent per OBJECT judgment (the popups).
-        Returns (events, max_combo, combo_timeline) — max combo is tracked
-        on the lattice so peaks inside a broken slider still count, and the
-        timeline records every part-level combo CHANGE (the HUD's counter)."""
+        """Combo (stable semantics), accuracy and lazer-standardised score
+        over the full event lattice; emits one JudgmentEvent per OBJECT
+        judgment (the popups). ACCURACY is engine-split: the stable path
+        keeps the standard std formula over object judgments only; the
+        LAZER path is lazer's ScoreProcessor.Accuracy — slider ticks and
+        repeats (LargeTickHit, 30) and tails (SliderTailHit, 150) fold
+        into the running numerator/denominator alongside the 300-base
+        object judgments (heads excluded: their accuracy IS the object
+        judgment; spinner bonus never affects accuracy). That is why a
+        lazer render's accuracy reads higher than the header-count formula
+        on slider maps (the forum bug: 98.88% shown vs the 98.91% the
+        player saw — the header formula on a LAZER play). Returns (events,
+        max_combo, combo_timeline) — max combo is tracked on the lattice
+        so peaks inside a broken slider still count, and the timeline
+        records every part-level combo CHANGE (the HUD's counter)."""
         lattice = self._lattice(sims)
 
         # perfect-run combo portion (denominator of the combo term)
         max_combo_portion = 0.0
         max_base_total = 0.0
         c = 0
-        for _t, _k, _is_obj, _s, _b, bmax, mode, _hit in lattice:
+        for _t, _k, _is_obj, _s, _b, bmax, mode, _hit, _pk in lattice:
             max_base_total += bmax
             if mode == "none":
                 continue
@@ -1679,9 +1700,21 @@ class StdRuleset:
         # This was previously NOT applied, so EZ scores weren't reduced and
         # HR/DT weren't boosted — the versus-board discrepancy Red flagged.
         _mod_mult = mods_score_multiplier(getattr(self.meta, "mods", 0) or 0)
-        for t, kind, is_obj, s, b, bmax, mode, hit in lattice:
+        # lazer running accuracy state (ScoreProcessor.Accuracy — see the
+        # docstring). Stays untouched on the stable path so a stable
+        # replay's numbers are float-identical to the pre-split code.
+        acc_num = 0.0
+        acc_den = 0.0
+        for t, kind, is_obj, s, b, bmax, mode, hit, part_kind in lattice:
             cur_base += b
             cur_max_base += bmax
+            if (self.lazer and not is_obj
+                    and part_kind in ("tick", "repeat", "tail")):
+                w = LAZER_TAIL_ACC if part_kind == "tail" \
+                    else BASE_LARGE_TICK
+                if hit:
+                    acc_num += w
+                acc_den += w
             if mode != "none":
                 if hit:
                     combo += 1
@@ -1696,7 +1729,15 @@ class StdRuleset:
                 continue
             obj_n += 1
             obj_base += BASE_SCORE[kind.value]
-            acc = obj_base / (300.0 * obj_n)
+            if self.lazer:
+                # lazer: the object judgment joins the tick/tail terms
+                # (ScoreProcessor uses THIS accuracy in the score formula
+                # too, so the standardised-score trajectory follows it)
+                acc_num += BASE_SCORE[kind.value]
+                acc_den += 300.0
+                acc = acc_num / acc_den if acc_den > 0 else 1.0
+            else:
+                acc = obj_base / (300.0 * obj_n)
             if max_combo_portion > 0 and max_base_total > 0:
                 score = (500_000.0 * acc * (combo_portion / max_combo_portion)
                          + 500_000.0 * (acc ** 5) * (cur_max_base / max_base_total)
@@ -1708,6 +1749,25 @@ class StdRuleset:
                 time_ms=t, kind=kind, object_id=s.idx, x=px, y=py,
                 combo_after=combo, score_after=int(round(score)),
                 acc_after=acc))
+        if self.lazer and events:
+            # FINAL-ACC PIN (the honesty reconcile's display rule): parts
+            # can land AFTER the last object judgment (a map ending on a
+            # slider judges its tail past the head-time popup), so the last
+            # event's running value may miss them — close the ratio over
+            # the WHOLE lattice, and prefer the .osr ScoreInfo's canonical
+            # accuracy when the replay carries one (post-reconcile the two
+            # agree exactly; the canonical value also covers the CL-adjacent
+            # cases the sim approximates). The HUD's final frame, the
+            # results screen and the site card then all read the same
+            # number the player saw in lazer.
+            final = acc_num / acc_den if acc_den > 0 else None
+            canonical = (getattr(self.meta, "lazer_accuracy", None)
+                         if self.meta is not None else None)
+            if self.do_reconcile and canonical is not None:
+                final = canonical
+            if final is not None:
+                events[-1] = dataclasses.replace(events[-1],
+                                                 acc_after=final)
         return events, max_combo, timeline
 
     def _popup_pos(self, s: _ObjSim) -> tuple[float, float]:

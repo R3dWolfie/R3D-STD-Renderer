@@ -217,7 +217,14 @@ EXPLODE_SCALE = 1.5            # §2.5 hit-explosion end scale (skin v2+).
                                # expands slightly larger, matching danser (the
                                # soft halo is the retained subtle hit lighting).
 NUMBER_FADE_OUT = 60.0         # §3.2 v2+ combo-number quick fade (ms)
-_COMBO_NUMBER_SCALE = float(os.environ.get("R3D_COMBO_NUMBER_SCALE", "0.72"))  # LIVE 0.8 (Red-approved 2026-07-11: circle/slider combo numbers were oversized); env can override
+# Combo-number scale — 0.8 is BOTH the Red-approved live default
+# (2026-07-11) AND stable's ground truth: lazer's LegacyMainCirclePiece
+# draws hitCircleText at Scale(0.8f), which is why instafade skins bake
+# their circle art into 160px digit canvases (160 × 0.8 = 128 logical px
+# = exactly the CS circle diameter). A 2026-07-21 WIP snapshot (9e0f05f)
+# leaked 0.72 here, shrinking instafade circles ~10% vs in-game — forum
+# bug 11 item 2 (chitanda skin). Do NOT change without matching stable.
+_COMBO_NUMBER_SCALE = float(os.environ.get("R3D_COMBO_NUMBER_SCALE", "0.8"))
 MISS_FADE_OUT = 60.0           # missed circle: quick fade at window close
 RESULT_HOLD = 250.0            # M-2: judgment popups hold full opacity this
                                # long after fade-in before ResultFadeOut

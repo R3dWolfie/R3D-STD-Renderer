@@ -514,11 +514,18 @@ def std_accuracy(c300: int, c100: int, c50: int, cmiss: int) -> float:
     return (300 * c300 + 100 * c100 + 50 * c50) / (300.0 * total)
 
 
-def acc_display_value(acc: float) -> float:
-    """The DISPLAYED percentage: round(acc·100, 2) — the exact derivation
-    replay.py uses for meta.accuracy, so the HUD and the replay line can
-    never disagree. (lazer's FormatAccuracy FLOORS instead — deliberate
-    deviation, owner-decided: the .osr-derived number wins.)"""
+def acc_display_value(acc: float, lazer: bool = False) -> float:
+    """The DISPLAYED percentage. Stable: round(acc·100, 2) — the exact
+    derivation replay.py uses for meta.accuracy, so the HUD and the
+    replay line can never disagree (owner-decided: the .osr-derived
+    number wins). Lazer replays: lazer's own FormatAccuracy TRUNCATES —
+    FloorToDecimalDigits(4) on the ratio, i.e. floor to 2 display
+    decimals (98.9168…% shows 98.91%, never rounded up to 98.92%) — so a
+    lazer render shows the same digits the player saw in-game (forum
+    bug 11 item 1: the truncation pairs with the tick-inclusive lazer
+    accuracy the ruleset now feeds this for lazer replays)."""
+    if lazer:
+        return math.floor(acc * 10000.0) / 100.0
     return round(acc * 100.0, 2)
 
 
@@ -784,6 +791,11 @@ class HudData:
 
     def __init__(self, sim):
         ev = sim.events                      # time-sorted by construction
+        # lazer replays display accuracy lazer-style (tick-inclusive value,
+        # FormatAccuracy truncation). `classic` implies a lazer CLIENT
+        # replay judged with stable semantics — its acc numbers stay
+        # stable-style (the CL display rule, documented in ruleset.py).
+        self.lazer_display = bool(getattr(sim, "lazer", False))
         self.ev_times = [e.time_ms for e in ev]
         self.ev_scores = [e.score_after for e in ev]
         self.ev_accs = [e.acc_after for e in ev]
@@ -1786,7 +1798,8 @@ class StdHud:
             return
         es = self.es
         acc = self.data.acc_at(t)
-        disp = acc_display_value(acc)
+        disp = acc_display_value(acc,
+                                 getattr(self.data, "lazer_display", False))
         whole = int(disp)
         frac = int(round((disp - whole) * 100))
         whole_txt, frac_txt = str(whole), f".{frac:02d}"
@@ -2091,7 +2104,8 @@ class StdHud:
             out, "score", text, right, 0.0, LEGACY_SCORE_SCALE * es,
             self.op)
         acc = self.data.acc_at(t, LEGACY_ACC_ROLL_MS)
-        disp = acc_display_value(acc)
+        disp = acc_display_value(acc,
+                                 getattr(self.data, "lazer_display", False))
         acc_text = f"{disp:.2f}%"
         acc_right = self.ui_w_l - LEGACY_ACC_MARGIN[0] * es
         acc_top = sh + LEGACY_ACC_MARGIN[1] * es

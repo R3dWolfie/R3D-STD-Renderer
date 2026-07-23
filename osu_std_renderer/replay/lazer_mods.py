@@ -176,14 +176,18 @@ class LazerStatistics:
     max_slider_tail: int         # maximum_statistics.slider_tail_hit (FC total)
     small_bonus: int = 0         # statistics.small_bonus (achieved bonus spins)
     large_bonus: int = 0         # statistics.large_bonus (achieved bonus spins)
+    max_small_bonus: int = 0     # maximum_statistics.small_bonus (map total)
+    max_large_bonus: int = 0     # maximum_statistics.large_bonus (map total)
 
 
 def lazer_statistics_from_info(info: "dict | None") -> "LazerStatistics | None":
-    """Extract the combo-relevant slider-part counts from a parsed ScoreInfo
-    dict, or None when the blob carries no slider-part statistics (a genuine
-    stable score, or a lazer score whose maximum_statistics names no large
-    ticks / slider tails — e.g. a spinner/circle-only map, in which case the
-    note reconcile alone already suffices)."""
+    """Extract the combo-relevant slider-part counts (and the spinner bonus
+    counts) from a parsed ScoreInfo dict, or None when the blob carries none
+    of them (a genuine stable score, or a lazer score on a circle-only map,
+    in which case the note reconcile alone already suffices). A slider-less
+    SPINNER map still returns stats: the bonus counts feed the score's bonus
+    portion and the results screen's spinner rows (the parts reconcile then
+    no-ops over zero ticks/tails)."""
     if not isinstance(info, dict):
         return None
     stats = info.get("statistics")
@@ -197,7 +201,9 @@ def lazer_statistics_from_info(info: "dict | None") -> "LazerStatistics | None":
 
     max_lt = g(mx, "large_tick_hit")
     max_st = g(mx, "slider_tail_hit")
-    if max_lt == 0 and max_st == 0:
+    max_sb = g(mx, "small_bonus")
+    max_lb = g(mx, "large_bonus")
+    if max_lt == 0 and max_st == 0 and max_sb == 0 and max_lb == 0:
         return None
     return LazerStatistics(
         large_tick_hit=g(stats, "large_tick_hit"),
@@ -207,6 +213,8 @@ def lazer_statistics_from_info(info: "dict | None") -> "LazerStatistics | None":
         max_slider_tail=max_st,
         small_bonus=g(stats, "small_bonus"),
         large_bonus=g(stats, "large_bonus"),
+        max_small_bonus=max_sb,
+        max_large_bonus=max_lb,
     )
 
 
@@ -214,6 +222,69 @@ def read_lazer_statistics(osr_path: Path) -> "LazerStatistics | None":
     """The lazer slider-part judgement counts from a .osr's ScoreInfo blob, or
     None for a stable replay / a blob without slider-part statistics."""
     return lazer_statistics_from_info(parse_lazer_score_info(osr_path))
+
+
+# --- lazer accuracy (the canonical displayed value) -------------------------------
+# osu.Game/Rulesets/Scoring/ScoreProcessor.cs: Accuracy = baseScore /
+# maxBaseScore over every ACC-AFFECTING judgement — for osu!std that folds
+# slider large ticks (LargeTickHit, 30) and slider tails (SliderTailHit, 150)
+# in with the object judgements (Great 300 / Ok 100 / Meh 50), which is why a
+# lazer score's accuracy differs from the stable 300/100/50-only formula on
+# any map with sliders. Bonus results (small_bonus/large_bonus spinner spins)
+# and ignore_* never affect accuracy. The .osr ScoreInfo blob stores no
+# explicit accuracy field — lazer itself rebuilds it from the statistics
+# dicts, and so do we (the weight table mirrors HitResult.cs numerics; it is
+# byte-for-byte the R3D bot's _STD_WEIGHTS so the render and the site card
+# can never disagree).
+_LAZER_ACC_WEIGHTS: dict[str, int] = {
+    "perfect":         320,
+    "great":           300,
+    "good":            200,
+    "ok":              100,
+    "meh":              50,
+    "miss":              0,
+    "large_tick_hit":   30,
+    "large_tick_miss":   0,
+    "small_tick_hit":   10,
+    "small_tick_miss":   0,
+    "slider_tail_hit": 150,
+    # bonus + ignore tiers explicitly = 0 (they don't affect accuracy)
+}
+
+
+def lazer_accuracy_from_info(info: "dict | None") -> float | None:
+    """Lazer's accuracy (a 0..1 RATIO) rebuilt from a parsed ScoreInfo
+    dict's statistics/maximum_statistics, or None when the blob is absent
+    or malformed (zero denominator). This is the number the player saw on
+    lazer's own HUD/results screen — the honesty reconcile pins the final
+    displayed accuracy of a lazer render to it."""
+    if not isinstance(info, dict):
+        return None
+    stats = info.get("statistics")
+    mx = info.get("maximum_statistics")
+    if not isinstance(stats, dict) or not isinstance(mx, dict):
+        return None
+    num = 0
+    for k, count in stats.items():
+        w = _LAZER_ACC_WEIGHTS.get(k, 0)
+        if w == 0 or not isinstance(count, (int, float)):
+            continue
+        num += w * int(count)
+    den = 0
+    for k, max_count in mx.items():
+        w = _LAZER_ACC_WEIGHTS.get(k, 0)
+        if w == 0 or not isinstance(max_count, (int, float)):
+            continue
+        den += w * int(max_count)
+    if den <= 0:
+        return None
+    return num / den
+
+
+def read_lazer_accuracy(osr_path: Path) -> float | None:
+    """The canonical lazer accuracy ratio from a .osr's ScoreInfo blob, or
+    None for a stable replay / an unreadable blob."""
+    return lazer_accuracy_from_info(parse_lazer_score_info(osr_path))
 
 
 # --- Difficulty Adjust (DA) --------------------------------------------------

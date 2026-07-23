@@ -130,7 +130,8 @@ class ResultsScreen:
                  avg_ms: float, err_deltas, meh_ms: float,
                  player: str = "", map_line: str = "", diff_name: str = "",
                  mods: int = 0, use_skin_ranks: bool = True,
-                 argon_font: bool = False, mods_display: str | None = None):
+                 argon_font: bool = False, mods_display: str | None = None,
+                 spinner_stats=None):
         self.spr = spr
         self.w, self.h = float(spr.width), float(spr.height)
         self.k = self.h / UI_H
@@ -181,6 +182,18 @@ class ResultsScreen:
             self._bake(f"{lab}: {cnt}", JUDGE_PX, JUDGE_COLORS[lab], 0)
             for lab, cnt in (("300", c300), ("100", c100),
                              ("50", c50), ("MISS", cmiss))]
+        # spinner statistics — a compact line in the UR row's style (the
+        # stack has no cell row to extend). `spinner_stats` =
+        # ((spins, max_spins), (bonus, max_bonus)) from a lazer .osr's
+        # ScoreInfo blob (lazer's "spinner spin"/"spinner bonus" results
+        # rows — forum bug 11 item 3); None (stable replay / no spinners)
+        # bakes nothing and keeps the card byte-identical.
+        self._spinner_row = None
+        if spinner_stats is not None:
+            (s_h, s_t), (b_h, b_t) = spinner_stats
+            self._spinner_row = self._bake(
+                f"Spinner spin {s_h}/{s_t}   Spinner bonus {b_h}/{b_t}",
+                UR_PX, (180, 200, 220), 8)
         self._ur_row = self._bake(f"UR {ur:.1f}   Avg {avg_ms:+.1f} ms",
                                   UR_PX, (180, 200, 220), 8)
 
@@ -251,6 +264,7 @@ class ResultsScreen:
                                   (1, 1, 1, a)))
                 x += rw + gap
             y += row_h + 24 * k
+        line(self._spinner_row)
         line(self._ur_row)
         # histogram (mania bars, std window colours)
         if self.hist_peak > 0:
