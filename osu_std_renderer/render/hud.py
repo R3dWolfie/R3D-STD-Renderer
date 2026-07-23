@@ -1479,6 +1479,20 @@ class StdHud:
         # M-3c: the scorebar hides across [Events] breaks (stable behaviour).
         self._breaks = [(float(p.start_time), float(p.end_time))
                         for p in beatmap.pauses]
+        # lazer's BreakOverlay (countdown + progress bar + CURRENT PROGRESS
+        # info + slide-in chevrons) — render/break_overlay.py, a 1:1 port of
+        # osu.Game/Screens/Play/BreakOverlay.cs on this engine's sprite
+        # primitives (the catch d8ccb60 rollout). Drawn on BOTH component
+        # paths (Argon + legacy/skinned): stable has no equivalent panel and
+        # the owner wants THIS lazer look on skinned renders too — the catch
+        # decision. Fed the same [Events] periods that drive the dim
+        # envelope, the warning arrows and the scorebar hide. Absent in
+        # merge/versus renders (merge.py never builds a StdHud — no lazer
+        # analogue there, matching catch).
+        from .break_overlay import LazerBreakOverlay
+        self.break_overlay = LazerBreakOverlay(
+            sprites, bank, sprites.width, sprites.height, self._breaks,
+            mods=self.mods)
         self._pin = 1.0
         self._graph = self._density_buckets(starts, ends)
         self._hp_field: ArgonBarField | None = None
@@ -1656,6 +1670,7 @@ class StdHud:
     def draw(self, t: float) -> None:
         with perf.T("hud_draw"):
             self._draw_timed(t)
+            self._draw_break_overlay(t)
 
     def _draw_timed(self, t: float) -> None:
         if self.op <= 0.0:
@@ -1705,6 +1720,24 @@ class StdHud:
         perf.count("hud_sprites", len(out))
         if out:
             self.spr.draw(out)
+
+    def _draw_break_overlay(self, t: float) -> None:
+        """lazer z-order: BreakOverlay is a LATER overlay-component child
+        than HUDOverlay (Player.createOverlayComponents), so it draws as
+        its own sprite batches AFTER the HUD batch — above every HUD
+        sprite (including the HUD's additive pass) and independent of
+        hud_opacity, which only governs HUDOverlay. It stays under the
+        scene's fade-to-black / results / fail layers (scene.py draws
+        those after hud.draw), matching lazer's Player container order.
+        Values are the engine's LIVE HUD numbers, sampled per frame like
+        lazer's bindables: the raw event accuracy (un-rolled — the
+        bindable, not the rolling display) and grade_at (this ruleset's
+        grade rules incl. the miss-caps-S/X-at-A override)."""
+        d = self.data
+        i = bisect.bisect_right(d.ev_times, t) - 1
+        acc = d.ev_accs[i] if i >= 0 else 1.0
+        self.break_overlay.draw(t, acc, d.grade_at(t),
+                                lazer_display=d.lazer_display)
 
     # ==================== ARGON components (skinless default) =======================
 
