@@ -223,6 +223,7 @@ class StdRenderSettings:
     draw_approach_circles: bool = True
     draw_combo_numbers: bool = True
     draw_follow_points: bool = True
+    hit_animations: bool = True           # #38371: off = fast fade-out, no pop
     slider_snaking_in: bool = True
     slider_snaking_out: bool = True
     slider_merge: bool = False            # union-pass merged bodies

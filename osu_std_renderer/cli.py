@@ -188,6 +188,9 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--approach-circles", action=BA, default=True)
     ap.add_argument("--combo-numbers", action=BA, default=True)
     ap.add_argument("--follow-points", action=BA, default=True)
+    ap.add_argument("--hit-animations", action=BA, default=True,
+                    help="lazer hit-explosion (scale+fade) on hit; "
+                         "--no-hit-animations = fast fade-out, no pop (#38371)")
     ap.add_argument("--snaking-in", action=BA, default=True)
     ap.add_argument("--snaking-out", action=BA, default=True)
     ap.add_argument("--slider-merge", action=BA, default=False,
@@ -979,6 +982,7 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
         draw_approach_circles=settings.draw_approach_circles,
         draw_combo_numbers=settings.draw_combo_numbers,
         draw_follow_points=settings.draw_follow_points,
+        hit_animations=settings.hit_animations,
         draw_cursor=settings.draw_cursor,
         cursor_scale=settings.cursor_scale,
         cursor_trail_scale=settings.cursor_trail_scale,
@@ -1332,6 +1336,7 @@ def main(argv: list[str] | None = None) -> int:
         draw_approach_circles=args.approach_circles,
         draw_combo_numbers=args.combo_numbers,
         draw_follow_points=args.follow_points,
+        hit_animations=args.hit_animations,
         slider_snaking_in=args.snaking_in, slider_snaking_out=args.snaking_out,
         slider_merge=args.slider_merge,
         draw_cursor=args.cursor, use_skin_cursor=args.skin_cursor,

@@ -213,6 +213,7 @@ def ssaa_internal_size(width: int, height: int) -> tuple[int, int]:
 
 
 EXPLODE_SCALE = 1.5            # §2.5 hit-explosion end scale (skin v2+).
+FAST_HIT_FADE_OUT = 80.0      # #38371 hit-animations OFF: quick fade-out, no explosion pop
                                # m-5: nudged 1.4→1.5 so the just-hit circle
                                # expands slightly larger, matching danser (the
                                # soft halo is the retained subtle hit lighting).
@@ -504,7 +505,9 @@ def fade_in_alpha(t: float, start_time: float, preempt: float,
 
 def circle_alpha_scale(t: float, start_time: float, preempt: float,
                        time_fade_in: float,
-                       hit_time: float | None = None) -> tuple[float, float]:
+                       hit_time: float | None = None,
+                       fade_out: float = HIT_FADE_OUT,
+                       explode_scale: float = EXPLODE_SCALE) -> tuple[float, float]:
     """(alpha, scale) for a hit-circle disc+ring. Phase 1 assumes the hit
     lands exactly at startTime (pass hit_time when the ruleset exists)."""
     hit = start_time if hit_time is None else hit_time
@@ -512,10 +515,10 @@ def circle_alpha_scale(t: float, start_time: float, preempt: float,
         return 0.0, 1.0
     if t <= hit:
         return fade_in_alpha(t, start_time, preempt, time_fade_in), 1.0
-    p = (t - hit) / HIT_FADE_OUT
+    p = (t - hit) / fade_out
     if p >= 1.0:
-        return 0.0, EXPLODE_SCALE
-    return 1.0 - p, 1.0 + (EXPLODE_SCALE - 1.0) * p
+        return 0.0, explode_scale
+    return 1.0 - p, 1.0 + (explode_scale - 1.0) * p
 
 
 def approach_scale_alpha(t: float, start_time: float, preempt: float,
@@ -915,6 +918,7 @@ class StdScene:
                  draw_approach_circles: bool = True,
                  draw_combo_numbers: bool = True,
                  draw_follow_points: bool = True,
+                 hit_animations: bool = True,
                  draw_cursor: bool = True,
                  cursor_scale: float = 1.0,
                  cursor_trail_scale: float = 1.0,
@@ -996,6 +1000,8 @@ class StdScene:
         self.draw_approach_circles = draw_approach_circles
         self.draw_combo_numbers = draw_combo_numbers
         self.draw_follow_points = draw_follow_points
+        self._hit_fade = HIT_FADE_OUT if hit_animations else FAST_HIT_FADE_OUT
+        self._hit_explode = EXPLODE_SCALE if hit_animations else 1.0
         self.draw_cursor = draw_cursor
         self.cursor_scale = cursor_scale
         self.trail_scale = cursor_trail_scale
@@ -2609,7 +2615,9 @@ class StdScene:
         else:
             hit_time = v.hit_time if v is not None else None
             alpha, scale = circle_alpha_scale(t, start, preempt, fade_in,
-                                              hit_time=hit_time)
+                                              hit_time=hit_time,
+                                              fade_out=self._hit_fade,
+                                              explode_scale=self._hit_explode)
             na = number_alpha(t, start, preempt, fade_in, hit_time=hit_time)
             hit_for_flash = hit_time if hit_time is not None else start
         if self._t_force_opaque:           # OsuModSpinIn.FadeIn(): opaque from spawn
