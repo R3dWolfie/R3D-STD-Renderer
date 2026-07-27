@@ -2753,13 +2753,6 @@ class StdScene:
                 sprites.extend(self._plain_circle_sprites(tip[0], tip[1],
                                                           color, b_alpha,
                                                           role="slider_end"))
-            # tail reverse arrow ON the end circle (rides the snake-in tip;
-            # t < start guards it off the snake-OUT retraction — arrows are
-            # long consumed by then, only their explosion could linger)
-            ride_tip = tip if t < start else None
-            sprites.extend(self._arrow_sprites(t, arrows, True, spawn,
-                                               fade_in, pts, snake,
-                                               ride_tip))
         # slider ball following PositionAt(t) (repeats included — scorePath
         # handles the back-and-forth). While the ruleset says tracking was
         # lost the ball dims — the visible sliderbreak cue (there is no
@@ -2797,7 +2790,14 @@ class StdScene:
             obj, t, obj.get_stacked_start_position(self.diff), approach_out,
             role="slider_head"))
         if pts:
-            # head reverse arrow ON TOP of the head circle
+            # reverse arrows ON TOP of the head circle. The TAIL arrow must
+            # also draw after the head disc/number: on a SHORT single-repeat
+            # slider its pinned end position overlaps the head circle and
+            # would otherwise be occluded by it (normal-length sliders are
+            # unaffected — the two ends don't overlap). tip/ride_tip is
+            # vestigial (arrows are pinned at marker.pos), so None is correct.
+            sprites.extend(self._arrow_sprites(t, arrows, True, spawn,
+                                               fade_in, pts, snake, None))
             sprites.extend(self._arrow_sprites(t, arrows, False, spawn,
                                                fade_in, pts, snake, None))
         if sprites:
