@@ -24,6 +24,11 @@ danser-go — Wieku (Sebastian Krajewski)
     danser-go directly to generate some preview thumbnails. Grateful credit to
     Wieku and the danser contributors.
 
+STAR RATING & PP — computed with rosu-pp-py (Python binding of
+rosu-pp) by MaxOhn — github.com/MaxOhn/rosu-pp (MIT). rosu-pp is a
+Rust re-implementation of osu!'s difficulty & performance-points
+algorithms (peppy / ppy).
+
 osu! is a rhythm game by peppy / ppy Pty Ltd (osu.ppy.sh). This project is an
 independent, unofficial renderer and is not affiliated with or endorsed by ppy.
 
