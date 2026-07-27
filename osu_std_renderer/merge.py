@@ -478,6 +478,7 @@ def render_merge(osr_paths, beatmap_dir, output, *,
     from .record.encode import FfmpegPipe, build_ffmpeg_cmd, probe_encoder
     from .record.pipeline import RecordPipeline
     from .skin.skin import Skin
+    from .replay.relax import is_relax_meta, synthesize_relax_frames
 
     players = []
     for i, p in enumerate(osr_paths):
@@ -504,6 +505,17 @@ def render_merge(osr_paths, beatmap_dir, output, *,
     beatmap = load_full(osu_path, mods=field_mods)
     print(f"  beatmap objects={len(beatmap.hit_objects)} length={beatmap.length}ms",
           file=sys.stderr)
+
+    # Relax (RX): like the single-render path (cli.py), synthesize the auto-taps
+    # OsuModRelax injects for any RX player — their .osr has cursor motion but NO
+    # key presses, so without this a Relax player mis-judges (all-miss) inside a
+    # /versus or /showdown merge. The shared field beatmap drives the taps;
+    # per-player scoring still keeps each player's own full mods. Non-RX players
+    # are untouched (byte-identical).
+    for _pi in range(len(players)):
+        _pf, _pm = players[_pi]
+        if is_relax_meta(_pm):
+            players[_pi] = (synthesize_relax_frames(_pf, beatmap), _pm)
 
     w, h = resolution
     spr = SpriteRenderer(w, h)
