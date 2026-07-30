@@ -243,6 +243,11 @@ class StdRenderSettings:
     show_hit_counter: bool = False
     show_pp_counter: bool = False         # site default: off (was ON while
     #                                       unimplemented — presets.py wins)
+    # EXACT final pp to display (osu's OFFICIAL pp, passed by the service via
+    # --pp). None -> keep the rosu estimate. When set, the lazer results card
+    # AND the live counter's endpoint are pinned to this value (the live curve
+    # keeps its rosu/score-progress SHAPE; only the endpoint is anchored).
+    pp_override: float | None = None
     show_strain_graph: bool = False       # site default: off
     show_key_overlay: bool = True
     show_mods: bool = True

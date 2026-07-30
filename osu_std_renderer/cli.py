@@ -215,6 +215,11 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--pp-counter", action=BA, default=False,
                     help="§4.6 PPCounter: live rosu-pp gradual pp (site "
                          "default OFF; hides itself if rosu is missing)")
+    ap.add_argument("--pp", type=float, default=None,
+                    help="EXACT final pp to show (osu's OFFICIAL pp). The "
+                         "results card PP + the live counter's ENDPOINT are "
+                         "pinned to this; the live curve keeps its rosu "
+                         "shape. Omit to keep the rosu estimate.")
     ap.add_argument("--hit-counter", action=BA, default=False)
     ap.add_argument("--aim-error-meter", action=BA, default=False,
                     help="§4.6 AimErrorMeter: cursor-offset-at-click "
@@ -451,6 +456,14 @@ def _build_lazer_results(spr, settings, beatmap, meta, judgments, hud, fv,
         perf = build_performance_breakdown(osu_path, meta.mods, judgments,
                                            counts, judgments.final_max_combo)
     pp_val = perf.achieved_pp if perf is not None else None
+    # --pp: pin the results-card PP (and the "Achieved ...pp" subtitle) to the
+    # EXACT official value passed via --pp. Pass-only: a failed play never
+    # earns pp, so the override is ignored on a fail (same rule as rosu above).
+    # The Maximum-pp figure and the aim/speed/acc breakdown bars stay rosu.
+    if not is_fail and getattr(settings, "pp_override", None) is not None:
+        pp_val = float(settings.pp_override)
+        if perf is not None:
+            perf.achieved_pp = pp_val
     tick_hit, tick_total, end_hit, end_total = slider_stats(
         judgments, before=frozen["fail_time"] if is_fail else None)
     aim_points = build_aim_points(judgments, frames,
@@ -701,6 +714,14 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
                                     judgments)
             if res is not None:
                 pp_timeline, ppinfo = res
+                # --pp: anchor the live-counter ENDPOINT to the EXACT
+                # official value: scale every point by (override /
+                # gradual_end) so the curve keeps its rosu SHAPE and only
+                # the endpoint moves (mirror of the taiko _final_pp override).
+                if (getattr(settings, "pp_override", None) is not None
+                        and pp_timeline and ppinfo.gradual_end > 0.0):
+                    _sc = float(settings.pp_override) / ppinfo.gradual_end
+                    pp_timeline = [(t, p * _sc) for t, p in pp_timeline]
                 delta = abs(ppinfo.gradual_end - ppinfo.full_calc)
                 ok = "==" if delta < 0.05 else f"Δ{delta:.2f}"
                 print(f"pp:     gradual end {ppinfo.gradual_end:.2f}pp "
@@ -1347,6 +1368,7 @@ def main(argv: list[str] | None = None) -> int:
         cursor_long_trail=args.force_long_trail,
         show_key_overlay=args.key_overlay,
         show_pp_counter=args.pp_counter, show_hit_counter=args.hit_counter,
+        pp_override=args.pp,
         show_aim_error_meter=args.aim_error_meter,
         show_strain_graph=args.strain_graph,
         show_scoreboard=args.scoreboard,
