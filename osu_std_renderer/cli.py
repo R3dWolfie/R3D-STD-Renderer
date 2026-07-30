@@ -220,6 +220,10 @@ def build_parser() -> argparse.ArgumentParser:
                          "results card PP + the live counter's ENDPOINT are "
                          "pinned to this; the live curve keeps its rosu "
                          "shape. Omit to keep the rosu estimate.")
+    ap.add_argument("--sr", type=float, default=None,
+                    help="EXACT star rating to show (osu's OFFICIAL SR). The "
+                         "results card's star-rating pill is pinned to this. "
+                         "Omit to keep the rosu SR estimate.")
     ap.add_argument("--hit-counter", action=BA, default=False)
     ap.add_argument("--aim-error-meter", action=BA, default=False,
                     help="§4.6 AimErrorMeter: cursor-offset-at-click "
@@ -449,6 +453,11 @@ def _build_lazer_results(spr, settings, beatmap, meta, judgments, hud, fv,
         score = int(meta.score or fv["score"])
         max_combo = meta.max_combo
     stars = star_rating(osu_path, meta.mods)
+    # --sr: pin the results-card star-rating pill to the EXACT official SR
+    # passed via --sr, overriding the rosu estimate. Static display value (no
+    # live SR counter). None -> unchanged rosu SR. Mirrors the --pp override.
+    if getattr(settings, "sr_override", None) is not None:
+        stars = float(settings.sr_override)
     # pp/perf are pass-only: a failed play never earns pp
     if is_fail:
         perf = None
@@ -1369,6 +1378,7 @@ def main(argv: list[str] | None = None) -> int:
         show_key_overlay=args.key_overlay,
         show_pp_counter=args.pp_counter, show_hit_counter=args.hit_counter,
         pp_override=args.pp,
+        sr_override=args.sr,
         show_aim_error_meter=args.aim_error_meter,
         show_strain_graph=args.strain_graph,
         show_scoreboard=args.scoreboard,

@@ -248,6 +248,11 @@ class StdRenderSettings:
     # AND the live counter's endpoint are pinned to this value (the live curve
     # keeps its rosu/score-progress SHAPE; only the endpoint is anchored).
     pp_override: float | None = None
+    # EXACT star rating to display (osu's OFFICIAL SR, passed by the service
+    # via --sr). None -> keep the rosu SR estimate. When set, the lazer results
+    # card's star-rating pill shows this value exactly (static display value --
+    # there is no live SR counter). Mirrors pp_override.
+    sr_override: float | None = None
     show_strain_graph: bool = False       # site default: off
     show_key_overlay: bool = True
     show_mods: bool = True
