@@ -1147,13 +1147,15 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
         print(f"WARNING: beatmap audio '{beatmap.audio}' not found — "
               "mixing without the music bed", file=sys.stderr)
 
-    # sample bank shared by judged hitsounds + the nightcore overlay;
+    # sample bank shared by judged hitsounds + the nightcore overlay(s);
     # the synth-default bank follows the visual league (skinless→argon,
     # custom-skin gaps→legacy, --legacy-defaults→legacy)
+    # ModNightcore beat overlay is AUTOMATIC when the NC mod (bit 512) is on.
+    _nc_mod = bool(int(getattr(meta, "mods", 0) or 0) & 512) if meta is not None else False
     sample_bank = None
     if settings.hitsound_volume > 0 and settings.general_volume > 0 and (
             (settings.use_replay_hitsounds and judgments is not None)
-            or settings.nightcore_hitsounds):
+            or settings.nightcore_hitsounds or _nc_mod):
         from .record.hitsounds import SampleBank, synth_style_for
         from .skin.skin import Skin as SampleSkin
         sample_skin = SampleSkin(skin_dir=settings.skin_dir,
@@ -1206,6 +1208,25 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
         print(f"nightcore: {laid} beats laid ({downs} downbeats)",
               file=sys.stderr)
         have_audio = have_audio or laid > 0
+
+    # ModNightcore beat overlay — AUTOMATIC when the Nightcore mod is active:
+    # the kick(1,3)/clap(2,4)/hat(off-beats)/finish(every 4th bar) drum pattern
+    # from the SKIN's nightcore-* samples on the (sped-up) beat grid. Distinct
+    # from + independent of the nightcore_hitsounds general metronome above
+    # (both lay if that toggle is on for an NC play). Hats gate on
+    # SliderTickRate%2==0 (osu!).
+    if _nc_mod and sample_bank is not None:
+        from .record.hitsounds import mix_nightcore_mod, nightcore_mod_events
+        _play_hats = (int(round(beatmap.timings.tick_rate)) % 2 == 0)
+        nc_events = nightcore_mod_events(beatmap.timings,
+                                         max(render_start_ms, 0.0), last_end,
+                                         play_hats=_play_hats)
+        nc_laid = mix_nightcore_mod(mixer, sample_bank, nc_events, speed=speed,
+                                    start_ms=render_start_ms, gain=hs_gain,
+                                    to_wall=(m2w if warp is not None else None))
+        print(f"nightcore-mod: {nc_laid} NC beat samples laid "
+              f"(hats {'on' if _play_hats else 'off'})", file=sys.stderr)
+        have_audio = have_audio or nc_laid > 0
 
     # §4.10 pre-roll audio: the seizure card / lead-in region is SILENT
     # (danser LeadInTime semantics) — for a map-start render the region

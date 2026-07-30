@@ -289,6 +289,78 @@ def mix_nightcore(mixer, bank: "SampleBank", beats, *, speed: float = 1.0,
     return laid
 
 
+# --- ModNightcore beat overlay (NC-mod-gated, distinct from the metronome) -----
+
+NIGHTCORE_MOD_GAIN = 0.5      # nightcore-kick/clap/hat/finish drums
+
+
+def nightcore_mod_events(timings, t0: float, t1: float,
+                         play_hats: bool = True) -> list[tuple[float, str]]:
+    """osu! ModNightcore beat-overlay schedule (osu.Game/Rulesets/Mods/
+    ModNightcore.NightcoreBeatContainer) — the drums osu! plays on each beat
+    while the Nightcore mod is active. DISTINCT from nightcore_beats (the
+    general 'metronome' clap/finish). Half-beat grid (BeatSyncedContainer
+    Divisor=2): within a 4-bar segment, kick on beats 1 & 3, clap on 2 & 4,
+    hat on the off-beats (the '&'s), plus a finish cymbal at the start of every
+    4th bar. The timing point's SIGNATURE drives the measure (3/4 ⇒ %6 with
+    clap on beat position 3). Returns [(time_ms, sound)] with sound in
+    {'kick','clap','hat','finish'} for every step inside [t0, t1). ``play_hats``
+    gates the off-beat hats (osu: SliderTickRate%2==0). Beat length sanity-
+    capped at 60 ms (>1000 BPM aspire lines)."""
+    reds = timings.original_points
+    out: list[tuple[float, str]] = []
+    for i, tp in enumerate(reds):
+        beat = max(60.0, tp.beat_length_base)
+        half = beat / 2.0
+        seg_end = reds[i + 1].time if i + 1 < len(reds) else t1
+        seg_end = min(seg_end, t1)
+        sig = max(1, tp.signature)
+        seg_len = sig * 8                      # beatsPerBar * Divisor(2) * 4 bars
+        triplet = (sig % 3 == 0)
+        mod = 6 if triplet else 4
+        clap_pos = 3 if triplet else 2
+        k = 0
+        t = tp.time
+        while t < seg_end:
+            if t >= t0:
+                bseg = k % seg_len
+                r = bseg % mod
+                if r == 0:
+                    out.append((t, "kick"))
+                elif r == clap_pos:
+                    out.append((t, "clap"))
+                elif play_hats:
+                    out.append((t, "hat"))
+                if bseg == 0:
+                    out.append((t, "finish"))
+            k += 1
+            t = tp.time + k * half
+    return out
+
+
+def mix_nightcore_mod(mixer, bank: "SampleBank", events, *, speed: float = 1.0,
+                      start_ms: float = 0.0, gain: float = 1.0,
+                      to_wall=None) -> int:
+    """Lay the ModNightcore drum overlay into the mixer from the SKIN's
+    nightcore-kick/-clap/-hat/-finish samples (skin chain ONLY — no synth
+    fallback: a skin that ships SILENT nightcore samples plays near-nothing,
+    a skin that omits one plays nothing for that voice). ``events`` is
+    nightcore_mod_events' [(time_ms, sound)] list. Returns samples laid.
+    ``to_wall`` (map-ms → wall-ms) overrides the constant (t-start)/speed
+    mapping for the WU/WD rate ramp."""
+    samples = {name: bank.nc_sample(f"nightcore-{name}")
+               for name in ("kick", "clap", "hat", "finish")}
+    laid = 0
+    for t, name in events:
+        pcm = samples.get(name)
+        if pcm is None:
+            continue
+        w = to_wall(t) if to_wall is not None else (t - start_ms) / speed
+        mixer.mix_at(w, pcm, volume=NIGHTCORE_MOD_GAIN * gain)
+        laid += 1
+    return laid
+
+
 # --- sample bank -----------------------------------------------------------------
 
 def synth_style_for(has_custom_skin: bool,
@@ -357,6 +429,18 @@ class SampleBank:
                     return pcm, "skin"
         # 3. deterministic synthesized default (league-selected bank)
         return synth_sample(name, style=self.synth_style), "synth"
+
+    def nc_sample(self, base: str) -> np.ndarray | None:
+        """ModNightcore skin sample (nightcore-kick/-clap/-hat/-finish) through
+        the SKIN chain only (skin → fallback → local) — no synth default. A
+        skin that ships a SILENT nightcore file plays (near-)silence; a skin
+        that omits it plays nothing (None)."""
+        if self.skin is None:
+            return None
+        p = self.skin.find_sample(base)
+        if p is None:
+            return None
+        return self._decode(p)
 
     def _decode(self, path: Path) -> np.ndarray | None:
         """Decode a sample file; zero-byte files mean SILENCE (the classic
