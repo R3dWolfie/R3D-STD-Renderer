@@ -620,6 +620,33 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
     fail_time = (meta.fail_time if meta is not None
                  and not args.no_fail_animation else None)
 
+    # --- music decode, EARLY + OFF-THREAD (perf; byte-identical) -------------
+    # decode_to_pcm (an ffmpeg subprocess with the inline loudnorm pass) is
+    # the single largest setup cost (~3 s for a full track). Its inputs are
+    # all bound at entry — beatmap.diff.speed IS the `speed` local bound
+    # later (read-only in between), and `meta.has_rate_ramp` decides the
+    # warp branch before the warp object exists — so the subprocess starts
+    # here on a worker thread and the WHOLE remaining setup (skin,
+    # background, textures, health/hud, results bake, scene build) overlaps
+    # it, GIL-free. Collected where the pcm is consumed; same call, same
+    # args, same bytes; an AudioError from the worker surfaces at .result()
+    # inside the existing try. Skipped for --dump-frames (it never reaches
+    # the audio section).
+    _audio_afile = beatmap.get_audio_file(beatmap_dir)
+    _audio_fut = None
+    if _audio_afile is not None and not args.dump_frames:
+        from concurrent.futures import ThreadPoolExecutor
+        _audio_pool = ThreadPoolExecutor(max_workers=1)
+        if meta is not None and meta.has_rate_ramp:
+            # WU/WD decodes NATIVE (rate 1) and warps piecewise at collect
+            _audio_fut = _audio_pool.submit(decode_to_pcm, _audio_afile,
+                                            rate=1.0, loudnorm=True)
+        else:
+            _audio_fut = _audio_pool.submit(
+                decode_to_pcm, _audio_afile, rate=beatmap.diff.speed,
+                pitch=(meta is not None and meta.rate_pitch), loudnorm=True)
+        _audio_pool.shutdown(wait=False)
+
     # --- real-skin core textures (per-element procedural fallback) ---------------
     skin_elems = None
     if settings.skin_dir is not None:
@@ -803,30 +830,6 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
         gameplay_end_ms = fade_start_ms + fade_len_ms
         _fanchor = fail_time if fail_time is not None else last_end
         fail_anim_len_ms = warp.map_span(_fanchor, FAIL_DURATION_MS)
-
-    # --- music decode, EARLY + OFF-THREAD (perf; byte-identical) -------------
-    # decode_to_pcm (an ffmpeg subprocess with the inline loudnorm pass) is
-    # the single largest setup cost (~3 s for a full track). Its inputs
-    # (afile, speed/pitch, warp-or-not) are all bound here, ~1 s of results
-    # bake / scene build / hitsound decoding before the pcm is consumed —
-    # so kick the subprocess off now on a worker thread and collect it in
-    # the audio section below. Same call, same args, same bytes; an
-    # AudioError raised in the worker surfaces at .result() inside the
-    # existing try. Skipped for --dump-frames (it never reaches audio).
-    _audio_afile = beatmap.get_audio_file(beatmap_dir)
-    _audio_fut = None
-    if _audio_afile is not None and not args.dump_frames:
-        from concurrent.futures import ThreadPoolExecutor
-        _audio_pool = ThreadPoolExecutor(max_workers=1)
-        if warp is not None:
-            # WU/WD decodes NATIVE (rate 1) and warps piecewise at collect
-            _audio_fut = _audio_pool.submit(decode_to_pcm, _audio_afile,
-                                            rate=1.0, loudnorm=True)
-        else:
-            _audio_fut = _audio_pool.submit(
-                decode_to_pcm, _audio_afile, rate=speed,
-                pitch=(meta is not None and meta.rate_pitch), loudnorm=True)
-        _audio_pool.shutdown(wait=False)
 
     # FAIL results: grade F + stats FROZEN at the death point (NOT the .osr's
     # full-map reconciled totals). Tally judgments up to fail_time from the
