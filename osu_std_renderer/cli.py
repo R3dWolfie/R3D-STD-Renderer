@@ -387,6 +387,20 @@ PB_DB_PATH = os.environ.get("R3D_RENDER_DB",
 LAZER_RESULTS_MIN_SECONDS = 4.5   # floor so both stages + a hold fit
 
 
+def _header_is_standardised(meta) -> bool:
+    """True when the .osr header 'score' is ALREADY the lazer-standardised
+    (ScoreV3) total: a LAZER replay (game_version >= StdRuleset.LAZER_GAME_VERSION
+    = 30_000_000) or a stable ScoreV2-mod play (bit 1<<29, stored 1M-standardised).
+    A plain STABLE header is legacy ScoreV1 (a different scoring model) -> False;
+    the displayed ScoreV3 then comes from the sim's own lazer-standardised
+    trajectory (ruleset _build_events, counts reconciled to the .osr) instead of
+    the raw header (#115, parity with the mania/catch renderers)."""
+    if meta is None:
+        return False
+    return (int(getattr(meta, "game_version", 0) or 0) >= 30_000_000
+            or bool(int(getattr(meta, "mods", 0) or 0) & (1 << 29)))
+
+
 def _display_acc_pct(meta, judgments) -> float:
     """The results screen's accuracy percentage. Stable replays (and CL —
     the Classic mod is an explicit stable-semantics request): the
@@ -450,7 +464,9 @@ def _build_lazer_results(spr, settings, beatmap, meta, judgments, hud, fv,
                   meta.count_miss)
         grade = meta.grade
         acc_pct = _display_acc_pct(meta, judgments)
-        score = int(meta.score or fv["score"])
+        # #115: the standardised ScoreV3 endpoint, not the raw ScoreV1 header.
+        score = (int(meta.score) if _header_is_standardised(meta)
+                 else int(fv["score"] or meta.score))
         max_combo = meta.max_combo
     stars = star_rating(osu_path, meta.mods)
     # --sr: pin the results-card star-rating pill to the EXACT official SR
@@ -496,7 +512,8 @@ def _build_lazer_results(spr, settings, beatmap, meta, judgments, hud, fv,
     # per-map render leaderboard: best-per-player OTHER renders of this map,
     # ranked around the current play. Off → None (the single PB card path
     # above stays exactly as it was). Local render DB, read-only, fail-soft.
-    cur_score = int(meta.score or fv["score"])
+    cur_score = (int(meta.score) if _header_is_standardised(meta)
+                 else int(fv["score"] or meta.score))
     board = None
     if settings.show_leaderboard:
         prev_best = int(pb["score"]) if pb is not None else None
@@ -793,10 +810,14 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
                      mods=meta.mods if meta is not None else 0,
                      pp_timeline=pp_timeline, aim_points=aim_points,
                      strain=strain, mod_pills=mod_pills)
-        if meta is not None and meta.score > 0 and fail_time is None:
-            # pin the displayed score curve to the .osr's recorded total
-            # (PASS only — a fail's .osr score is the partial death tally,
-            # and the HUD is frozen at fail_time showing that tally already)
+        # #115: DISPLAY the lazer-standardised ScoreV3, never the raw ScoreV1.
+        # A lazer/ScoreV2 header IS already standardised -> pin the displayed
+        # curve to it (endpoint-exact). A plain STABLE ScoreV1 header is a
+        # different model -> do NOT pin; the sim's standardised trajectory
+        # (matching the site score_v3) is shown instead. PASS only (a fail
+        # freezes at the death tally already).
+        if (meta is not None and meta.score > 0 and fail_time is None
+                and _header_is_standardised(meta)):
             hud.pin_final_score(meta.score)
 
     # --- RED'S results screen (render/results.py; §4.6 ShowResultsScreen) --------
@@ -885,7 +906,9 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
             r_grade = frozen["grade"] if frozen else meta.grade
             r_acc = (frozen["acc_pct"] if frozen
                      else _display_acc_pct(meta, judgments))
-            r_score = frozen["score"] if frozen else (meta.score or fv["score"])
+            r_score = (frozen["score"] if frozen
+                       else (int(meta.score) if _header_is_standardised(meta)
+                             else int(fv["score"] or meta.score)))
             r_combo = frozen["max_combo"] if frozen else meta.max_combo
             # a lazer replay shows the FULL mod set (incl. lazer-only mods +
             # custom-rate suffix) on the results subtitle; a pure-legacy
@@ -1379,8 +1402,13 @@ def _print_hud_final_values(hud, judgments, meta=None, frozen=None) -> None:
     fv = hud.final_values()
     score_line = f"final score {fv['score']}"
     if meta is not None and meta.score > 0:
-        ok = "==" if fv["score"] == meta.score else "!= MISMATCH"
-        score_line += f" (replay {meta.score} {ok})"
+        if _header_is_standardised(meta):
+            ok = "==" if fv["score"] == meta.score else "!= MISMATCH"
+            score_line += f" (replay {meta.score} {ok})"
+        else:
+            # stable ScoreV1 header: the shown value is the sim's lazer-
+            # standardised ScoreV3 (#115), not comparable to the raw header.
+            score_line += f" (ScoreV3; stable ScoreV1 header {meta.score})"
     acc_line = f"acc {fv['acc'] * 100.0:.2f}%"
     if judgments is not None and judgments.real_counts is not None:
         c3, c1, c5, cm = judgments.real_counts
