@@ -1195,7 +1195,12 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
             use_beatmap_samples=not settings.use_skin_hitsounds,
             synth_style=synth_style_for(settings.skin_dir is not None,
                                         settings.legacy_defaults))
-    hs_gain = ((settings.hitsound_volume / 100.0)
+    # -8 LU hit ceiling (2026-07-31): std per-note hits had NO attenuation
+    # (rode at full volume x1.0) — the loudest in-house engine. Scale them to
+    # match the -18 LUFS music loudnorm drop (mirrors catch/mania 0.55->0.22).
+    HIT_CEILING = 0.40
+    hs_gain = (HIT_CEILING
+               * (settings.hitsound_volume / 100.0)
                * (settings.general_volume / 100.0))
 
     # §3.4 hitsounds: one-shots at judged hit times + slide/spin loops,

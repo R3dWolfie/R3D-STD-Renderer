@@ -243,7 +243,7 @@ def collect_hitsound_events(beatmap, sim, *, layered: bool = True,
 
 # --- nightcore beat overlay ---------------------------------------------------------
 
-NIGHTCORE_GAIN = 0.35        # mania's _NIGHTCORE_GAIN — under per-note hits
+NIGHTCORE_GAIN = 0.14        # mania's _NIGHTCORE_GAIN — under per-note hits
 
 
 def nightcore_beats(timings, t0: float, t1: float,
@@ -294,7 +294,7 @@ def mix_nightcore(mixer, bank: "SampleBank", beats, *, speed: float = 1.0,
 
 # --- ModNightcore beat overlay (NC-mod-gated, distinct from the metronome) -----
 
-NIGHTCORE_MOD_GAIN = 0.5      # nightcore-kick/clap/hat/finish drums
+NIGHTCORE_MOD_GAIN = 0.20      # nightcore-kick/clap/hat/finish drums
 
 
 def nightcore_mod_events(timings, t0: float, t1: float,
