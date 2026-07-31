@@ -1375,6 +1375,45 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
     print(f"done: {n_frames} frames in {wall:.1f}s "
           f"({n_frames / wall:.1f} fps render, encoder {encoder}) → {output}",
           file=sys.stderr)
+    # ── SCORE FIDELITY sidecar (parity with catch/taiko #115/#155) ────
+    # std DISPLAYS the lazer-standardised ScoreV3 (the pinned header for a
+    # lazer/ScoreV2 replay; the sim's own standardised trajectory for a plain
+    # stable ScoreV1 header, #115). Persist that SAME total to
+    # `<output>.score.json` so the bot (worker.py / cli/r3d_render.py) stores
+    # it in renders.score_v3 on EVERY render — re-renders and unsubmitted
+    # plays included — instead of depending on the off-band score_v3 backfill.
+    # Same filename + `score_v3` key + schema the catch/taiko engines emit;
+    # the value == the full-map standardised total (HudData.final_score(), ==
+    # the backfill's score_at(1e12) and the number the in-video counter ends
+    # on for a PASS). Best-effort: a failed sidecar never fails a done render.
+    if hud is not None:
+        try:
+            import json as _json
+            _sim_final = int(hud.data.final_score())
+            if (meta is not None and meta.score > 0
+                    and _header_is_standardised(meta)):
+                _v3, _src = int(meta.score), "header_standardised"
+            else:
+                _v3, _src = _sim_final, "sim_standardised"
+            if _v3 > 0:
+                _entry = {
+                    "score_v3": _v3,
+                    "source": _src,
+                    "sim_final": _sim_final,
+                    "header_score": int(getattr(meta, "score", 0) or 0),
+                    "player": (getattr(meta, "player_name", "") or "")
+                              if meta is not None else "",
+                }
+                _sidecar = Path(str(output) + ".score.json")
+                _sidecar.write_text(_json.dumps(
+                    {"schema": 1, "mode": 0, **_entry,
+                     "players": [dict(_entry)]}, default=str))
+                print(f"score:  fidelity sidecar → standardised {_v3:,} "
+                      f"(source={_src}, sim_final={_sim_final:,})",
+                      file=sys.stderr)
+        except Exception as _sc_e:  # noqa: BLE001 — sidecar is best-effort
+            print(f"score:  fidelity sidecar write failed: {_sc_e}",
+                  file=sys.stderr)
     if storyboard_renderer is not None:
         s = storyboard_renderer.stats()
         print(f"storyboard cache: {s['uploads']} uploads, "
