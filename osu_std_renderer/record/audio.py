@@ -46,7 +46,7 @@ class AudioError(RuntimeError):
 # means a track normalised by one mode is reused by another. Best-effort: any
 # cache error falls back to a normal (uncached) decode. R3D_NO_LOUDNORM_CACHE=1
 # disables the whole path; R3D_LOUDNORM_CACHE_DIR overrides the location.
-_LOUDNORM_FILTER = "loudnorm=I=-10:TP=-1.5:LRA=11"
+_LOUDNORM_FILTER = "loudnorm=I=-18:TP=-1.5:LRA=11"
 _DEFAULT_CACHE_DIR = "/data/r3d/loudnorm-cache"
 _CACHE_EXT = "f32le"          # raw little-endian float32, 48 kHz stereo
 

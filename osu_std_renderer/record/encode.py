@@ -11,7 +11,7 @@ Differences from the reference (§5.6) — deliberate:
   * Pixel path is rgb24 (renderer reads back RGB); the GPU RGB→YUV shader
     + PBO pool (§5.6 readback) is a later perf phase — mania v2's
     gpu/readback.py already proves it on this stack.
-  * loudnorm (single-pass, I=-14:TP=-1.5, the 2026-07-03 audio directive)
+  * loudnorm (single-pass, I=-18:TP=-1.5, the 2026-07-31 audio directive)
     is applied to the audio filter chain like every in-house engine.
 """
 from __future__ import annotations
@@ -25,7 +25,7 @@ from pathlib import Path
 
 from ..render import perf
 
-LOUDNORM = "loudnorm=I=-10:TP=-1.5:LRA=11"
+LOUDNORM = "loudnorm=I=-18:TP=-1.5:LRA=11"
 
 
 class EncoderError(RuntimeError):
