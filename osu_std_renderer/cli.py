@@ -1294,7 +1294,7 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
                          rate_fn=(warp.rate_at if warp is not None else None))
     t0 = time.monotonic()
     try:
-        with FfmpegPipe(cmd) as pipe:
+        with FfmpegPipe(cmd, recycle=spr.recycle_frame) as pipe:
             n_frames = RecordPipeline(settings.fps, pipe.push,
                                       progress=progress).run(
                 player, total_ms=total_wall_ms)

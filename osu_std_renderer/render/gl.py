@@ -20,6 +20,7 @@ pixel-identical against per-texture repeat wrapping.
 """
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 
 import numpy as np
@@ -144,6 +145,13 @@ class SpriteRenderer:
         self._pbos: list["moderngl.Buffer"] | None = None
         self._pbo_head = 0
         self._pbo_tail = 0
+        # recycled CPU-side frame buffers for the PBO readback: a fresh
+        # 6 MB np.empty per frame costs an mmap + page-fault storm; the
+        # encoder's writer thread hands frames back via recycle_frame()
+        # once ffmpeg has them, so steady state reuses ~6 warm buffers.
+        # deque append/pop are GIL-atomic (writer thread + render thread).
+        self._frame_pool: "deque[np.ndarray]" = deque()
+        self._frame_pool_ids: set[int] = set()
 
     def _ensure_capacity(self, n_sprites: int) -> None:
         """Size the dynamic VBO + static index buffer for n_sprites quads."""
@@ -358,10 +366,29 @@ class SpriteRenderer:
     def _pop_pbo(self) -> np.ndarray:
         buf = self._pbos[self._pbo_tail % len(self._pbos)]
         self._pbo_tail += 1
-        data = buf.read()
-        arr = np.frombuffer(data, dtype="u1").reshape(
-            (self.height, self.width, 3))
-        return np.flipud(arr)  # same orientation contract as read_rgb
+        arr = self._frame_buf()
+        buf.read_into(arr)         # same bytes buf.read() returned, copied
+        return np.flipud(arr)      # same orientation contract as read_rgb
+
+    def _frame_buf(self) -> np.ndarray:
+        """A (h, w, 3) u1 frame buffer — pooled when the encoder has
+        recycled one, else freshly allocated and registered."""
+        try:
+            return self._frame_pool.pop()
+        except IndexError:
+            arr = np.empty((self.height, self.width, 3), dtype="u1")
+            # pooled arrays live for the whole render, so their ids are
+            # stable and can never be re-issued to a foreign object
+            self._frame_pool_ids.add(id(arr))
+            return arr
+
+    def recycle_frame(self, frame) -> None:
+        """Return a pooled readback frame once the encoder is done with
+        it (called from the ffmpeg writer thread). Frames from other
+        sources (sync read_rgb / SSAA composites) are ignored."""
+        base = frame.base if frame.base is not None else frame
+        if id(base) in self._frame_pool_ids:
+            self._frame_pool.append(base)
 
     def read_drain(self) -> list:
         """Return every frame still in flight, oldest first (map end, or

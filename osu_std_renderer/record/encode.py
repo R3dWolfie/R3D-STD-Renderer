@@ -129,8 +129,13 @@ class FfmpegPipe:
 
     _QUEUE_FRAMES = 4
 
-    def __init__(self, cmd: list[str]):
+    def __init__(self, cmd: list[str], recycle=None):
+        # recycle: optional callable(frame) invoked writer-side once a
+        # frame's bytes are in the pipe — the GL renderer's readback
+        # buffer pool (SpriteRenderer.recycle_frame). Pure bookkeeping:
+        # the byte stream ffmpeg sees is untouched.
         self.cmd = cmd
+        self._recycle = recycle
         self.proc: subprocess.Popen | None = None
         self._q: "queue.Queue" = queue.Queue(maxsize=self._QUEUE_FRAMES)
         self._thread: threading.Thread | None = None
@@ -157,6 +162,8 @@ class FfmpegPipe:
             if frame is None:
                 return
             if self._werr is not None:
+                if self._recycle is not None:
+                    self._recycle(frame)
                 continue          # drain (never write after an error)
             try:
                 if self._hash is not None:
@@ -176,6 +183,8 @@ class FfmpegPipe:
                     stdin.write(flipped)
                 else:
                     stdin.write(flipped.tobytes())
+                if self._recycle is not None:
+                    self._recycle(frame)
             except BaseException as e:  # noqa: BLE001 - surfaced on push()
                 self._werr = e
 

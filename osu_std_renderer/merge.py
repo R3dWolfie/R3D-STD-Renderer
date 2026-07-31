@@ -737,7 +737,7 @@ def render_merge(osr_paths, beatmap_dir, output, *,
                            output_path=Path(output), audio_path=audio_path, loudnorm=False)
     player = ScenePlayer(scene, end_ms, speed=speed, start_ms=render_start_ms,
                          rate_fn=_breakdown_rate)
-    with FfmpegPipe(cmd) as pipe:
+    with FfmpegPipe(cmd, recycle=spr.recycle_frame) as pipe:
         n = RecordPipeline(fps, pipe.push).run(player, total_ms=total_wall_ms)
     if audio_path is not None:
         try:
