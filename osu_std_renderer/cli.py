@@ -1229,13 +1229,19 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
               file=sys.stderr)
         have_audio = have_audio or stats.oneshots > 0 or stats.loop_ms > 0
 
+    # Beat overlays stop at gameplay END, not into the fail-anim/results outro
+    # (taiko fix ac73af2): on a FAIL gameplay ends at the death point, so cap the
+    # overlay horizon at fail_time (the one-shot hits are already truncated there).
+    # On a pass last_end (< the results screen) is already the correct bound.
+    _overlay_end = fail_time if fail_time is not None else last_end
+
     # §4.4 general beat-overlay metronome: clap each beat + finish each downbeat
-    # across [render start, last object]. SUPPRESSED while NC is active (the NC
+    # across [render start, gameplay end]. SUPPRESSED while NC is active (the NC
     # drum overlay below plays instead — osu! never plays both).
     if settings.nightcore_hitsounds and not _nc_mod and sample_bank is not None:
         from .record.hitsounds import mix_nightcore, nightcore_beats
         beats = nightcore_beats(beatmap.timings,
-                                max(render_start_ms, 0.0), last_end)
+                                max(render_start_ms, 0.0), _overlay_end)
         laid = mix_nightcore(mixer, sample_bank, beats, speed=speed,
                              start_ms=render_start_ms, gain=hs_gain,
                              to_wall=(m2w if warp is not None else None))
@@ -1254,7 +1260,7 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
         from .record.hitsounds import mix_nightcore_mod, nightcore_mod_events
         _play_hats = (int(round(beatmap.timings.tick_rate)) % 2 == 0)
         nc_events = nightcore_mod_events(beatmap.timings,
-                                         max(render_start_ms, 0.0), last_end,
+                                         max(render_start_ms, 0.0), _overlay_end,
                                          play_hats=_play_hats)
         nc_laid = mix_nightcore_mod(mixer, sample_bank, nc_events, speed=speed,
                                     start_ms=render_start_ms, gain=hs_gain,
