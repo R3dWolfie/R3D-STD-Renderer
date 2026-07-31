@@ -1037,6 +1037,7 @@ class ArgonBarField:
         self._dclip_cache: dict = {}   # radius → np.clip(self.d, 0, radius)
         self._out_bufs: dict = {}      # out_key → [u8 buffer, sig, prev box]
         self._band_cache: dict[float, tuple[int, int, int, int]] = {}
+        self._geo_cache: dict = {}     # out_key → persistent geometry fields
 
     @staticmethod
     def _path_points(w: float, h: float, r: float,
@@ -1342,6 +1343,193 @@ class ArgonBarField:
         # D (when it was _s3 scratch) is dead past this point — reuse it
         # for t2; the point-case cached D is a different array and _s3 is
         # free there too.
+        t2 = self._s3[:rows, :cols]
+        out = self._out_buffer(out_key, glow_rgba, box)
+        for c in range(3):
+            bc = bar_rgb[c]
+            if bc == 1.0:                          # core*1.0 == core exact
+                np.multiply(inv, glow_rgba[c], out=t2)
+                np.add(core, t2, out=t2)
+            else:
+                np.multiply(core, bc, out=t2)
+                np.multiply(inv, glow_rgba[c], out=t1)
+                np.add(t2, t1, out=t2)
+            np.multiply(t2, 255.0, out=t2)
+            np.rint(t2, out=t2)
+            out[y0:y1, x0:x1, c] = t2
+        np.multiply(inv, ga, out=t2)
+        np.add(core, t2, out=t2)
+        if xgrad:
+            np.multiply(t2, self._xgrad_g[y0:y1, x0:x1], out=t2)
+        if alpha_mult != 1.0:      # x * 1.0 is an exact f64 identity
+            np.multiply(t2, alpha_mult, out=t2)
+        np.clip(t2, 0.0, 1.0, out=t2)
+        np.multiply(t2, 255.0, out=t2)
+        np.rint(t2, out=t2)
+        out[y0:y1, x0:x1, 3] = t2
+        return out
+
+    # --- geometry-cached bar_rgba (perf; byte-identical output) ---------------
+
+    @staticmethod
+    def _box_isect(a, b):
+        y0, x0 = max(a[0], b[0]), max(a[2], b[2])
+        y1, x1 = min(a[1], b[1]), min(a[3], b[3])
+        return (y0, max(y0, y1), x0, max(x0, x1))
+
+    def _geo_update(self, g, a: float, b: float, radius: float,
+                    box) -> None:
+        """Recompute the D-derived fields (core, inv, mix⁸ = the glow
+        falloff BEFORE the glow-alpha multiply) over `box` and store them
+        into the persistent full-grid arrays — the exact op chain
+        bar_rgba runs, so every stored element equals what a fresh
+        bar_rgba would compute this frame at that texel."""
+        y0, y1, x0, x1 = box
+        rows, cols = y1 - y0, x1 - x0
+        if rows <= 0 or cols <= 0:
+            return
+        agp = radius * g["gp"]
+        if b <= a + 1e-9:
+            D = self._dist_clip_to(self.pos(a), box, radius)
+        else:
+            s_box = self.s[y0:y1, x0:x1]
+            inside = (s_box <= b) if a <= 0.0 else \
+                ((s_box >= a) & (s_box <= b))
+            da = self._dist_clip_to(self.pos(a), box, radius)
+            pb = self.pos(b)
+            Dbuf = self._s3[:rows, :cols]
+            Dbuf[...] = radius
+            wy0, wy1, wx0, wx1 = self._win(pb, radius, box)
+            if wy1 > wy0 and wx1 > wx0:
+                dw = np.hypot(self.xx[wy0:wy1, wx0:wx1] - pb[0],
+                              self.yy[wy0:wy1, wx0:wx1] - pb[1])
+                np.clip(dw, 0.0, radius, out=dw)
+                Dbuf[wy0 - y0:wy1 - y0, wx0 - x0:wx1 - x0] = dw
+            np.minimum(da, Dbuf, out=Dbuf)
+            np.copyto(Dbuf, self._d_clipped(radius)[y0:y1, x0:x1],
+                      where=inside)
+            D = Dbuf
+        core = self._s4[:rows, :cols]
+        np.subtract(radius - agp, D, out=core)
+        np.clip(core, 0.0, 1.0, out=core)
+        ga = self._s5[:rows, :cols]
+        np.subtract(D, radius, out=ga)
+        np.add(ga, agp, out=ga)
+        np.divide(ga, max(agp, 1e-9), out=ga)
+        np.subtract(1.0, ga, out=ga)
+        np.clip(ga, 0.0, 1.0, out=ga)
+        np.power(ga, 8, out=ga)
+        g["core"][y0:y1, x0:x1] = core
+        np.subtract(1.0, core, out=core)          # == bar_rgba's inv
+        g["inv"][y0:y1, x0:x1] = core
+        g["mix8"][y0:y1, x0:x1] = ga
+
+    def bar_rgba_geo(self, a: float, b: float, radius: float,
+                     glow_portion: float, bar_rgb, glow_rgba,
+                     xgrad: bool = False, alpha_mult: float = 1.0,
+                     *, out_key: str) -> np.ndarray:
+        """bar_rgba with a persistent per-out_key GEOMETRY cache —
+        byte-identical output, much cheaper per frame.
+
+        Why it's exact: for fixed (radius, glow_portion), each texel's
+        core/inv/mix⁸ depend on (a, b) only through the clipped distances
+        to the sub-path [a, b] — and a texel farther than `radius` from
+        every path point with progress in the CHANGED endpoint ranges
+        [a₀,a₁] / [b₀,b₁] sees identical values before and after the move
+        (its own d ≥ radius ⇒ D clips to radius in every branch, or its
+        nearest-point progress is outside the changed ranges ⇒ mask and
+        endpoint distances unchanged; d ≤ da, db always since a/b are
+        path points). _sub_box over each changed range is a conservative
+        cover of the complement, so refreshing ONLY those boxes keeps the
+        full-grid fields equal to a fresh full recompute — the argument
+        _live_box/_sub_box already document, applied to the frame delta.
+        Neutral init (core 0, inv 1, mix⁸ 0) equals the far-field
+        evaluation at D = radius. The per-frame colour pass then runs the
+        same op chain bar_rgba runs, over the same live∩sub box, reading
+        the cached fields instead of recomputing them — hit-flash frames
+        (colour-only changes) skip the distance/power work entirely.
+        tests/test_hud.py fuzzes this against bar_rgba element-for-element.
+        """
+        agp = radius * glow_portion
+        if agp <= 0.0:
+            return self.bar_rgba(a, b, radius, glow_portion, bar_rgb,
+                                 glow_rgba, xgrad=xgrad,
+                                 alpha_mult=alpha_mult, out_key=out_key)
+        # rb: the byte-equal output shrink (see the colour-pass comment
+        # below). It is also safe as the UPDATE dilation in the point
+        # case: the colour box (rb around pos) is a subset of the update
+        # box (rb around the [old,new] pos range, which contains pos), so
+        # every texel read this frame — and, by the branch-switch
+        # coverage argument, on any later frame — is freshly computed.
+        # Segment updates keep the FULL radius (a fold in the bar path
+        # could put a texel within rb of the sub-path while its nearest
+        # point lies outside [a, b], where D depends on the endpoint
+        # distances up to the full radius).
+        shrink_ok = alpha_mult <= 1.0 and glow_rgba[3] <= 1.0
+        rb = radius - 0.45 * agp if shrink_ok else radius
+        g = self._geo_cache.get(out_key)
+        if g is None or g["radius"] != radius or g["gp"] != glow_portion \
+                or (g["shrunk"] and not shrink_ok):
+            # a caller outside the ≤1 alpha bounds must not read texels a
+            # past rb-dilated update skipped — rebuild from scratch
+            g = {"radius": radius, "gp": glow_portion, "a": None, "b": None,
+                 "shrunk": False,
+                 "core": np.zeros((self.gh, self.gw)),
+                 "inv": np.ones((self.gh, self.gw)),
+                 "mix8": np.zeros((self.gh, self.gw))}
+            self._geo_cache[out_key] = g
+        point = b <= a + 1e-9
+        upd_r = rb if (point and shrink_ok) else radius
+        if upd_r != radius:
+            g["shrunk"] = True
+        live = self._live_box(radius)
+        if (g["a"], g["b"]) != (a, b):
+            if g["a"] is None:
+                upd = self._box_isect(live, self._sub_box(a, b, upd_r))
+                self._geo_update(g, a, b, radius, upd)
+            else:
+                boxes = []
+                if g["a"] != a:
+                    boxes.append(self._sub_box(min(a, g["a"]),
+                                               max(a, g["a"]), upd_r))
+                if g["b"] != b:
+                    boxes.append(self._sub_box(min(b, g["b"]),
+                                               max(b, g["b"]), upd_r))
+                if len(boxes) == 2:
+                    ba, bb = boxes
+                    # overlapping endpoint boxes (the point-glow moves a
+                    # and b together) → ONE union update, not two
+                    if ba[0] < bb[1] and bb[0] < ba[1] \
+                            and ba[2] < bb[3] and bb[2] < ba[3]:
+                        boxes = [(min(ba[0], bb[0]), max(ba[1], bb[1]),
+                                  min(ba[2], bb[2]), max(ba[3], bb[3]))]
+                for ub in boxes:
+                    self._geo_update(g, a, b, radius,
+                                     self._box_isect(live, ub))
+            g["a"], g["b"] = a, b
+        # Output-box shrink (byte-exact): past D = radius − 0.45·agp the
+        # glow has mixv < 0.45 ⇒ 255·mix⁸·A·xgrad·alpha_mult < 0.5 (all
+        # callers keep A, xgrad, alpha_mult ≤ 1) so the alpha byte rints
+        # to 0, and core = clip((radius−agp)−D) is exactly 0 there so the
+        # rgb bytes equal the far-field constant _out_buffer fills — the
+        # annulus [radius−0.45·agp, radius] writes the same bytes either
+        # way and is skipped. Geometry updates above keep the FULL radius
+        # so the cache invariant is unchanged.
+        rb = radius
+        if alpha_mult <= 1.0 and glow_rgba[3] <= 1.0:
+            rb = radius - 0.45 * agp
+        sy0, sy1, sx0, sx1 = self._sub_box(a, b, rb)
+        y0, x0 = max(live[0], sy0), max(live[2], sx0)
+        y1, x1 = min(live[1], sy1), min(live[3], sx1)
+        if y1 <= y0 or x1 <= x0:
+            return self._out_buffer(out_key, glow_rgba, (0, 0, 0, 0))
+        box = (y0, y1, x0, x1)
+        rows, cols = y1 - y0, x1 - x0
+        core = g["core"][y0:y1, x0:x1]
+        inv = g["inv"][y0:y1, x0:x1]
+        ga = self._s5[:rows, :cols]
+        np.multiply(g["mix8"][y0:y1, x0:x1], glow_rgba[3], out=ga)
+        t1 = self._s2[:rows, :cols]
         t2 = self._s3[:rows, :cols]
         out = self._out_buffer(out_key, glow_rgba, box)
         for c in range(3):
@@ -1961,7 +2149,7 @@ class StdHud:
         gkey = (seg_lo, seg_hi, gbar_rgb, ggl)
         if gkey != self._hp_glow_key:
             self._hp_glow_key = gkey
-            glow_tex = field.bar_rgba(
+            glow_tex = field.bar_rgba_geo(
                 seg_lo, seg_hi, HP_GLOW_RADIUS,
                 (HP_GLOW_RADIUS - HP_MAIN_RADIUS
                  * (1.0 - HP_MAIN_GLOW_PORTION)) / HP_GLOW_RADIUS,
@@ -1971,7 +2159,7 @@ class StdHud:
         mkey = (hp_now, bar_rgb, glow_rgba, alpha_main)
         if mkey != self._hp_main_key:
             self._hp_main_key = mkey
-            main_tex = field.bar_rgba(0.0, hp_now, HP_MAIN_RADIUS,
+            main_tex = field.bar_rgba_geo(0.0, hp_now, HP_MAIN_RADIUS,
                                       HP_MAIN_GLOW_PORTION, bar_rgb,
                                       glow_rgba, alpha_mult=alpha_main,
                                       out_key="hp_main")
