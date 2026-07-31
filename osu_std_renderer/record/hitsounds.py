@@ -68,6 +68,9 @@ ADDITION_SOUNDS = ((BIT_WHISTLE, "hitwhistle"),
                    (BIT_CLAP, "hitclap"))
 VOLUME_FLOOR = 0.08          # §3.4 sample-volume floor
 SAMPLE_EXTS = (".wav", ".ogg", ".mp3")   # §3.1 GetSample extension order
+# Bundled osu! DEFAULT nightcore drums (ppy/osu-resources Legacy skin) — final
+# fallback for the NC-mod overlay when the skin OMITS a nightcore sample.
+_DEFAULT_NC_DIR = Path(__file__).resolve().parent.parent / "assets" / "default_nightcore"
 
 
 def sounds_for_bits(bits: int, layered: bool = True) -> list[tuple[str, bool]]:
@@ -431,16 +434,26 @@ class SampleBank:
         return synth_sample(name, style=self.synth_style), "synth"
 
     def nc_sample(self, base: str) -> np.ndarray | None:
-        """ModNightcore skin sample (nightcore-kick/-clap/-hat/-finish) through
-        the SKIN chain only (skin → fallback → local) — no synth default. A
-        skin that ships a SILENT nightcore file plays (near-)silence; a skin
-        that omits it plays nothing (None)."""
-        if self.skin is None:
-            return None
-        p = self.skin.find_sample(base)
-        if p is None:
-            return None
-        return self._decode(p)
+        """ModNightcore sample (nightcore-kick/-clap/-hat/-finish): the SKIN
+        chain (skin → fallback → local) first, then the bundled osu! DEFAULT as
+        the FINAL fallback. A skin that ships a SILENT nightcore file plays
+        (near-)silence (skin wins); a skin that OMITS it falls back to the
+        default (osu!'s default-skin parity). No synth."""
+        if self.skin is not None:
+            p = self.skin.find_sample(base)
+            if p is not None:
+                pcm = self._decode(p)
+                if pcm is not None:
+                    return pcm
+        # bundled osu! default — reached only when ABSENT from the skin chain
+        if _DEFAULT_NC_DIR.is_dir():
+            for ext in SAMPLE_EXTS:
+                p = _DEFAULT_NC_DIR / f"{base}{ext}"
+                if p.is_file():
+                    pcm = self._decode(p)
+                    if pcm is not None:
+                        return pcm
+        return None
 
     def _decode(self, path: Path) -> np.ndarray | None:
         """Decode a sample file; zero-byte files mean SILENCE (the classic

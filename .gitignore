@@ -19,6 +19,11 @@ __pycache__/
 *-skin/
 test-data/
 
+# Bundled osu! DEFAULT nightcore drums are a SHIPPED asset (final fallback for
+# the NC-mod beat overlay), not test output — keep them tracked despite *.wav.
+!osu_std_renderer/assets/default_nightcore/
+!osu_std_renderer/assets/default_nightcore/*.wav
+
 # scratch
 *.png
 !docs/*.png

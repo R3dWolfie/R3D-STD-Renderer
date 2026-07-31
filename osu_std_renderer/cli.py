@@ -1194,10 +1194,10 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
               file=sys.stderr)
         have_audio = have_audio or stats.oneshots > 0 or stats.loop_ms > 0
 
-    # §4.4 nightcore beat overlay: clap each beat + finish each downbeat
-    # across [render start, last object] — the mania _layer_nightcore
-    # mirror (works with or without the judged hitsound track)
-    if settings.nightcore_hitsounds and sample_bank is not None:
+    # §4.4 general beat-overlay metronome: clap each beat + finish each downbeat
+    # across [render start, last object]. SUPPRESSED while NC is active (the NC
+    # drum overlay below plays instead — osu! never plays both).
+    if settings.nightcore_hitsounds and not _nc_mod and sample_bank is not None:
         from .record.hitsounds import mix_nightcore, nightcore_beats
         beats = nightcore_beats(beatmap.timings,
                                 max(render_start_ms, 0.0), last_end)
