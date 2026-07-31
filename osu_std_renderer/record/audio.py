@@ -20,9 +20,12 @@ encoder speed can't shift audio (the property §5.2 guards).
 """
 from __future__ import annotations
 
+import hashlib
+import os
 import shutil
 import struct
 import subprocess
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -33,6 +36,84 @@ CHANNELS = 2
 
 class AudioError(RuntimeError):
     pass
+
+
+# --- loudnorm PCM cache (cross-engine, box-local) ----------------------------
+# The inline loudnorm normalisation in decode_to_pcm is the single largest
+# audio setup cost and is deterministic in (source bytes, rate, pitch, params).
+# Memoise its f32le PCM output on the fast local SSD so a repeat render of the
+# same track skips the pass; using the SAME key recipe in every in-house engine
+# means a track normalised by one mode is reused by another. Best-effort: any
+# cache error falls back to a normal (uncached) decode. R3D_NO_LOUDNORM_CACHE=1
+# disables the whole path; R3D_LOUDNORM_CACHE_DIR overrides the location.
+_LOUDNORM_FILTER = "loudnorm=I=-10:TP=-1.5:LRA=11"
+_DEFAULT_CACHE_DIR = "/data/r3d/loudnorm-cache"
+_CACHE_EXT = "f32le"          # raw little-endian float32, 48 kHz stereo
+
+
+def _loudnorm_cache_disabled() -> bool:
+    return os.environ.get("R3D_NO_LOUDNORM_CACHE", "").strip().lower() \
+        not in ("", "0", "false", "no", "off")
+
+
+def _loudnorm_cache_dir() -> Path:
+    return Path(os.environ.get("R3D_LOUDNORM_CACHE_DIR", _DEFAULT_CACHE_DIR))
+
+
+def _loudnorm_cache_key(path: Path, rate: float, pitch: bool,
+                        loudnorm_param: str) -> str:
+    """Stable hash of everything that determines the loudnorm OUTPUT: sha256 of
+    the SOURCE audio bytes + playback rate + pitch mode (NC resample vs DT/HT
+    atempo) + the exact loudnorm param string. Same recipe in every engine so
+    the cache is shared. Raises OSError if the source can't be read (the caller
+    then decodes uncached)."""
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    material = "\n".join((
+        f"src={h.hexdigest()}",
+        f"rate={float(rate)!r}",
+        f"pitch={1 if pitch else 0}",
+        f"param={loudnorm_param}",
+    )).encode("utf-8")
+    return hashlib.sha256(material).hexdigest()
+
+
+def _loudnorm_cache_load(cache_path: Path):
+    """Return cached PCM (N,2 float32) or None on miss/corrupt/short read."""
+    try:
+        data = cache_path.read_bytes()
+    except OSError:
+        return None
+    stride = CHANNELS * 4  # bytes per frame (float32 * channels)
+    if not data or (len(data) % stride) != 0:
+        return None  # empty or truncated/corrupt -> recompute
+    try:
+        return np.frombuffer(data, dtype=np.float32).reshape(-1, CHANNELS).copy()
+    except ValueError:
+        return None
+
+
+def _loudnorm_cache_store(cache_path: Path, raw: bytes) -> None:
+    """Atomically write raw f32le PCM bytes to the cache (temp + os.replace).
+    Best-effort: never raises -- a cache failure must not fail a render."""
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=str(cache_path.parent),
+                                   prefix=".tmp-", suffix="." + _CACHE_EXT)
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(raw)
+            os.replace(tmp, cache_path)          # atomic on the same fs
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+    except (OSError, ValueError):
+        pass
 
 
 def rate_audio_filter(rate: float, pitch: bool = False) -> str:
@@ -78,14 +159,33 @@ def decode_to_pcm(path: Path, *, rate: float = 1.0,
     ffmpeg = shutil.which("ffmpeg")
     if ffmpeg is None:
         raise AudioError("ffmpeg not found on PATH")
-    cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-i", str(path)]
     af = rate_audio_filter(rate, pitch)
+
+    # LOUDNORM PCM CACHE: the loudnorm pass is deterministic in its input yet
+    # reruns the full ffmpeg decode+normalise on every render of the same track.
+    # When loudnorm is requested, memoise the decoded f32le PCM under a key over
+    # everything that determines the OUTPUT (source bytes + rate + pitch mode +
+    # the exact loudnorm param string). A hit returns byte-identical bytes and
+    # skips the pass; a miss runs it exactly as before then writes atomically.
+    cache_path = None
+    if loudnorm and not _loudnorm_cache_disabled():
+        try:
+            key = _loudnorm_cache_key(Path(path), rate, pitch, _LOUDNORM_FILTER)
+            cache_path = _loudnorm_cache_dir() / f"{key}.{_CACHE_EXT}"
+        except OSError:
+            cache_path = None  # can't hash the source -> just decode uncached
+        if cache_path is not None:
+            cached = _loudnorm_cache_load(cache_path)
+            if cached is not None:
+                return cached
+
+    cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-i", str(path)]
     if loudnorm:
         # LOUDNORM DUCK FIX (#17): normalise the MUSIC ALONE here (music-only,
         # no hit transients) so the encode does NOT loudnorm the song+hits mix
         # (that ducked the song ~4 dB under every hitsound). Hits are numpy-mixed
         # on top afterwards; the encode applies only a clamp-only peak limiter.
-        af = (af + "," if af else "") + "loudnorm=I=-10:TP=-1.5:LRA=11"
+        af = (af + "," if af else "") + _LOUDNORM_FILTER
     if af:
         cmd += ["-af", af]
     cmd += ["-f", "f32le", "-acodec", "pcm_f32le",
@@ -94,6 +194,8 @@ def decode_to_pcm(path: Path, *, rate: float = 1.0,
     if proc.returncode != 0:
         raise AudioError(f"ffmpeg decode failed: "
                          f"{proc.stderr.decode(errors='replace')[-500:]}")
+    if cache_path is not None:
+        _loudnorm_cache_store(cache_path, proc.stdout)
     pcm = np.frombuffer(proc.stdout, dtype=np.float32)
     return pcm.reshape(-1, CHANNELS).copy()
 
