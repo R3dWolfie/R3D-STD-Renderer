@@ -804,6 +804,30 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
         _fanchor = fail_time if fail_time is not None else last_end
         fail_anim_len_ms = warp.map_span(_fanchor, FAIL_DURATION_MS)
 
+    # --- music decode, EARLY + OFF-THREAD (perf; byte-identical) -------------
+    # decode_to_pcm (an ffmpeg subprocess with the inline loudnorm pass) is
+    # the single largest setup cost (~3 s for a full track). Its inputs
+    # (afile, speed/pitch, warp-or-not) are all bound here, ~1 s of results
+    # bake / scene build / hitsound decoding before the pcm is consumed —
+    # so kick the subprocess off now on a worker thread and collect it in
+    # the audio section below. Same call, same args, same bytes; an
+    # AudioError raised in the worker surfaces at .result() inside the
+    # existing try. Skipped for --dump-frames (it never reaches audio).
+    _audio_afile = beatmap.get_audio_file(beatmap_dir)
+    _audio_fut = None
+    if _audio_afile is not None and not args.dump_frames:
+        from concurrent.futures import ThreadPoolExecutor
+        _audio_pool = ThreadPoolExecutor(max_workers=1)
+        if warp is not None:
+            # WU/WD decodes NATIVE (rate 1) and warps piecewise at collect
+            _audio_fut = _audio_pool.submit(decode_to_pcm, _audio_afile,
+                                            rate=1.0, loudnorm=True)
+        else:
+            _audio_fut = _audio_pool.submit(
+                decode_to_pcm, _audio_afile, rate=speed,
+                pitch=(meta is not None and meta.rate_pitch), loudnorm=True)
+        _audio_pool.shutdown(wait=False)
+
     # FAIL results: grade F + stats FROZEN at the death point (NOT the .osr's
     # full-map reconciled totals). Tally judgments up to fail_time from the
     # (un-reconciled) sim, peak combo up to death, accuracy from those counts.
@@ -1113,7 +1137,7 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
     audio_path = None
     mixer = AudioMixer(m2w(end_ms))
     have_audio = False
-    afile = beatmap.get_audio_file(beatmap_dir)
+    afile = _audio_afile
     if afile is not None:
         try:
             vol = ((settings.music_volume / 100.0)
@@ -1124,16 +1148,19 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
                 # warp_music_pcm). adjust_pitch True (WU/WD default) shifts
                 # pitch with the rate; False keeps pitch (tempo-only).
                 from .record.audio import warp_music_pcm
-                pcm = decode_to_pcm(afile, rate=1.0, loudnorm=True)
+                pcm = (_audio_fut.result() if _audio_fut is not None
+                       else decode_to_pcm(afile, rate=1.0, loudnorm=True))
                 pcm = warp_music_pcm(pcm, warp,
                                      adjust_pitch=meta.ramp_pitch)
             else:
                 # NC/DC pitch the music with the rate; DT/HT (and every
                 # standard/bitmask rate, where rate_pitch is False) change
-                # tempo only.
-                pcm = decode_to_pcm(afile, rate=speed,
-                                    pitch=(meta is not None and meta.rate_pitch),
-                                    loudnorm=True)
+                # tempo only. (Decoded off-thread above — same args.)
+                pcm = (_audio_fut.result() if _audio_fut is not None
+                       else decode_to_pcm(
+                           afile, rate=speed,
+                           pitch=(meta is not None and meta.rate_pitch),
+                           loudnorm=True))
             # the map-time render start lands at wall t=0: the (already
             # rate-adjusted / ramp-warped) music is laid at the wall position
             # of map time 0 — mix_at clips a negative head; a pre-roll delays
