@@ -719,8 +719,13 @@ def render_merge(osr_paths, beatmap_dir, output, *,
                                synth_style=synth_style_for(skin_dir is not None, False))
             layered = getattr(getattr(skin, "info", None), "layered_hit_sounds", True)
             oneshots, loops = collect_hitsound_events(beatmap, ref_sim, layered=layered)
+            # -8 LU hit ceiling (2026-07-31): the versus/merge path mixed hits
+            # at full x1.0 while the music dropped to -18 LUFS, so hits blasted
+            # ~8 LU over the music. Mirror the solo std path (cli.py HIT_CEILING)
+            # so versus/merge hits match solo std under the -18 music.
+            HIT_CEILING = 0.40
             st = mix_hitsounds(mixer, sbank, oneshots, loops, speed=speed,
-                               start_ms=render_start_ms, gain=1.0)
+                               start_ms=render_start_ms, gain=HIT_CEILING)
             have_audio = have_audio or st.oneshots > 0
             print(f"  hitsounds: {st.oneshots} one-shots ({ref_name})",
                   file=sys.stderr)
