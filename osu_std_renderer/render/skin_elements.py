@@ -284,6 +284,11 @@ class SkinElements:
         sizes: dict[str, tuple[float, float]] = {}
         for ch, tf in tfs.items():
             rgba = tf.load_rgba()
+            if rgba.size == 0:
+                # a corrupt/unloadable digit → fall the WHOLE set back to the
+                # default (matches the "ALL TEN or fall back" rule above; a
+                # mixed skin/procedural digit run would look broken).
+                return {}
             renderer.upload_texture(f"sk_{key}_{ch}", rgba)
             sizes[ch] = (rgba.shape[1] * tf.scale, rgba.shape[0] * tf.scale)
         self.loaded.add(flag)

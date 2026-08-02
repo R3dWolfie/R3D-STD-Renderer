@@ -25,6 +25,7 @@ ELEMENT_ASSETS below so the atlas phase has a checklist.
 from __future__ import annotations
 
 import enum
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -32,6 +33,8 @@ import numpy as np
 from PIL import Image
 
 from .skin_ini import SkinInfo, load as load_skin_ini
+
+log = logging.getLogger(__name__)
 
 
 class Source(enum.IntFlag):
@@ -81,7 +84,17 @@ class TextureFile:
     two_x: bool          # @2x variant → logical size = pixel size / 2
 
     def load_rgba(self) -> np.ndarray:
-        img = Image.open(self.path).convert("RGBA")
+        # A corrupt / undecodable skin image (truncated PNG, wrong magic, etc.)
+        # must never crash the whole render: log it and return an EMPTY array so
+        # callers treat it exactly like a MISSING texture and fall back to the
+        # default/Argon bake. (Live crash 2026-08-02: a user skin shipped an
+        # unreadable score-x@2x.png and PIL raised UnidentifiedImageError.)
+        try:
+            img = Image.open(self.path).convert("RGBA")
+        except Exception:  # noqa: BLE001 — any decode failure => treat as missing
+            log.warning("skin texture unreadable, falling back: %s",
+                        self.path, exc_info=True)
+            return np.zeros((0, 0, 4), dtype=np.uint8)
         return np.asarray(img, dtype=np.uint8)
 
     @property
