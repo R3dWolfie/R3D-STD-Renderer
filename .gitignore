@@ -31,3 +31,6 @@ test-data/
 .ruff_cache/
 *.bak*
 *backup*
+
+# R3D logo — license-clean own IP; keep it in-repo so clones do not fall back to the placeholder tile
+!osu_std_renderer/assets/logo.png
