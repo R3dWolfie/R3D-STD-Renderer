@@ -302,6 +302,31 @@ def bake_argon_digits(height: int = DIGIT_HEIGHT) -> dict[str, np.ndarray]:
 # it spans cap-top→baseline, inside the existing A-Z union extent, so it
 # likewise bakes without disturbing any other glyph.
 HUD_CHARSET = "0123456789.%x,:-!ABCDEFGHIJKLMNOPQRSTUVWXYZp×/"
+
+# --- Runtime-derive the glyph cap-fill from the ACTUAL bundled fonts --------
+# The hand-derived constants above are a frozen snapshot; Pillow/freetype can
+# change variable-font (Nunito wght) metrics between versions, drifting the
+# snapshot from what actually bakes. Measure the live fonts here (identical to
+# the drift-guard test: cap "E" height / union sprite extent over HUD_CHARSET)
+# so the scale tracks the real bake and can never drift. Falls back to the
+# hand-derived constants if measurement raises. Digit bank is left as-is (the
+# test range-checks its scale, does not measure it).
+def _measure_glyph_cap_fill(loader) -> float:
+    font = loader(int(DIGIT_HEIGHT * 0.95))
+    boxes = [font.getbbox(c) for c in HUD_CHARSET]
+    top, bot = min(b[1] for b in boxes), max(b[3] for b in boxes)
+    capE = font.getbbox("E")
+    return (capE[3] - capE[1]) / ((bot - top) + 8)
+
+
+try:
+    DEJAVU_GLYPH_CAP_FILL = _measure_glyph_cap_fill(_load_font)
+    ARGON_GLYPH_CAP_FILL = _measure_glyph_cap_fill(_load_argon_font)
+    ARGON_GLYPH_CAP_SCALE = DEJAVU_GLYPH_CAP_FILL / ARGON_GLYPH_CAP_FILL
+except Exception:
+    pass  # keep the hand-derived fallbacks defined near the top of the module
+# ---------------------------------------------------------------------------
+
 PIE_STEPS = 48          # quantized progress-pie fill masks
 PIE_SIZE = 96
 KEY_SQUARE_SIZE = 128
