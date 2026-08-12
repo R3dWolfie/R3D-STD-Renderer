@@ -513,14 +513,16 @@ def test_draw_stage1_and_stage2_run():
 
 
 def test_pb_card_only_drawn_when_present():
-    # with a PB row the card bakes extra textures; without it, omitted
+    # The dedicated PERSONAL BEST flank card was removed (commit cf786bf,
+    # "Red: unneeded in all renderers"), so a `pb` row no longer bakes an
+    # extra card — the panel bakes the SAME texture set with or without it.
     spr_no = _FakeSpr()
     LazerResultsScreen(spr_no, _data(pb=None), total_ms=5000.0)
     spr_yes = _FakeSpr()
     pb = dict(player_name="R3D", score=865612, accuracy=96.8, grade="A",
               max_combo=1305, mods_str="NM")
     LazerResultsScreen(spr_yes, _data(pb=pb), total_ms=5000.0)
-    assert len(spr_yes.textures) > len(spr_no.textures)
+    assert len(spr_yes.textures) == len(spr_no.textures)
 
 
 # --- long title/artist/name auto-scale to fit the panel -----------------------------
@@ -626,42 +628,26 @@ def test_leaderboard_off_matches_pb_only_behaviour():
     assert spr.textures, "screen baked nothing"
 
 
-# --- featured-card Discord avatar (centre panel) ------------------------------------
+# --- featured-card osu! avatar (centre panel) ---------------------------------------
+# The render-DB Discord-id featured-avatar path was REMOVED (commit deaa1ec,
+# 2026-07-11): it could resolve to the SITE OWNER's pfp on the featured card.
+# The featured card now uses the player's OWN osu! avatar PNG, supplied by the
+# service via --featured-avatar-png and carried on ResultsData.featured_avatar_png.
+# _featured_avatar_bytes() simply returns that field (flanks keep discord_user_id).
 
-def test_featured_avatar_bytes_none_and_placeholder_fall_back():
-    # no linked id → None (procedural chip); an osu_<id> placeholder is not a
-    # fetchable snowflake so resolve_avatar_bytes → None → still procedural.
-    scr = LazerResultsScreen(_FakeSpr(), _data(discord_user_id=None),
+def test_featured_avatar_bytes_none_when_no_png():
+    # no supplied PNG → None (procedural chip).
+    scr = LazerResultsScreen(_FakeSpr(), _data(featured_avatar_png=None),
                              total_ms=5000.0)
     assert scr._featured_avatar_bytes() is None
-    scr2 = LazerResultsScreen(_FakeSpr(),
-                              _data(discord_user_id="osu_30196342"),
-                              total_ms=5000.0)
-    assert scr2._featured_avatar_bytes() is None
 
 
-def test_featured_avatar_bytes_resolves_and_is_graceful():
-    # with a real snowflake the featured card uses the SAME resolve_avatar_bytes
-    # path the flanks use; a resolver that returns bytes flows through, and one
-    # that RAISES must never break the bake (→ None → procedural chip).
-    import osu_std_renderer.render.leaderboard as lb
+def test_featured_avatar_bytes_returns_supplied_png():
+    # supplied osu! avatar PNG bytes flow straight through to the featured card.
     scr = LazerResultsScreen(_FakeSpr(),
-                             _data(discord_user_id="111166802121281536"),
+                             _data(featured_avatar_png=b"AVATARPNG"),
                              total_ms=5000.0)
-    orig = lb.resolve_avatar_bytes
-    lb.resolve_avatar_bytes = lambda *a, **k: b"AVATARPNG"
-    try:
-        assert scr._featured_avatar_bytes() == b"AVATARPNG"
-    finally:
-        lb.resolve_avatar_bytes = orig
-
-    def _boom(*a, **k):
-        raise RuntimeError("avatar backend down")
-    lb.resolve_avatar_bytes = _boom
-    try:
-        assert scr._featured_avatar_bytes() is None
-    finally:
-        lb.resolve_avatar_bytes = orig
+    assert scr._featured_avatar_bytes() == b"AVATARPNG"
 
 
 # --- flank-card staggered slide-in entrance -----------------------------------------
