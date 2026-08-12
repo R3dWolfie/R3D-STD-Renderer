@@ -303,26 +303,28 @@ def bake_argon_digits(height: int = DIGIT_HEIGHT) -> dict[str, np.ndarray]:
 # likewise bakes without disturbing any other glyph.
 HUD_CHARSET = "0123456789.%x,:-!ABCDEFGHIJKLMNOPQRSTUVWXYZp×/"
 
-# --- Runtime-derive the glyph cap-fill from the ACTUAL bundled fonts --------
+# --- Runtime-derive the cap-fill scales from the ACTUAL bundled fonts -------
 # The hand-derived constants above are a frozen snapshot; Pillow/freetype can
-# change variable-font (Nunito wght) metrics between versions, drifting the
-# snapshot from what actually bakes. Measure the live fonts here (identical to
-# the drift-guard test: cap "E" height / union sprite extent over HUD_CHARSET)
-# so the scale tracks the real bake and can never drift. Falls back to the
-# hand-derived constants if measurement raises. Digit bank is left as-is (the
-# test range-checks its scale, does not measure it).
-def _measure_glyph_cap_fill(loader) -> float:
+# change variable-font (Nunito wght) metrics between versions, drifting them
+# from what actually bakes. Measure the live fonts here (identical to the
+# drift-guard test: <cap> height / union sprite extent over <chars>) so both
+# scales track the real bake and cannot drift. Falls back to the hand-derived
+# constants if measurement raises.
+def _measure_cap_fill(loader, chars, cap) -> float:
     font = loader(int(DIGIT_HEIGHT * 0.95))
-    boxes = [font.getbbox(c) for c in HUD_CHARSET]
+    boxes = [font.getbbox(c) for c in chars]
     top, bot = min(b[1] for b in boxes), max(b[3] for b in boxes)
-    capE = font.getbbox("E")
-    return (capE[3] - capE[1]) / ((bot - top) + 8)
+    cb = font.getbbox(cap)
+    return (cb[3] - cb[1]) / ((bot - top) + 8)
 
 
 try:
-    DEJAVU_GLYPH_CAP_FILL = _measure_glyph_cap_fill(_load_font)
-    ARGON_GLYPH_CAP_FILL = _measure_glyph_cap_fill(_load_argon_font)
+    DEJAVU_GLYPH_CAP_FILL = _measure_cap_fill(_load_font, HUD_CHARSET, "E")
+    ARGON_GLYPH_CAP_FILL = _measure_cap_fill(_load_argon_font, HUD_CHARSET, "E")
     ARGON_GLYPH_CAP_SCALE = DEJAVU_GLYPH_CAP_FILL / ARGON_GLYPH_CAP_FILL
+    DEJAVU_DIGIT_CAP_FILL = _measure_cap_fill(_load_font, "0123456789", "8")
+    ARGON_DIGIT_CAP_FILL = _measure_cap_fill(_load_argon_font, "0123456789", "8")
+    ARGON_DIGIT_CAP_SCALE = DEJAVU_DIGIT_CAP_FILL / ARGON_DIGIT_CAP_FILL
 except Exception:
     pass  # keep the hand-derived fallbacks defined near the top of the module
 # ---------------------------------------------------------------------------

@@ -557,21 +557,24 @@ def test_argon_cap_scale_holds_visible_size():
     does NOT change the visible cap size (measured cap-fill drives them)."""
     from osu_std_renderer.render import textures as T
     # DejaVu fills MORE of the glyph-bank sprite than Nunito → scale up >1;
-    # for the digit bank Nunito fills slightly more → scale down <1.
+    # the digit bank too now scales up >1 (Pillow 12 shrank Nunito).
     assert 1.0 < T.ARGON_GLYPH_CAP_SCALE < 1.05
-    assert 0.97 < T.ARGON_DIGIT_CAP_SCALE < 1.0
+    assert 1.0 < T.ARGON_DIGIT_CAP_SCALE < 1.05
     # the constants match the actual bakes within tolerance (guards drift if
     # the bundled font / weight changes).
-    def fill(chars, loader):
+    def fill(chars, loader, cap="E"):
         px = int(T.DIGIT_HEIGHT * 0.95)
         font = loader(px)
         boxes = [font.getbbox(c) for c in chars]
         top, bot = min(b[1] for b in boxes), max(b[3] for b in boxes)
-        capE = font.getbbox("E")
-        return (capE[3] - capE[1]) / ((bot - top) + 8)
+        cb = font.getbbox(cap)
+        return (cb[3] - cb[1]) / ((bot - top) + 8)
     gd = fill(T.HUD_CHARSET, T._load_font)
     ga = fill(T.HUD_CHARSET, T._load_argon_font)
     assert abs((gd / ga) - T.ARGON_GLYPH_CAP_SCALE) < 0.02
+    dd = fill("0123456789", T._load_font, "8")
+    da = fill("0123456789", T._load_argon_font, "8")
+    assert abs((dd / da) - T.ARGON_DIGIT_CAP_SCALE) < 0.02
 
 
 def test_argon_percent_glyph_reads_as_percent():
