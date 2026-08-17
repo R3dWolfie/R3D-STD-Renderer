@@ -183,6 +183,13 @@ class JudgmentEvent:
     # tick/tail-inclusive accuracy (slider parts between popups fold into
     # the NEXT popup's value; the LAST event carries the reconciled final).
     acc_after: float = 1.0
+    # Map-time (ms) at which this judgment's SCORE is EARNED, for the running
+    # score CURVE. Differs from time_ms (the popup time) only for a STABLE
+    # slider — its aggregate popup shows at the slider END, but the combo/score
+    # is earned at the HEAD. None = same as time_ms. The panel HUD uses time_ms
+    # (unchanged); the versus score timeline uses this so a leading slider does
+    # not read 0 until it ends. lazer already judges sliders at the head.
+    score_time_ms: float | None = None
 
 
 # --- hit windows ----------------------------------------------------------------
@@ -1745,10 +1752,15 @@ class StdRuleset:
             else:
                 score = 0.0
             px, py = self._popup_pos(s)
+            # STABLE slider: score is earned at the head (s.hit_time) though the
+            # aggregate popup lands at s.end (== t here). Tag score_time_ms so
+            # the versus score curve credits the head; the popup keeps t.
+            _score_t = (float(s.hit_time) if (s.kind == "slider" and not self.lazer
+                        and s.hit_time is not None and s.hit_time < t) else None)
             events.append(JudgmentEvent(
                 time_ms=t, kind=kind, object_id=s.idx, x=px, y=py,
                 combo_after=combo, score_after=int(round(score)),
-                acc_after=acc))
+                acc_after=acc, score_time_ms=_score_t))
         if self.lazer and events:
             # FINAL-ACC PIN (the honesty reconcile's display rule): parts
             # can land AFTER the last object judgment (a map ending on a
