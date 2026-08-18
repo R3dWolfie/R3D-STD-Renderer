@@ -1405,9 +1405,15 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
                               if meta is not None else "",
                 }
                 _sidecar = Path(str(output) + ".score.json")
+                # Gameplay-start anchor for the YT versus HUD (all-mode sync):
+                # video-seconds into THIS panel where map-time 0 lands (the
+                # render lead-in), plus the rate-mods speed. Lets the overlay
+                # map video-time -> map-time exactly instead of sniffing audio.
+                _map0_video_s = round(m2w(0.0) / 1000.0, 6)
                 _sidecar.write_text(_json.dumps(
-                    {"schema": 1, "mode": 0, **_entry,
-                     "players": [dict(_entry)]}, default=str))
+                    {"schema": 1, "mode": 0,
+                     "map0_video_s": _map0_video_s, "rate": float(speed),
+                     **_entry, "players": [dict(_entry)]}, default=str))
                 print(f"score:  fidelity sidecar → standardised {_v3:,} "
                       f"(source={_src}, sim_final={_sim_final:,})",
                       file=sys.stderr)
