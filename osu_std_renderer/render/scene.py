@@ -162,8 +162,9 @@ from .effects import (LOGO_UI_SIZE, SMOKE_DEFAULT_WIDTH_OSU,
                       triangle_field, triangle_states, warning_arrow_alpha)
 from .gl import Sprite
 from .hud import layout_run
-from .mods import (MOD_FLASHLIGHT, MOD_HIDDEN, build_flashlight_timeline,
-                   flashlight_size_at, hidden_circle_fade, hidden_slider_fade)
+from .mods import (HIDDEN_FADE_IN_MULT, MOD_FLASHLIGHT, MOD_HIDDEN,
+                   build_flashlight_timeline, flashlight_size_at,
+                   hidden_circle_fade, hidden_slider_fade)
 from .transform_mods import (DEFLATE, GROW, HIDES_APPROACH, IDENTITY, SPIN_IN,
                              TRANSFORM, WIGGLE, ObjTransform,
                              grow_deflate_scale, spin_in_circle,
@@ -2601,6 +2602,14 @@ class StdScene:
         # combo start); TimeFadeIn is unchanged. All fade/approach math below
         # keys off this per-object preempt.
         preempt, fade_in = self._preempt_for(obj), self.diff.time_fade_in
+        if self.hidden:
+            # OsuModHidden.applyFadeInAdjustment (ApplyToBeatmap): circles
+            # and slider HEADS get TimeFadeIn = TimePreempt*0.4. This speeds
+            # the fade-in AND — since the HD fade-out starts at StartTime-
+            # TimePreempt+TimeFadeIn — pulls the fade-out forward so the
+            # object is gone ~0.3*preempt BEFORE the hit instead of lingering
+            # past it. Sliders keep default TimeFadeIn (that is the body pass).
+            fade_in = self.diff.preempt * HIDDEN_FADE_IN_MULT
         start = obj.get_start_time()
         v = self._verdict(obj)
         x, y = self.cam.to_screen(*pos_osu)

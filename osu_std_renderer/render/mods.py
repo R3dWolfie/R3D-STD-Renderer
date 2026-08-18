@@ -34,6 +34,7 @@ def _clamp01(v: float) -> float:
 # OsuModHidden — fade-out multipliers (multiply the object's normal alpha)
 # ----------------------------------------------------------------------------
 HIDDEN_FADE_OUT_MULT = 0.3          # OsuModHidden.FADE_OUT_DURATION_MULTIPLIER
+HIDDEN_FADE_IN_MULT  = 0.4          # OsuModHidden.FADE_IN_DURATION_MULTIPLIER
 
 
 def hidden_circle_fade(t: float, start: float, preempt: float,
