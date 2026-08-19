@@ -134,6 +134,7 @@ class StdRenderSettings:
     fps: int = 60
     encoder: str = "auto"
     encoder_device: str | None = None
+    video_bitrate: int | None = None    # override the auto bitrate ladder (bps)
 
     # skin (§4.7)
     skin_dir: Path | None = None

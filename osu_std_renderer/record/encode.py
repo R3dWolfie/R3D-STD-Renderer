@@ -66,7 +66,7 @@ def nvenc_target_bps(w: int, h: int, fps: float) -> int:
 
 def build_ffmpeg_cmd(*, encoder: str, resolution: tuple[int, int], fps: int,
                      output_path: Path, audio_path: Path | None = None,
-                     audio_offset_ms: int = 0, video_bitrate: str | None = None,
+                     audio_offset_ms: int = 0, video_bitrate: int | None = None,
                      crf: int = 16, audio_bitrate: str = "192k",
                      loudnorm: bool = True, extra_vf: str = "") -> list[str]:
     """rawvideo rgb24 on stdin → encoder → faststart mp4 (§5.6 shape)."""
@@ -86,18 +86,23 @@ def build_ffmpeg_cmd(*, encoder: str, resolution: tuple[int, int], fps: int,
     cmd += ["-vf", "vflip" + ("," + extra_vf if extra_vf else "")]
     cmd += ["-c:v", encoder]
     if encoder == "libx264":
-        cmd += ["-crf", str(crf), "-preset", "faster", "-profile:v", "high"]
+        if video_bitrate:
+            _vb = int(video_bitrate)
+            cmd += ["-b:v", str(_vb), "-maxrate", str(int(_vb * 1.5)),
+                    "-bufsize", str(_vb * 2), "-preset", "faster", "-profile:v", "high"]
+        else:
+            cmd += ["-crf", str(crf), "-preset", "faster", "-profile:v", "high"]
     elif encoder in ("h264_nvenc", "hevc_nvenc"):
         # Resolution-scaled NVENC bitrate ladder (R3D cross-engine policy,
         # 2026-07): replaces the 2026-07-21 CQ scheme (cq=crf+4, -b:v 0,
         # maxrate (w*h)/150k) with the shared target-VBR ladder so all four
         # engines land on the same size/quality curve -- see nvenc_target_bps.
-        _tgt = nvenc_target_bps(w, h, fps)
+        _tgt = video_bitrate or nvenc_target_bps(w, h, fps)
         cmd += ["-rc", "vbr", "-b:v", str(_tgt),
                 "-maxrate", str(int(_tgt * 1.5)), "-bufsize", str(_tgt * 2),
                 "-profile:v", "high"]
     elif video_bitrate:
-        cmd += ["-b:v", video_bitrate]
+        cmd += ["-b:v", str(video_bitrate)]
     cmd += ["-pix_fmt", "yuv420p"]
     if audio_path is not None:
         # LOUDNORM DUCK FIX (#17): when the music was pre-normalised upstream

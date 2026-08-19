@@ -112,6 +112,17 @@ def _resolution(s: str) -> tuple[int, int]:
     return int(w), int(h)
 
 
+def _bitrate(s: str) -> int:
+    """Video bitrate: '16M' / '24000k' / '16000000' -> bits per second."""
+    s = s.strip().lower()
+    mult = 1
+    if s.endswith("m"):
+        mult, s = 1_000_000, s[:-1]
+    elif s.endswith("k"):
+        mult, s = 1_000, s[:-1]
+    return int(float(s) * mult)
+
+
 def _ms_list(s: str) -> list[float]:
     return [float(tok) for tok in s.split(",") if tok.strip()]
 
@@ -146,6 +157,9 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--encoder", default="auto",
                     help="auto | h264_nvenc | h264_vaapi | libx264")
     ap.add_argument("--encoder-device", default=None)
+    ap.add_argument("--video-bitrate", type=_bitrate, default=None,
+                    help="override the auto resolution-scaled bitrate, e.g. "
+                         "16M / 24M / 30000k. Default: the built-in ladder.")
     ap.add_argument("--skin", type=Path, default=None,
                     help="extracted skin dir (resolver-provided .osk)")
     ap.add_argument("--default-skin", type=Path, default=None)
@@ -1342,7 +1356,8 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
     cmd = build_ffmpeg_cmd(
         encoder=encoder, resolution=(w, h), fps=settings.fps,
         output_path=output, audio_path=audio_path,
-        audio_offset_ms=settings.audio_offset, loudnorm=False)
+        audio_offset_ms=settings.audio_offset, loudnorm=False,
+        video_bitrate=settings.video_bitrate)
 
     total_wall_ms = m2w(end_ms)
     last_pct = [-1]
@@ -1491,6 +1506,7 @@ def main(argv: list[str] | None = None) -> int:
     settings = StdRenderSettings(
         resolution=args.resolution, fps=args.fps, encoder=args.encoder,
         encoder_device=args.encoder_device, skin_dir=args.skin,
+        video_bitrate=args.video_bitrate,
         default_skin_dir=args.default_skin, skip_intro=args.skip_intro,
         lead_in_time=max(args.lead_in, 0.0),
         show_results=args.results, results_style=args.results_style,
