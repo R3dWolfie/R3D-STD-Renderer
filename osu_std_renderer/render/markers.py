@@ -100,18 +100,25 @@ def reverse_arrow_schedule(start: float, part_len: float, repeat_count: int,
     """One ReverseArrow per remaining repeat (r = 1..repeat_count-1).
 
     head_hit_time: when the slider reverses MORE THAN ONCE (repeat_count
-    ≥ 3, i.e. 2+ arrows) the first pair only appears from this moment —
-    the owner-spec "arrows show once the starting head is hit" rule (see
-    the module docstring for the lazer divergence note). None (or a
-    single-reverse slider) keeps the classic appear-at-spawn behaviour."""
+    ≥ 3) the arrows stay dark until this moment (the owner-spec "arrows
+    show once the starting head is hit" gate); after it, each arrow still
+    appears only one span ahead of its own bounce, so exactly one end is
+    lit at a time. None / single-reverse keeps appear-at-spawn."""
     if repeat_count < 2 or part_len <= 0:
         return []
-    first_appear = spawn
+    gate = spawn
     if repeat_count >= 3 and head_hit_time is not None:
-        first_appear = head_hit_time
+        gate = head_hit_time
     out: list[ReverseArrow] = []
     for r in range(1, repeat_count):
-        appear = first_appear if r <= 2 else start + (r - 2) * part_len
+        # reverse #1 rides the slider body fade-in during the preempt
+        # (spawn); every LATER arrow appears exactly ONE span ahead of its
+        # own bounce (lazer DrawableSliderRepeat), so only the end the ball
+        # is next heading toward is lit -- never both ends at once, which
+        # was the multi-reverse bug. Clamp to the head-hit gate so a
+        # multi-reverse slider still stays dark until the head resolves.
+        natural = spawn if r == 1 else start + (r - 1) * part_len
+        appear = max(gate, natural)
         out.append(ReverseArrow(r=r, time=start + r * part_len,
                                 appear=appear, at_tail=(r % 2 == 1)))
     return out
