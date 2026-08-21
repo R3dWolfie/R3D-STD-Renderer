@@ -410,3 +410,40 @@ def test_ssaa_internal_size():
     assert ssaa_internal_size(3840, 2160) == (3840, 2160)
     # a >1080p but non-16:9 output is still a pass-through
     assert ssaa_internal_size(1080, 1080) == (1080, 1080)
+
+
+
+def test_slider_ball_fades_out_after_end_not_hard_cut():
+    # BUG #3 fix: the slider ball no longer hard-cuts at EndTime; osu's
+    # DrawableSlider does FadeOut(240).Expire(), so the ball (a child)
+    # fades linearly over 240 ms after EndTime. OsuModHidden never touches
+    # the ball, and its fade-IN at slider start is unchanged.
+    from osu_std_renderer.render.scene import (BALL_DETACHED_ALPHA,
+                                               BALL_FADE_OUT_MS,
+                                               slider_ball_alpha)
+    start, end = 1000.0, 1600.0
+
+    def close(a, b):
+        return abs(a - b) < 1e-9
+
+    # tracking: full alpha across the slider, None before it appears
+    assert slider_ball_alpha(start - 1e-6, start, end, 1.0) is None
+    assert slider_ball_alpha(start, start, end, 1.0) == 1.0
+    assert slider_ball_alpha((start + end) / 2, start, end, 1.0) == 1.0
+    assert slider_ball_alpha(end, start, end, 1.0) == 1.0
+    # post-end fade instead of vanishing; seeks around end
+    assert close(slider_ball_alpha(end + 1.0, start, end, 1.0),
+                 1.0 - 1.0 / BALL_FADE_OUT_MS)
+    assert close(slider_ball_alpha(end + 120.0, start, end, 1.0), 0.5)
+    assert close(slider_ball_alpha(end + BALL_FADE_OUT_MS, start, end, 1.0), 0.0)
+    assert slider_ball_alpha(end + BALL_FADE_OUT_MS + 1.0, start, end, 1.0) is None
+    # detached (tracking lost): fade starts from the ball's CURRENT dimmed
+    # alpha, not full
+    d = BALL_DETACHED_ALPHA
+    assert slider_ball_alpha((start + end) / 2, start, end, d) == d
+    assert slider_ball_alpha(end, start, end, d) == d
+    assert close(slider_ball_alpha(end + 120.0, start, end, d), d * 0.5)
+    assert close(slider_ball_alpha(end + BALL_FADE_OUT_MS, start, end, d), 0.0)
+    # HD / HDHR never touch the ball: the alpha is independent of the Hidden
+    # body fade (no mod argument here), so the lifetime is identical.
+    assert slider_ball_alpha(end + 120.0, start, end, 1.0) == 0.5

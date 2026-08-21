@@ -39,16 +39,46 @@ def test_hidden_circle_fade_starts_after_fade_in_and_is_linear():
                                      start, preempt, tfi), 0.0)
 
 
-def test_hidden_slider_fade_easing_out_over_duration_plus_tail():
+def test_hidden_slider_fade_runs_until_end_time_not_over_long_tail():
+    # BUG #2 fix: the body fade lasts EndTime - fadeStart = Duration +
+    # (Preempt - TimeFadeIn), NOT the old Duration + Preempt*0.3. fadeStart
+    # = StartTime - Preempt + TimeFadeIn, so the fade completes exactly at
+    # slider EndTime.
     start, end, preempt, tfi = 1000.0, 1600.0, 600.0, 400.0
-    fade_start = start - preempt + tfi           # 800
-    dur = (end - start) + preempt * 0.3          # 600 + 180 = 780
+    fade_start = start - preempt + tfi            # 800
+    dur = end - fade_start                         # 800 (== Duration 600 + 200)
+    assert _close(dur, (end - start) + (preempt - tfi))
+    assert not _close(dur, (end - start) + preempt * 0.3)   # not the old tail
     assert _close(hidden_slider_fade(fade_start, start, end, preempt, tfi), 1.0)
-    # Easing.Out (OutQuad): alpha = (1-p)^2 at p=0.5 → 0.25
+    # Easing.Out (OutQuad): alpha = (1-p)^2 at p=0.5 -> 0.25
     mid = hidden_slider_fade(fade_start + dur * 0.5, start, end, preempt, tfi)
     assert _close(mid, 0.25)
-    assert _close(hidden_slider_fade(fade_start + dur,
-                                     start, end, preempt, tfi), 0.0)
+    # fully faded exactly at EndTime (fade_start + dur == end)
+    assert _close(fade_start + dur, end)
+    assert _close(hidden_slider_fade(end, start, end, preempt, tfi), 0.0)
+
+
+def test_hidden_slider_fade_duration_across_ar_and_hr():
+    # duration = EndTime - fadeStart = sliderDuration + (Preempt - TimeFadeIn)
+    def dur_of(start, end, preempt, tfi):
+        return end - (start - preempt + tfi)
+    short, long = 120.0, 3000.0
+    start = 1000.0
+    # AR10 (also the HR/HDHR AR-cap): Preempt 450, TimeFadeIn 400 -> +50 ms
+    for sd in (short, long):
+        end = start + sd
+        d = dur_of(start, end, 450.0, 400.0)
+        assert _close(d, sd + 50.0)
+        assert not _close(d, sd + 450.0 * 0.3)     # NOT the old +135 ms
+        assert _close(hidden_slider_fade(end, start, end, 450.0, 400.0), 0.0)
+    # AR5: Preempt 1200, TimeFadeIn 800 -> +400 ms
+    for sd in (short, long):
+        end = start + sd
+        assert _close(dur_of(start, end, 1200.0, 800.0), sd + 400.0)
+    # AR<5 (AR3): Preempt 1500, TimeFadeIn 800 -> +700 ms
+    for sd in (short, long):
+        end = start + sd
+        assert _close(dur_of(start, end, 1500.0, 800.0), sd + 700.0)
 
 
 def test_flashlight_size_for_combo_breakpoints():

@@ -10,21 +10,16 @@ REVERSE ARROWS (§3.2/§3.3 reversearrow):
   * orientation: the arrow points along the path tangent at that end,
     INTO the slider (a right-pointing texture rotated by atan2 of the
     inward direction — screen space, so HR flips come for free).
-  * visibility: on a SINGLE-reverse slider the arrow appears with the
-    slider's fade-in. When a slider reverses MORE THAN ONCE
-    (repeat_count ≥ 3) the arrows stay HIDDEN during the approach and
-    become visible only once the starting head is HIT (head_hit_time —
-    the ruleset's real click, or the window close on a missed head),
-    with the quick ARROW_FADE_MS ramp. [OWNER SPEC — deliberately
-    diverges from lazer: lazer's DrawableSliderRepeat fades every span-0
-    repeat in with the snaking body during the preempt and later ones
-    one SpanDuration ahead (UpdateInitialTransforms: FadeIn over
-    min(300, SpanDuration)); the owner's described behaviour wins.]
-    Arrow r>2 appears when arrow r-2 (same end) is consumed, with the
-    same quick fade — stable's "one arrow per end, replaced as
-    consumed". Consumption: repeat HIT → the standard hit-explosion pop
-    (alpha 1→0, scale 1→1.4 over HitFadeOut); repeat MISSED
-    (sliderbreak) → vanishes instantly.
+  * visibility: repeats #1 (tail) and #2 (head) appear with the slider's
+    fade-in from spawn; every later arrow r>2 appears when arrow r-2 (same
+    end) is consumed, with the quick ARROW_FADE_MS ramp — stable's "one
+    arrow per end, replaced as consumed" (lazer DrawableSliderRepeat fades
+    span-0 repeats in with the snaking body during the preempt and later
+    ones one SpanDuration ahead). Hidden does NOT alter reverse-arrow
+    lifetime: a pending arrow is visible BEFORE its repeat regardless of
+    whether the head has been hit. Consumption: repeat HIT → the standard
+    hit-explosion pop (alpha 1→0, scale 1→1.4 over HitFadeOut); repeat
+    MISSED (sliderbreak) → vanishes instantly.
   * pulse (§3.2 version-gated): skin Version < 2 → rotation wobble ±6°
     over each beat; v2+ → scale pulse 1.3→1.0 eased out on each beat.
     Beat phase comes from the map's red timing lines (beat_phase()).
@@ -95,30 +90,27 @@ class ReverseArrow:
 
 def reverse_arrow_schedule(start: float, part_len: float, repeat_count: int,
                            spawn: float,
-                           head_hit_time: float | None = None,
                            ) -> list[ReverseArrow]:
     """One ReverseArrow per remaining repeat (r = 1..repeat_count-1).
 
-    head_hit_time: when the slider reverses MORE THAN ONCE (repeat_count
-    ≥ 3) the arrows stay dark until this moment (the owner-spec "arrows
-    show once the starting head is hit" gate); after it, each arrow still
-    appears only one span ahead of its own bounce, so exactly one end is
-    lit at a time. None / single-reverse keeps appear-at-spawn."""
+    Hidden does NOT alter reverse-arrow lifetime: a pending reverse arrow
+    is visible BEFORE its repeat (lazer DrawableSliderRepeat), whether or
+    not the slider head has been hit. Repeats #1 (tail) and #2 (head) ride
+    the slider body fade-in from spawn; every later arrow r>2 appears when
+    the same-end arrow r-2 is consumed (start + (r-2)*part_len), so exactly
+    one arrow per end is lit as the pending indicator, replaced as it is
+    consumed."""
     if repeat_count < 2 or part_len <= 0:
         return []
-    gate = spawn
-    if repeat_count >= 3 and head_hit_time is not None:
-        gate = head_hit_time
     out: list[ReverseArrow] = []
     for r in range(1, repeat_count):
-        # reverse #1 rides the slider body fade-in during the preempt
-        # (spawn); every LATER arrow appears exactly ONE span ahead of its
-        # own bounce (lazer DrawableSliderRepeat), so only the end the ball
-        # is next heading toward is lit -- never both ends at once, which
-        # was the multi-reverse bug. Clamp to the head-hit gate so a
-        # multi-reverse slider still stays dark until the head resolves.
-        natural = spawn if r == 1 else start + (r - 1) * part_len
-        appear = max(gate, natural)
+        # reverses #1 (tail) and #2 (head) are visible from spawn, riding
+        # the slider body fade-in; every LATER arrow (r>2) appears exactly
+        # when the previous same-end arrow (r-2) is consumed, so one arrow
+        # per end acts as the pending indicator, replaced as it is consumed
+        # (lazer DrawableSliderRepeat). Hidden does NOT gate this lifetime.
+        natural = spawn if r <= 2 else start + (r - 2) * part_len
+        appear = max(spawn, natural)
         out.append(ReverseArrow(r=r, time=start + r * part_len,
                                 appear=appear, at_tail=(r % 2 == 1)))
     return out

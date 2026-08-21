@@ -42,32 +42,34 @@ def test_reverse_schedule_end_parity():
     assert reverse_arrow_schedule(1000.0, 0.0, 4, 400.0) == []
 
 
-def test_multireverse_arrows_wait_for_the_head_hit():
-    """OWNER SPEC: a slider reversing MORE THAN ONCE keeps its arrows
-    hidden during the approach — they appear at the head-hit moment
-    (lazer would fade the span-0 repeat in during the preempt; the
-    owner's behaviour deliberately wins — markers.py docstring)."""
-    arrows = reverse_arrow_schedule(1000.0, 500.0, 4, spawn=400.0,
-                                    head_hit_time=1012.0)
-    assert arrows[0].appear == 1012.0 and arrows[1].appear == 1012.0
-    assert arrows[2].appear == 1500.0            # r>2 unchanged
-    # hidden during the whole approach, quick-ramping after the hit
-    a1 = arrows[0]
-    assert arrow_alpha_scale(999.0, a1, 400.0, 400.0) is None
-    assert arrow_alpha_scale(1011.0, a1, 400.0, 400.0) is None
-    al, sc = arrow_alpha_scale(1012.0 + ARROW_FADE_MS / 2, a1, 400.0, 400.0)
-    assert abs(al - 0.5) < 1e-9 and sc == 1.0
-    al, _ = arrow_alpha_scale(1012.0 + ARROW_FADE_MS, a1, 400.0, 400.0)
-    assert al == 1.0
-    # a SINGLE-reverse slider keeps the classic appear-at-spawn rule
-    single = reverse_arrow_schedule(1000.0, 500.0, 2, spawn=400.0,
-                                    head_hit_time=1012.0)
+def test_multireverse_arrows_visible_before_the_head_hit():
+    """BUG #1 fix: Hidden does NOT alter reverse-arrow lifetime. On a
+    multi-reverse slider a pending reverse arrow is visible BEFORE its
+    repeat -- during the approach, regardless of whether the head has been
+    hit yet (lazer DrawableSliderRepeat). The old owner-spec 'wait for the
+    head hit' gate (and its head_hit_time argument) is gone."""
+    # start 1000, partLen 500, 4 spans -> arrows r=1..3, spawn 400
+    arrows = reverse_arrow_schedule(1000.0, 500.0, 4, spawn=400.0)
+    # #1 (tail) and #2 (head) both ride the body fade-in from spawn
+    assert arrows[0].appear == 400.0 and arrows[1].appear == 400.0
+    # #3 appears when #1 is consumed (start + 1*partLen), NOT at a head hit
+    assert arrows[2].appear == 1500.0
+    a1, a2 = arrows[0], arrows[1]
+    # visible DURING the approach, well before the head is due (start=1000)
+    al, sc = arrow_alpha_scale(400.0 + 400.0 / 2, a1, 400.0, 400.0)
+    assert abs(al - 0.5) < 1e-9 and sc == 1.0          # riding the fade-in
+    assert arrow_alpha_scale(800.0, a1, 400.0, 400.0)[0] == 1.0   # solid pre-head
+    # both ends lit from spawn (one pending indicator per end)
+    assert arrow_alpha_scale(800.0, a2, 400.0, 400.0)[0] == 1.0
+    # HD/Hidden does not change any of this: the reverse-arrow schedule and
+    # alpha are independent of the Hidden body fade (arrows are never
+    # multiplied by hidden_slider_fade). Same inputs -> same lifetime.
+    hd_arrows = reverse_arrow_schedule(1000.0, 500.0, 4, spawn=400.0)
+    assert hd_arrows == arrows
+    assert arrow_alpha_scale(800.0, hd_arrows[0], 400.0, 400.0)[0] == 1.0
+    # a SINGLE-reverse slider still appears at spawn
+    single = reverse_arrow_schedule(1000.0, 500.0, 2, spawn=400.0)
     assert len(single) == 1 and single[0].appear == 400.0
-    # a missed head passes its window close as head_hit_time — the
-    # arrows appear when the head resolves
-    missed = reverse_arrow_schedule(1000.0, 500.0, 3, spawn=400.0,
-                                    head_hit_time=1199.5)
-    assert missed[0].appear == 1199.5
 
 
 def test_arrow_rotation_points_inward():

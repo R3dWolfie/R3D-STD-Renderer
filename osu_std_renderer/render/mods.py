@@ -7,8 +7,9 @@ Ported from ppy/osu (MIT), cited per function:
       FADE_OUT_DURATION_MULTIPLIER = 0.3
       applyState()/getFadeOutParameters(): a hit circle's fade-out starts at
       StartTime - TimePreempt + TimeFadeIn and lasts TimePreempt*0.3 (linear,
-      Easing.None); a slider's Body fades over Duration + TimePreempt*0.3 with
-      Easing.Out; OsuModHidden : IHidesApproachCircles hides every approach
+      Easing.None); a slider's Body fade starts there too and runs until
+      slider EndTime (fadeDuration = EndTime - fadeStart) with Easing.Out;
+      OsuModHidden : IHidesApproachCircles hides every approach
       circle.
 
   osu.Game.Rulesets.Osu/Mods/OsuModFlashlight.cs
@@ -56,12 +57,12 @@ def hidden_circle_fade(t: float, start: float, preempt: float,
 def hidden_slider_fade(t: float, start: float, end: float, preempt: float,
                        time_fade_in: float) -> float:
     """Slider-body OsuModHidden fade-out factor in [0,1]. Starts at
-    StartTime-Preempt+TimeFadeIn and lasts slider.Duration + Preempt*0.3 with
-    Easing.Out (osu!framework Easing.Out == OutQuad) — OsuModHidden slider
-    branch `slider.Body.FadeOut(fadeDuration, Easing.Out)` with
-    fadeDuration = slider.Duration + fadeOutDuration."""
+    StartTime-Preempt+TimeFadeIn and runs until slider EndTime with
+    Easing.Out (osu!framework Easing.Out == OutQuad); fadeDuration =
+    sliderEnd - fadeStart = slider.Duration + (Preempt - TimeFadeIn),
+    i.e. slider.Duration + 50 ms at AR10 (Preempt 450, TimeFadeIn 400)."""
     fade_start = start - preempt + time_fade_in
-    dur = (end - start) + preempt * HIDDEN_FADE_OUT_MULT
+    dur = end - fade_start
     if t <= fade_start:
         return 1.0
     if dur <= 0.0:

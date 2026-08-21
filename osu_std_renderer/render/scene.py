@@ -251,6 +251,24 @@ CURSOR_RADIUS_OSU = 14.0       # cursor core sizing base, osu!px
 CURSOR_GLOW_COLOR = (1.0, 0.30, 0.35)   # R3D red
 DIGIT_SPACING = 0.06           # of digit height, between combo digits
 BALL_DETACHED_ALPHA = 0.35     # slider ball while tracking is lost
+BALL_FADE_OUT_MS = 240.0       # DrawableSlider.FadeOut(240).Expire() at EndTime
+
+
+def slider_ball_alpha(t: float, start: float, end: float,
+                      active_alpha: float) -> float | None:
+    """Slider-ball alpha over its lifetime, or None outside it.
+
+    From `start` to `end` the ball shows at `active_alpha` (1.0 tracking,
+    BALL_DETACHED_ALPHA when tracking is lost). At EndTime osu's
+    DrawableSlider does FadeOut(240).Expire(); the ball, a child, fades
+    linearly (Easing.None) from its current alpha to 0 over
+    BALL_FADE_OUT_MS instead of hard-cutting. OsuModHidden's body fade
+    never touches the ball. None before `start` or after the fade."""
+    if t < start or t > end + BALL_FADE_OUT_MS:
+        return None
+    if t <= end:
+        return active_alpha
+    return active_alpha * max(0.0, 1.0 - (t - end) / BALL_FADE_OUT_MS)
 POPUP_HEIGHT_FRAC = 0.62       # judgment number height / circle radius
 POPUP_COLORS = {
     JudgmentKind.HIT300: (0.38, 0.72, 1.00),   # Argon-ish blue
@@ -1774,15 +1792,10 @@ class StdScene:
                           outcomes.get(("tick", round(tm.time, 2)), True)))
         arrows = []
         spawn = obj.get_start_time() - self._preempt_for(obj)
-        # owner spec: multi-reverse arrows only show once the head is HIT
-        # (a missed head resolves at its window close); no judgments →
-        # the perfect-play head hit at startTime
-        head_hit = obj.get_start_time()
-        if v is not None:
-            head_hit = v.hit_time if v.hit_time is not None else v.deadline
+        # Hidden does not alter reverse-arrow lifetime: a pending reverse
+        # arrow is visible BEFORE its repeat, regardless of the head hit.
         schedule = reverse_arrow_schedule(obj.get_start_time(), obj.part_len,
-                                          obj.repeat_count, spawn,
-                                          head_hit_time=head_hit)
+                                          obj.repeat_count, spawn)
         markers = obj.tick_reverse
         for arrow in schedule:
             marker = markers[arrow.r - 1] if arrow.r - 1 < len(markers) else None
@@ -2774,29 +2787,33 @@ class StdScene:
         # handles the back-and-forth). While the ruleset says tracking was
         # lost the ball dims — the visible sliderbreak cue (there is no
         # tail explosion to lose in this phase).
-        if start <= t <= end:
+        if start <= t <= end + BALL_FADE_OUT_MS:
             v = self._verdict(obj)
-            tracked = v is None or v.tracked_at(t)
-            ball_alpha = 1.0 if tracked else BALL_DETACHED_ALPHA
+            # tracking is sampled at min(t, end): during the post-end fade
+            # the ball keeps whatever alpha it had when the slider expired.
+            tracked = v is None or v.tracked_at(min(t, end))
+            active_ball_alpha = 1.0 if tracked else BALL_DETACHED_ALPHA
+            ball_alpha = slider_ball_alpha(t, start, end, active_ball_alpha)
             bx, by = self.cam.to_screen(
-                *obj.get_stacked_position_at(t, self.diff))
+                *obj.get_stacked_position_at(min(t, end), self.diff))
             sk = self.skin
             if sk is None:                 # Argon league ball + follow circle
                 sprites.extend(self._argon_ball_sprites(bx, by, color,
                                                         ball_alpha, tracked))
             else:
                 if tracked and sk.has("sliderfollowcircle"):
-                    # follow circle at 2.4× the circle diameter while tracking
+                    # follow circle at 2.4x the circle diameter while tracking;
+                    # it fades out with the ball over the post-end 240 ms.
                     fw, fh = sk.size["sliderfollowcircle"]
                     m = FOLLOW_CIRCLE_SCALE * 2.0 * self.radius_px / max(fw, fh)
                     sprites.append(Sprite(bx, by, fw * m, fh * m,
                                           "sk_sliderfollowcircle",
-                                          (1.0, 1.0, 1.0, 1.0)))
+                                          (1.0, 1.0, 1.0, ball_alpha)))
                 if sk.has("sliderb"):
                     bw, bh = sk.size["sliderb"]
                     k = self.circle_k
                     sprites.append(Sprite(bx, by, bw * k, bh * k,
-                                          sk.frame_key("sliderb", t),
+                                          sk.frame_key("sliderb", min(t, end)),
                                           (*self._ball_tint(color), ball_alpha)))
                 else:
                     d = 2.0 * self.radius_px
