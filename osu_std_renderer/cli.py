@@ -1357,7 +1357,8 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
         encoder=encoder, resolution=(w, h), fps=settings.fps,
         output_path=output, audio_path=audio_path,
         audio_offset_ms=settings.audio_offset, loudnorm=False,
-        video_bitrate=settings.video_bitrate)
+        video_bitrate=settings.video_bitrate,
+        encoder_device=settings.encoder_device)
 
     total_wall_ms = m2w(end_ms)
     last_pct = [-1]

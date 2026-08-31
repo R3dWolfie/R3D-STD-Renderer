@@ -68,11 +68,19 @@ def build_ffmpeg_cmd(*, encoder: str, resolution: tuple[int, int], fps: int,
                      output_path: Path, audio_path: Path | None = None,
                      audio_offset_ms: int = 0, video_bitrate: int | None = None,
                      crf: int = 16, audio_bitrate: str = "192k",
-                     loudnorm: bool = True, extra_vf: str = "") -> list[str]:
+                     loudnorm: bool = True, extra_vf: str = "",
+                     encoder_device: str | None = None) -> list[str]:
     """rawvideo rgb24 on stdin → encoder → faststart mp4 (§5.6 shape)."""
     w, h = resolution
-    cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-           "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{w}x{h}",
+    is_vaapi = encoder == "h264_vaapi"
+    cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"]
+    if is_vaapi:
+        # VAAPI needs the DRM render node initialised before the encoder and the
+        # frames uploaded to a GPU surface (format=nv12,hwupload below). Without
+        # this ffmpeg cannot open h264_vaapi -> dies at startup -> BrokenPipe on
+        # the first frame write. std was NVENC-only until AMD contributors ran it.
+        cmd += ["-vaapi_device", encoder_device or "/dev/dri/renderD128"]
+    cmd += ["-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{w}x{h}",
            "-r", str(fps), "-i", "pipe:0"]
     if audio_path is not None:
         if audio_offset_ms:
@@ -83,7 +91,10 @@ def build_ffmpeg_cmd(*, encoder: str, resolution: tuple[int, int], fps: int,
     # v2 prod encoder ships the same shape). This lets the writer hand
     # the GL readback buffer to the pipe zero-copy instead of paying a
     # ~6 MB negative-stride flip copy per frame — see FfmpegPipe._writer.
-    cmd += ["-vf", "vflip" + ("," + extra_vf if extra_vf else "")]
+    _vf = "vflip" + ("," + extra_vf if extra_vf else "")
+    if is_vaapi:
+        _vf += ",format=nv12,hwupload"
+    cmd += ["-vf", _vf]
     cmd += ["-c:v", encoder]
     if encoder == "libx264":
         if video_bitrate:
@@ -101,9 +112,16 @@ def build_ffmpeg_cmd(*, encoder: str, resolution: tuple[int, int], fps: int,
         cmd += ["-rc", "vbr", "-b:v", str(_tgt),
                 "-maxrate", str(int(_tgt * 1.5)), "-bufsize", str(_tgt * 2),
                 "-profile:v", "high"]
+    elif is_vaapi:
+        _vb = video_bitrate or nvenc_target_bps(w, h, fps)
+        cmd += ["-b:v", str(_vb), "-maxrate", str(int(_vb * 1.5)),
+                "-bufsize", str(_vb * 2)]
     elif video_bitrate:
         cmd += ["-b:v", str(video_bitrate)]
-    cmd += ["-pix_fmt", "yuv420p"]
+    if not is_vaapi:
+        # VAAPI output pixel format is set by the hwupload filtergraph (nv12 on a
+        # GPU surface); forcing -pix_fmt yuv420p here conflicts with the encoder.
+        cmd += ["-pix_fmt", "yuv420p"]
     if audio_path is not None:
         # LOUDNORM DUCK FIX (#17): when the music was pre-normalised upstream
         # (loudnorm=False), do NOT loudnorm the mixed song+hits (that ducked the
