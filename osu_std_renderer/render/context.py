@@ -18,6 +18,11 @@ def create_context() -> "moderngl.Context":
     to the right GPU (pool isolation: e.g. 1070 = index 1 for Pool B). EGL
     ignores CUDA_VISIBLE_DEVICES, so the device must be selected explicitly.
     """
+    import sys
+    if sys.platform == "win32":
+        # Windows contributors: glcontext ships no EGL backend; use the default
+        # WGL standalone context. R3D_EGL_DEVICE_INDEX is EGL-only (Linux).
+        return moderngl.create_context(standalone=True)
     dev = os.environ.get("R3D_EGL_DEVICE_INDEX", "").strip()
     if dev.isdigit():
         return moderngl.create_context(standalone=True, backend="egl",
