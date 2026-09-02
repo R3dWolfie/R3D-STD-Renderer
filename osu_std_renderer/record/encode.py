@@ -109,7 +109,10 @@ def build_ffmpeg_cmd(*, encoder: str, resolution: tuple[int, int], fps: int,
         # maxrate (w*h)/150k) with the shared target-VBR ladder so all four
         # engines land on the same size/quality curve -- see nvenc_target_bps.
         _tgt = video_bitrate or nvenc_target_bps(w, h, fps)
-        cmd += ["-rc", "vbr", "-b:v", str(_tgt),
+        # CQ23 quality-targeted VBR (quality-approved 2026-09-02): visually
+        # identical to the fixed-target ladder, ~17% smaller; the ladder is
+        # kept only as the -maxrate/-bufsize cap below.
+        cmd += ["-rc", "vbr", "-cq", "23", "-b:v", "0",
                 "-maxrate", str(int(_tgt * 1.5)), "-bufsize", str(_tgt * 2),
                 "-profile:v", "high"]
     elif is_vaapi:
