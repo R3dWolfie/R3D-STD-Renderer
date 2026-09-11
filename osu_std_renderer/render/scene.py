@@ -252,6 +252,7 @@ CURSOR_GLOW_COLOR = (1.0, 0.30, 0.35)   # R3D red
 DIGIT_SPACING = 0.06           # of digit height, between combo digits
 BALL_DETACHED_ALPHA = 0.35     # slider ball while tracking is lost
 BALL_FADE_OUT_MS = 240.0       # DrawableSlider.FadeOut(240).Expire() at EndTime
+FOLLOW_CIRCLE_IN_MS = 300.0    # DefaultFollowCircle tracking-gain: ScaleTo(FOLLOW_AREA,300,OutQuint) + FadeIn
 
 
 def slider_ball_alpha(t: float, start: float, end: float,
@@ -2797,18 +2798,26 @@ class StdScene:
             bx, by = self.cam.to_screen(
                 *obj.get_stacked_position_at(min(t, end), self.diff))
             sk = self.skin
+            # Follow circle EXPAND on tracking-gain (lazer DefaultFollowCircle):
+            # scale 1x -> FOLLOW_AREA and fade 0 -> 1 over FOLLOW_CIRCLE_IN_MS
+            # (OutQuint) instead of popping to full size. Anchored to the slider
+            # start (tracked-from-head, the common case); mid-slider re-acquire
+            # re-expand and release/end scale-down are the V3 transition model.
+            follow_f = _ease_out_quint((t - start) / FOLLOW_CIRCLE_IN_MS)
             if sk is None:                 # Argon league ball + follow circle
                 sprites.extend(self._argon_ball_sprites(bx, by, color,
-                                                        ball_alpha, tracked))
+                                                        ball_alpha, tracked,
+                                                        follow_f))
             else:
                 if tracked and sk.has("sliderfollowcircle"):
-                    # follow circle at 2.4x the circle diameter while tracking;
-                    # it fades out with the ball over the post-end 240 ms.
+                    # follow circle grows to 2.4x the circle diameter over the
+                    # tracking-gain ramp; it fades with the ball post-end.
                     fw, fh = sk.size["sliderfollowcircle"]
-                    m = FOLLOW_CIRCLE_SCALE * 2.0 * self.radius_px / max(fw, fh)
+                    area = 1.0 + (FOLLOW_CIRCLE_SCALE - 1.0) * follow_f
+                    m = area * 2.0 * self.radius_px / max(fw, fh)
                     sprites.append(Sprite(bx, by, fw * m, fh * m,
                                           "sk_sliderfollowcircle",
-                                          (1.0, 1.0, 1.0, ball_alpha)))
+                                          (1.0, 1.0, 1.0, ball_alpha * follow_f)))
                 if sk.has("sliderb"):
                     bw, bh = sk.size["sliderb"]
                     k = self.circle_k
@@ -2848,15 +2857,17 @@ class StdScene:
                          alpha=b_alpha * ARGON_SLIDER_BODY_ALPHA)
 
     def _argon_ball_sprites(self, bx: float, by: float, color, ball_alpha,
-                            tracked: bool) -> list[Sprite]:
+                            tracked: bool, follow_f: float = 1.0) -> list[Sprite]:
         """ArgonSliderBall (accent gradient fill + dark '>' + white ring) with
-        the additive ArgonFollowCircle while tracking."""
+        the additive ArgonFollowCircle while tracking. follow_f (0..1) is the
+        tracking-gain expand ramp: the circle grows 1x -> FOLLOW_AREA + fades in."""
         out: list[Sprite] = []
         ball_d = ARGON_BALL_DIAM_FRAC * 2.0 * self.radius_px
         if tracked:
-            fd = ARGON_FOLLOW_AREA * ball_d
+            area = 1.0 + (ARGON_FOLLOW_AREA - 1.0) * follow_f
+            fd = area * ball_d
             out.append(Sprite(bx, by, fd, fd, "argon_follow",
-                              (*color, 0.9), additive=True))
+                              (*color, 0.9 * follow_f), additive=True))
         out.append(Sprite(bx, by, ball_d, ball_d, "argon_ball",
                           (*color, ball_alpha)))
         out.append(Sprite(bx, by, ball_d, ball_d, "argon_ball_ring",
