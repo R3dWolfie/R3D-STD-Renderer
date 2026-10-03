@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import lzma
+import os
 import struct
 from dataclasses import dataclass
 from pathlib import Path
@@ -115,6 +116,27 @@ def parse_lazer_score_info(osr_path: Path) -> dict | None:
         return None
 
 
+def _r3d_forced_lazer_mods() -> list[str]:
+    """R3D DEBUG: extra lazer-mod acronyms from --force-lazer-mods /
+    $R3D_FORCE_LAZER_MODS, merged into every read_lazer_mods() result so a
+    fixture can PRICE an otherwise-unreachable mod render path (visual/transform
+    mods especially: BR/NS/WG/... which only ride the lazer blob). Off unless the
+    env var is set, so it never fires in a normal render."""
+    raw = os.environ.get("R3D_FORCE_LAZER_MODS", "")
+    return [a.strip().upper() for a in raw.replace(",", " ").split() if a.strip()]
+
+
+def _r3d_merge_forced(out: "list[dict]", forced: "list[str]") -> "list[dict]":
+    if not forced:
+        return out
+    have = {str(e.get("acronym", "")).upper() for e in out}
+    for ac in forced:
+        if ac not in have:
+            out.append({"acronym": ac, "settings": {}})
+            have.add(ac)
+    return out
+
+
 def read_lazer_mods(osr_path: Path) -> list[dict] | None:
     """The lazer mod list as normalised ``{"acronym": str, "settings": dict}``
     entries (``settings`` is ``{}`` when the mod carries none), or None when no
@@ -124,11 +146,15 @@ def read_lazer_mods(osr_path: Path) -> list[dict] | None:
     Double Time, etc. An empty list means the blob was read but carried no
     mods (a nomod lazer play)."""
     info = parse_lazer_score_info(osr_path)
+    forced = _r3d_forced_lazer_mods()
     if info is None:
-        return None
+        # No ScoreInfo blob (stable/legacy .osr) -> normally None (legacy path).
+        # With forced mods set, synthesise a list so a NoMod/stable fixture can
+        # still exercise the forced mod paths. (R3D debug)
+        return _r3d_merge_forced([], forced) if forced else None
     mods = info.get("mods")
     if not isinstance(mods, list):
-        return []
+        return _r3d_merge_forced([], forced)
     out: list[dict] = []
     for m in mods:
         if isinstance(m, dict):
@@ -139,7 +165,7 @@ def read_lazer_mods(osr_path: Path) -> list[dict] | None:
                             "settings": s if isinstance(s, dict) else {}})
         elif isinstance(m, str):
             out.append({"acronym": m, "settings": {}})
-    return out
+    return _r3d_merge_forced(out, forced)
 
 
 def read_lazer_mod_acronyms(osr_path: Path) -> list[str] | None:

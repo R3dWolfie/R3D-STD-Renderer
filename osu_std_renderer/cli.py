@@ -375,6 +375,13 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--add-mods", type=_mod_list, default=0, metavar="HD,FL",
                     help="force extra VISUAL mods (HD/FL) on top of the "
                          "replay's mods — for proofs when no replay has them")
+    ap.add_argument("--force-lazer-mods", default="", metavar="BR,NS,FL",
+                    help="R3D DEBUG: merge these lazer mod acronyms into the "
+                         "replay's mod list (sets R3D_FORCE_LAZER_MODS, read by "
+                         "the single read_lazer_mods funnel) so a fixture can "
+                         "PRICE otherwise-unreachable mod paths — visual/transform "
+                         "mods especially (BR/NS/WG/...). Off unless set; "
+                         "configurable mods like DA still need a real replay.")
     return ap
 
 
@@ -1508,6 +1515,10 @@ def _print_hud_final_values(hud, judgments, meta=None, frozen=None) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if getattr(args, "force_lazer_mods", ""):
+        # R3D DEBUG: read by replay.lazer_mods.read_lazer_mods (the single funnel
+        # every mod consumer uses) — set before any replay parse.
+        os.environ["R3D_FORCE_LAZER_MODS"] = args.force_lazer_mods
 
     # --no-replay: the beatmap may be the only positional
     if args.no_replay and args.beatmap is None:
