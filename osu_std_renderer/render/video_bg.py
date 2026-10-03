@@ -34,6 +34,8 @@ import sys
 import threading
 from pathlib import Path
 
+from osu_std_renderer.security import ffmpeg_file_input_args
+
 # Frames buffered ahead of the render loop. Enough to overlap decode with
 # the GPU draw without hoarding memory — a 4K RGBA frame is ~33 MB, so 4
 # frames is ~130 MB worst case at 2160p, a few MB at 720p. (mania value.)
@@ -65,7 +67,7 @@ class VideoBackground:
         vf = (f"scale={width}:{height}:force_original_aspect_ratio=increase,"
               f"crop={width}:{height},fps={self.fps},format=rgba")
         cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error",
-               "-i", str(path), "-an", "-sn", "-vf", vf,
+               *ffmpeg_file_input_args(path), "-an", "-sn", "-vf", vf,
                "-f", "rawvideo", "-pix_fmt", "rgba", "-"]
         try:
             self._proc = subprocess.Popen(
