@@ -1447,7 +1447,7 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
         print("[std] streamable master (no faststart, loudnorm in-engine)",
               file=sys.stderr, flush=True)
     perf.mark("aud:encoder_spawn")
-    encoder = probe_encoder(settings.encoder)
+    encoder = probe_encoder(settings.encoder, settings.encoder_device)
     cmd = build_ffmpeg_cmd(
         encoder=encoder, resolution=(w, h), fps=settings.fps,
         output_path=output, audio_path=audio_path,

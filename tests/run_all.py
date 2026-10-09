@@ -110,6 +110,8 @@ MODULES = [
     "tests.test_preview_hw",
     # the Metal renderer against the GL one (skips off a Mac)
     "tests.test_metal",
+    # the automatic encoder pick tries a hardware encoder before trusting it
+    "tests.test_encoder_probe",
 ]
 
 

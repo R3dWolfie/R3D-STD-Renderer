@@ -60,10 +60,51 @@ class EncoderError(RuntimeError):
     pass
 
 
-def probe_encoder(encoder: str = "auto") -> str:
-    """Resolve 'auto' → preferred encoder available on this system.
+# How long a hardware encoder may take to start in the one-frame check below.
+ENCODER_PROBE_TIMEOUT_S = 5.0
+
+
+def encoder_starts(ffmpeg: str, encoder: str,
+                   device: "str | None" = None) -> "tuple[bool, str]":
+    """Does `encoder` really start here? One black 128x128 frame through it to
+    a null output. `ffmpeg -encoders` only says the encoder was COMPILED IN:
+    h264_nvenc is listed on a machine with no NVIDIA card, h264_vaapi on one
+    whose driver cannot encode. Returns (ok, first line of ffmpeg's reason).
+
+    The check and its command are the mania engine's (osu-mania-renderer #31,
+    TheAussie), made synchronous. A probe that hangs is killed at the timeout."""
+    cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin"]
+    if encoder == "h264_vaapi":
+        cmd += ["-vaapi_device", device or "/dev/dri/renderD128"]
+    cmd += ["-f", "rawvideo", "-pix_fmt", "rgb24", "-s", "128x128", "-r", "1",
+            "-i", "pipe:0", "-frames:v", "1", "-an", "-vf",
+            "format=nv12,hwupload" if encoder == "h264_vaapi" else "format=yuv420p",
+            "-c:v", encoder, "-f", "null", "-"]
+    try:
+        r = subprocess.run(cmd, input=bytes(128 * 128 * 3), capture_output=True,
+                           timeout=ENCODER_PROBE_TIMEOUT_S, check=False)
+    except subprocess.TimeoutExpired:
+        return False, "encoder startup probe timed out"
+    except OSError as e:
+        return False, str(e)
+    if r.returncode == 0:
+        return True, ""
+    why = r.stderr.decode(errors="replace").strip().splitlines()
+    return False, (why[0][:300] if why else f"ffmpeg exit code {r.returncode}")
+
+
+def probe_encoder(encoder: str = "auto", device: "str | None" = None) -> str:
+    """Resolve 'auto' → preferred encoder that WORKS on this system.
     Preference: h264_nvenc → h264_vaapi → libx264 (pool A/B are NVENC;
-    pool C is AMD/VAAPI with system ffmpeg)."""
+    pool C is AMD/VAAPI with system ffmpeg). An explicit choice passes through
+    untouched, as before.
+
+    A hardware encoder that ffmpeg lists is tried with one frame first
+    (encoder_starts) and skipped if it does not start; until this check a
+    listed-but-unusable encoder was chosen and the render died on its first
+    frame. libx264 is taken as it always was, without a check, so a machine
+    with no hardware encoder listed (every Mac) does no extra work.
+    R3D_ENCODER_PROBE=0 turns the check off (the listing alone decides)."""
     if encoder != "auto":
         return encoder
     ffmpeg = shutil.which("ffmpeg")
@@ -71,9 +112,18 @@ def probe_encoder(encoder: str = "auto") -> str:
         raise EncoderError("ffmpeg not found on PATH")
     out = subprocess.run([ffmpeg, "-hide_banner", "-encoders"],
                          capture_output=True, text=True, check=False).stdout
+    check = os.environ.get("R3D_ENCODER_PROBE", "1").strip().lower() \
+        not in ("0", "false", "no", "off")
     for cand in ("h264_nvenc", "h264_vaapi", "libx264"):
-        if cand in out:
+        if cand not in out:
+            continue
+        if cand == "libx264" or not check:
             return cand
+        ok, why = encoder_starts(ffmpeg, cand, device)
+        if ok:
+            return cand
+        print(f"encoder: {cand} is listed by ffmpeg but does not start here "
+              f"({why}); trying the next one", file=sys.stderr, flush=True)
     return "libx264"
 
 
