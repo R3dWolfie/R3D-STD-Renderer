@@ -97,6 +97,7 @@ from enum import Enum
 from ..beatmap.objects import Slider, Spinner
 from ..replay.replay import KEY_K1, KEY_K2, KEY_M1, KEY_M2, cursor_at
 from .slider_visual import SliderVisualEvent, SliderVisualGap, SliderVisualTimeline
+from .slider_chronological import SliderReplayInput, chronological_slider
 
 # --- constants (sources cited) -------------------------------------------------
 FOLLOW_CIRCLE_RADIUS_MULT = 2.4     # DrawableSliderBall.FOLLOW_AREA
@@ -363,7 +364,7 @@ class ObjectVerdict:
     slider_record: SliderRecord | None = None           # sliders only
     relabeled: bool = False             # reconcile changed the sim's tier
     quality: float = math.inf           # reconcile rank key (band-mapped)
-    # Raw producer observations, frozen BEFORE any header reconciliation.
+    # Raw observations and source-model events, frozen BEFORE reconciliation.
     # Partial authority: see slider_visual.py; never infer missing callbacks.
     slider_visuals: SliderVisualTimeline | None = None
 
@@ -598,16 +599,21 @@ class StdRuleset:
         sims = self._make_sims()
         clickables = [s for s in sims if s.kind != "spinner"]
         held = HeldState(self.frames)
+        visual_input = SliderReplayInput(self.frames)
 
         first_live = 0
-        for press in press_edges(self.frames):
+        for press_i, press in enumerate(press_edges(self.frames)):
             first_live = self._close_windows(clickables, first_live, press.time_ms)
-            self._route_click(sims, clickables, first_live, press)
+            self._route_click(sims, clickables, first_live, press,
+                              visual_input.press_frame_indices[press_i])
         self._close_windows(clickables, 0, math.inf)
 
         for s in sims:
             if s.kind == "slider":
                 self._evaluate_slider(s, held)
+                s.slider_visuals = chronological_slider(
+                    s.slider_visuals, visual_input, s.obj, self.diff, self.radius,
+                    self.hw.meh, s.visual_head_event)
             elif s.kind == "spinner":
                 self._evaluate_spinner(s)
             else:
@@ -657,7 +663,8 @@ class StdRuleset:
         return first_live
 
     def _route_click(self, sims: list[_ObjSim], clickables: list[_ObjSim],
-                     first_live: int, press: Press) -> None:
+                     first_live: int, press: Press,
+                     input_frame_index: int | None = None) -> None:
         """One click through stable notelock — LegacyHitPolicy.CheckHittable
         + DrawableHitCircle.CheckForResult(userTriggered)."""
         t = press.time_ms
@@ -713,7 +720,8 @@ class StdRuleset:
                     if s2.kind == "slider":
                         s2.visual_head_event = SliderVisualEvent(
                             t, 0, "head_judged", "click_routing", hit=False,
-                            part_index=0, part_kind="head", transform_time_ms=t)
+                            part_index=0, part_kind="head", transform_time_ms=t,
+                            input_frame_index=input_frame_index)
         else:
             # LegacyHitPolicy (stable): a previous alive STACKED object that
             # is unjudged swallows the click entirely (ClickAction.Ignore).
@@ -746,7 +754,8 @@ class StdRuleset:
         if target.kind == "slider":
             target.visual_head_event = SliderVisualEvent(
                 t, 0, "head_judged", "click_routing", hit=True,
-                part_index=0, part_kind="head", transform_time_ms=t)
+                part_index=0, part_kind="head", transform_time_ms=t,
+                channel=press.channel, input_frame_index=input_frame_index)
 
     def _is_judged(self, s: _ObjSim, now: float) -> bool:
         if s.kind == "spinner":

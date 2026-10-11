@@ -7,6 +7,7 @@ part times as exact lazer judgement times.
 from __future__ import annotations
 
 import dataclasses
+import math
 
 from osu_std_renderer.replay.replay import KEY_K1, KEY_K2
 from osu_std_renderer.ruleset import (
@@ -31,7 +32,9 @@ def _run(bm, frames, **kwargs):
 
 
 def _events(timeline, kind):
-    return [event for event in timeline.events if event.kind == kind]
+    # Stage-1 invariants continue to address the preserved raw stream. Model
+    # notifications have separate assertions in test_slider_chronological.
+    return [event for event in timeline.raw_events_at(math.inf) if event.kind == kind]
 
 
 def _has_gap(timeline, kind, reason=None, index=None):
@@ -89,7 +92,8 @@ def test_tracking_gain_loss_regain_are_observed_edges_without_synthetic_end_off(
         keys = KEY_K1 if (1000 <= t < 1200 or t >= 1300) else 0
         entries.append((t, x, y, keys))
     verdict, timeline = _run(bm, _frames(entries))
-    edges = [event for event in timeline.events if event.kind.startswith("tracking_")]
+    edges = [event for event in timeline.raw_events_at(math.inf)
+             if event.kind.startswith("tracking_")]
     assert [(event.time_ms, event.kind) for event in edges] == [
         (1000, "tracking_on"), (1200, "tracking_off"), (1300, "tracking_on")]
     assert all(event.provenance == "tracking_sample"
@@ -125,7 +129,7 @@ def test_short_slider_late_head_keeps_post_end_and_delayed_parts_unavailable():
     assert head.time_ms == 1120 > verdict.end_time == 1050
     assert tail.time_ms == 1025 and tail.hit
     assert timeline.tracking_sample_end_ms == 1050
-    assert not [event for event in timeline.events
+    assert not [event for event in timeline.raw_events_at(math.inf)
                 if event.kind.startswith("tracking_") and event.time_ms > 1050]
     assert _has_gap(timeline, "part_judged", "head_pending_at_sample", tail.part_index)
     assert not _events(timeline, "part_judged")
@@ -138,7 +142,7 @@ def test_short_slider_head_miss_does_not_extend_tracking_to_its_window_close():
     verdict, timeline = _run(bm, _frames([(900, 0, 0, KEY_K1),
                                         (1000, 256, 192, KEY_K1)]))
     assert verdict.deadline > verdict.end_time
-    assert all(event.time_ms <= verdict.end_time for event in timeline.events)
+    assert all(event.time_ms <= verdict.end_time for event in timeline.raw_events_at(math.inf))
     assert _has_gap(timeline, "head_judged")
     assert _has_gap(timeline, "part_judged", "head_pending_at_sample", 1)
 
@@ -192,9 +196,9 @@ def test_equal_time_order_is_deterministic_raw_order_with_source_order_gap():
                       (1500, 356, 192, KEY_K1)]
                      + _ball_frames(slider, 1510, 2250))
     verdict, timeline = _run(bm, frames)
-    assert [event.kind for event in timeline.events_at(1000)] == [
+    assert [event.kind for event in timeline.raw_events_at(1000)] == [
         "head_judged", "tracking_on"]
-    at_tick = [event for event in timeline.events if event.time_ms == 1500]
+    at_tick = [event for event in timeline.raw_events_at(math.inf) if event.time_ms == 1500]
     assert [event.kind for event in at_tick] == ["tracking_on", "part_sampled"]
     assert [event.sequence for event in timeline.events] == list(range(len(timeline.events)))
     assert _has_gap(timeline, "callback_order", "drawable_callback_order_not_simulated")
@@ -206,7 +210,8 @@ def test_sub_millisecond_key_pulse_is_not_claimed_observed_or_bounded_by_one_ms(
     frames = _frames([(1000, 256, 192, KEY_K1), (1100, 276, 192, 0),
                       (1200.25, 296, 192, KEY_K1), (1200.75, 296, 192, 0)])
     verdict, timeline = _run(bm, frames, lazer=True)
-    edges = [event for event in timeline.events if event.kind.startswith("tracking_")]
+    edges = [event for event in timeline.raw_events_at(math.inf)
+             if event.kind.startswith("tracking_")]
     assert [(event.time_ms, event.kind) for event in edges] == [
         (1000, "tracking_on"), (1100, "tracking_off")]
     assert timeline.sampling_step_ms == 1
