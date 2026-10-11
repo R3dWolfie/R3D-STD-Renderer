@@ -96,6 +96,7 @@ from enum import Enum
 
 from ..beatmap.objects import Slider, Spinner
 from ..replay.replay import KEY_K1, KEY_K2, KEY_M1, KEY_M2, cursor_at
+from .slider_visual import SliderVisualEvent, SliderVisualGap, SliderVisualTimeline
 
 # --- constants (sources cited) -------------------------------------------------
 FOLLOW_CIRCLE_RADIUS_MULT = 2.4     # DrawableSliderBall.FOLLOW_AREA
@@ -362,6 +363,9 @@ class ObjectVerdict:
     slider_record: SliderRecord | None = None           # sliders only
     relabeled: bool = False             # reconcile changed the sim's tier
     quality: float = math.inf           # reconcile rank key (band-mapped)
+    # Raw producer observations, frozen BEFORE any header reconciliation.
+    # Partial authority: see slider_visual.py; never infer missing callbacks.
+    slider_visuals: SliderVisualTimeline | None = None
 
     def tracked_at(self, t: float) -> bool:
         return any(t0 <= t <= t1 for t0, t1 in self.tracking)
@@ -442,6 +446,8 @@ class _ObjSim:
     # lazer: full spins achieved vs SpinsRequired)
     spin_req: int = 0
     spin_got: float = 0.0
+    visual_head_event: SliderVisualEvent | None = None
+    slider_visuals: SliderVisualTimeline | None = None
 
 
 # --- the ruleset -------------------------------------------------------------------
@@ -704,6 +710,10 @@ class StdRuleset:
                     s2.head_judged = True
                     s2.head_hit = False
                     s2.deadline = min(s2.deadline, t)   # miss anchors here
+                    if s2.kind == "slider":
+                        s2.visual_head_event = SliderVisualEvent(
+                            t, 0, "head_judged", "click_routing", hit=False,
+                            part_index=0, part_kind="head", transform_time_ms=t)
         else:
             # LegacyHitPolicy (stable): a previous alive STACKED object that
             # is unjudged swallows the click entirely (ClickAction.Ignore).
@@ -733,6 +743,10 @@ class StdRuleset:
         target.head_result = result
         target.hit_time = t
         target.delta = delta
+        if target.kind == "slider":
+            target.visual_head_event = SliderVisualEvent(
+                t, 0, "head_judged", "click_routing", hit=True,
+                part_index=0, part_kind="head", transform_time_ms=t)
 
     def _is_judged(self, s: _ObjSim, now: float) -> bool:
         if s.kind == "spinner":
@@ -772,6 +786,11 @@ class StdRuleset:
         tracking = False
         t_open: float | None = None
         outcomes: dict[int, bool] = {}
+        # Instrument the existing producer without changing its decisions or
+        # lattice. These observations are copied scalars, never PartOutcome
+        # references which reconciliation can later relabel.
+        visual_events = ([s.visual_head_event]
+                         if s.visual_head_event is not None else [])
         jp_i = 0
         for t in ts:
             cx, cy, _ = cursor_at(self.frames, t)
@@ -779,6 +798,11 @@ class StdRuleset:
             rr = r_keep if tracking else r_start
             in_area = (cx - bx) ** 2 + (cy - by) ** 2 <= rr * rr
             now_tracking = in_area and held.any_at(t)
+            if now_tracking != tracking and self.frames:
+                visual_events.append(SliderVisualEvent(
+                    t, len(visual_events),
+                    "tracking_on" if now_tracking else "tracking_off",
+                    "tracking_sample"))
             if now_tracking and not tracking:
                 t_open = t
             elif tracking and not now_tracking and t_open is not None:
@@ -787,12 +811,21 @@ class StdRuleset:
             tracking = now_tracking
             while jp_i < len(judge_pts) and judge_pts[jp_i][0] <= t:
                 outcomes[jp_i] = tracking
+                if self.frames:
+                    tp = judge_pts[jp_i][1]
+                    visual_events.append(SliderVisualEvent(
+                        t, len(visual_events), "part_sampled", "part_sample",
+                        hit=tracking, part_index=jp_i + 1,
+                        part_kind={"tick": "tick", "reverse": "repeat",
+                                   "last": "tail"}[tp.kind]))
                 jp_i += 1
         if tracking and t_open is not None:
             s.tracking.append((t_open, end))
         while jp_i < len(judge_pts):                # numeric stragglers
             outcomes[jp_i] = tracking
             jp_i += 1
+
+        s.slider_visuals = self._slider_visual_timeline(s, visual_events)
 
         # part list: head + ticks/repeats + tail (display times, not judge
         # times). The three miss kinds (owner-specified stable model):
@@ -821,6 +854,70 @@ class StdRuleset:
             s.final = (s.head_result if s.head_hit else JudgmentKind.MISS)
         else:
             s.final = _classic_slider_aggregate(s.parts)
+
+    def _slider_visual_timeline(self, s: _ObjSim,
+                               events: list[SliderVisualEvent],
+                               ) -> SliderVisualTimeline:
+        """Freeze raw facts and expose the missing source notification model.
+
+        SliderInputManager.TryJudgeNestedObject waits for HeadCircle.Judged,
+        delays a tail until prior ticks/repeats, and does not miss it early.
+        PostProcessHeadJudgement may judge passed parts BEFORE updating
+        tracking. DrawableSlider.CheckForResult supplies the parent boundary;
+        FollowCircle ignores tracking after that boundary. Our two-phase
+        simulator does not implement those callbacks, so no notification or
+        tail/end animation time is synthesised from the sampled part flags.
+        """
+        if not self.frames:
+            return SliderVisualTimeline(
+                status="unavailable", lazer=self.lazer, classic=self.classic,
+                unavailable=tuple(SliderVisualGap(kind, "no_replay_frames")
+                                  for kind in ("head_judged", "part_judged",
+                                               "slider_judged", "tracking",
+                                               "callback_order")))
+
+        # Phase 1 routes heads; phase 2 samples tracking before parts. Keep
+        # that raw order for time ties, explicitly NOT lazer callback order.
+        ordered = tuple(dataclasses.replace(event, sequence=i)
+                        for i, event in enumerate(sorted(
+                            events, key=lambda event: (event.time_ms,
+                                                       event.sequence))))
+        gaps = [
+            SliderVisualGap("slider_judged", "parent_notification_not_simulated"),
+            SliderVisualGap("tracking", "parent_judged_guard_not_simulated"),
+            SliderVisualGap("tracking", "post_end_tracking_not_simulated"),
+            SliderVisualGap("tracking", "pre_start_tracking_not_simulated"),
+            SliderVisualGap("tracking", "tracking_action_restriction_not_simulated"),
+            SliderVisualGap("tracking", "between_sample_edges_not_observed"),
+            SliderVisualGap("callback_order", "drawable_callback_order_not_simulated"),
+        ]
+        if s.visual_head_event is None:
+            # _close_windows runs only before presses and at infinity. The
+            # scoring deadline is not an observed finite notification time.
+            gaps.append(SliderVisualGap(
+                "head_judged", "head_window_notification_not_simulated", 0))
+        for event in ordered:
+            if event.kind != "part_sampled":
+                continue
+            head_time = (s.visual_head_event.time_ms
+                         if s.visual_head_event is not None else s.deadline)
+            if event.time_ms < head_time or (s.visual_head_event is None
+                                            and event.time_ms == head_time):
+                reason = "head_pending_at_sample"
+            elif event.part_kind == "tail":
+                reason = "tail_notification_and_anchor_not_simulated"
+            else:
+                reason = "nested_notification_not_simulated"
+            gaps.append(SliderVisualGap("part_judged", reason, event.part_index))
+        sampled_indices = {event.part_index for event in ordered
+                           if event.kind == "part_sampled"}
+        gaps.extend(SliderVisualGap("part_judged", "part_sample_time_unavailable", i)
+                    for i in range(1, len(s.obj.score_points) + 1)
+                    if i not in sampled_indices)
+        return SliderVisualTimeline(
+            status="partial", lazer=self.lazer, classic=self.classic,
+            events=ordered, unavailable=tuple(gaps),
+            tracking_sample_end_ms=s.end, sampling_step_ms=1.0)
 
     # ---- phase 3: spinners (stable + lazer ports) --------------------------------------
 
@@ -1800,7 +1897,7 @@ class StdRuleset:
             pos=s.pos, popup_pos=self._popup_pos(s), hit_time=s.hit_time,
             delta=s.delta, deadline=s.deadline, parts=s.parts,
             tracking=s.tracking, breaks=s.breaks, slider_record=record,
-            quality=s.quality)
+            quality=s.quality, slider_visuals=s.slider_visuals)
 
 
 def _classic_slider_aggregate(parts: list[PartOutcome]) -> JudgmentKind:

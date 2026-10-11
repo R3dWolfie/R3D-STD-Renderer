@@ -19,6 +19,7 @@ MODULES = [
     "tests.test_leadin_offset",
     "tests.test_skin_ini",
     "tests.test_ruleset",
+    "tests.test_slider_visual_events",
     "tests.test_health",
     "tests.test_slider_body",
     "tests.test_playfield_pipeline",

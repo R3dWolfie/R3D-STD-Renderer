@@ -2,6 +2,11 @@
 ported-from-ppy/osu logic and the stable-vs-lazer choices) + the HP model
 (health.py — lazer's OsuHealthProcessor/DrainingHealthProcessor port)."""
 from .health import HealthTimeline, compute_drain_rate  # noqa: F401
+from .slider_visual import (  # noqa: F401
+    SliderVisualEvent,
+    SliderVisualGap,
+    SliderVisualTimeline,
+)
 from .ruleset import (  # noqa: F401
     BASE_LARGE_TICK,
     BASE_SCORE,
