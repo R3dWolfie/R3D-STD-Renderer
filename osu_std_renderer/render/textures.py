@@ -1099,17 +1099,21 @@ def bake_argon_ball_ring(size: int = ARGON_BALL_SIZE) -> np.ndarray:
     return bake_ring(size, ARGON_BALL_BORDER_FRAC)
 
 
-def bake_argon_follow(size: int = 256, thickness_frac: float = 0.04,
-                      fill: float = 0.30) -> np.ndarray:
+def bake_argon_follow(size: int = 256, thickness_frac: float = 4 / 64,
+                      fill: float = 0.30, gradient: bool = True) -> np.ndarray:
     """ArgonFollowCircle: additive accent ring (border) + faint accent fill
-    (Alpha 0.3). Grayscale (ring=1, interior=fill); tinted accent + drawn
-    additive by the scene."""
+    (Alpha 0.3). BorderThickness 4 in the 128px follow container. Accent
+    gradients vertically to accent.Darken(0.5), independent of ball sizing.
+    Default uses the same bake with border 5, fill .2 and no gradient."""
     d = _dist_grid(size)
     R = size / 2.0 - 2.0
     outer = np.clip((R - d) / _AA_PX, 0.0, 1.0)
     inner_edge = R * (1.0 - thickness_frac)
     ring = outer * np.clip((d - inner_edge) / _AA_PX, 0.0, 1.0)
     val = np.maximum(ring, fill * outer)
+    if gradient:
+        yn = np.arange(size, dtype=float)[:, None] / max(1, size - 1)
+        val *= 1 - yn / 3
     return _grey_rgba(val, outer)
 
 
@@ -1317,6 +1321,8 @@ class TextureBank:
         renderer.upload_texture("argon_ball", bake_argon_ball())
         renderer.upload_texture("argon_ball_ring", bake_argon_ball_ring())
         renderer.upload_texture("argon_follow", bake_argon_follow())
+        renderer.upload_texture("default_follow", bake_argon_follow(
+            thickness_frac=5 / 64, fill=0.2, gradient=False))
         renderer.upload_texture("argon_followpoint", bake_argon_followpoint())
         renderer.upload_texture("argon_bubble", bake_argon_bubble())
         renderer.upload_texture("argon_tick", bake_argon_tick())
