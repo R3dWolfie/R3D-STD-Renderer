@@ -1469,7 +1469,7 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
         pct = int(frac * 100)
         if pct != last_pct[0]:
             last_pct[0] = pct
-            print(f"rendering… {pct}%", file=sys.stderr, flush=True)
+            print(f"\rrendering… {pct}%", end="", file=sys.stderr, flush=True)
 
     player = ScenePlayer(scene, end_ms, speed=speed,
                          start_ms=render_start_ms,
@@ -1497,7 +1497,10 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
         # and ffmpeg reaped. Everything between drain_end and here is the
         # encoder tail, which is invisible to a frames/second number.
         perf.mark("encoder_done")
+        progress(1.0)
     finally:
+        if last_pct[0] >= 0:
+            print(file=sys.stderr, flush=True)
         if video_bg is not None:
             video_bg.close()
         if audio_path is not None:
