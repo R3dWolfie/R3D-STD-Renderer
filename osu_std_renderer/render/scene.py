@@ -42,8 +42,8 @@ each core element the skin provides replaces its procedural stand-in —
 hitcircle (combo-tinted) + hitcircleoverlay (untinted, above the circle,
 under the number unless HitCircleOverlayAboveNumber), approachcircle
 (tinted), HitCirclePrefix combo digits (HitCircleOverlap layout), sliderb
-(tint per AllowSliderBallTint/SliderBall), sliderfollowcircle (2.4× while
-tracking), skin.ini SliderBorder/SliderTrackOverride body colours, skin
+(tint per AllowSliderBallTint/SliderBall), sliderfollowcircle (source-model
+legacy animations and native sizing), skin.ini SliderBorder/SliderTrackOverride body colours, skin
 cursor/trail/middle (behind --skin-cursor, CursorCentre honored), hit0/
 50/100/300 judgment sprites (a fully-transparent skin texture = draw
 NOTHING — the classic empty hit300). Elements the skin lacks fall back
@@ -162,6 +162,8 @@ from .effects import (LOGO_UI_SIZE, SMOKE_DEFAULT_WIDTH_OSU,
                       seizure_alpha, smoke_point_alpha, smoke_segments,
                       triangle_field, triangle_states, warning_arrow_alpha)
 from .gl import _GPU_YUV, Sprite
+from .slider_visuals import (SliderVisualState, draw_slider_layers,
+                             repeat_alpha, repeat_fade_in)
 from .hud import layout_run
 from .mods import (HIDDEN_FADE_IN_MULT, MOD_FLASHLIGHT, MOD_HIDDEN,
                    build_flashlight_timeline, flashlight_size_at,
@@ -807,7 +809,8 @@ def snake_end_fraction(t: float, start_time: float, preempt: float,
 def snake_range(t: float, start_time: float, part_len: float,
                 repeat_count: int, preempt: float,
                 snaking_in: bool = True,
-                snaking_out: bool = True) -> tuple[float, float]:
+                snaking_out: bool = True,
+                head_hit: bool = True) -> tuple[float, float]:
     """(start, end) fractions of the path visible at t — §4.9 Snaking
     In AND Out (lazer SnakingSliderBody semantics):
 
@@ -823,7 +826,7 @@ def snake_range(t: float, start_time: float, part_len: float,
     out body leaves nothing behind)."""
     b = snake_end_fraction(t, start_time, preempt, snaking_in)
     a = 0.0
-    if snaking_out and part_len > 0 and repeat_count >= 1:
+    if head_hit and snaking_out and part_len > 0 and repeat_count >= 1:
         final_start = start_time + (repeat_count - 1) * part_len
         if t > final_start:
             u = _clamp01((t - final_start) / part_len)
@@ -1399,6 +1402,7 @@ class StdScene:
         self._last_t = -math.inf
         self._slider_paths: dict[int, list[tuple[float, float]]] = {}
         self._slider_marks: dict[int, tuple[list, list]] = {}
+        self._slider_visual_states: dict[int, SliderVisualState] = {}
         # spinners: rotation tracks (replay-driven, or the §2.5 auto-spin
         # when there are no cursor frames), built at spawn
         self._spinner_tracks: dict[int, SpinnerTrack] = {}
@@ -1777,7 +1781,9 @@ class StdScene:
                         obj, track)
         keep = []
         for obj in self._active:
-            if t <= obj.get_end_time() + HIT_FADE_OUT:
+            retire = (self._slider_visual(obj).retire if isinstance(obj, Slider)
+                      else obj.get_end_time() + HIT_FADE_OUT)
+            if t <= retire:
                 keep.append(obj)
             else:
                 self._slider_paths.pop(id(obj), None)
@@ -1808,26 +1814,23 @@ class StdScene:
         return bonus_spin_events(track, req_for_bonus, max_bonus)
 
     def _build_marks(self, obj) -> tuple[list, list]:
-        """(ticks, arrows) draw records for one spawning slider — screen
-        positions + per-part HIT flags from the ruleset (no judgments →
-        the Phase-1 perfect-play fallback: everything hit).
+        """(ticks, arrows) geometry records for one spawning slider.
+
+        The trailing hit token is retained for helper/debug compatibility;
+        actual scene transitions use the chronological model at draw time.
 
         ticks:  (TickMark, screen_x, screen_y, span_start, hit)
         arrows: (ReverseArrow, screen_x, screen_y, rotation, hit)
         """
-        v = self._verdict(obj)
-        outcomes: dict[tuple[str, float], bool] = {}
-        if v is not None:
-            for p in v.parts:
-                if p.kind in ("tick", "repeat"):
-                    outcomes[(p.kind, round(p.time, 2))] = p.hit
+        # These records cache geometry. Rendering reads chronological model
+        # notifications at time t; reconciled PartOutcome flags are not input.
         pts = self._slider_paths[id(obj)]
         ticks = []
         for tm in tick_schedule(obj):
             sx, sy = self.cam.to_screen(*obj.modify_position(tm.pos, self.diff))
             ticks.append((tm, sx, sy,
                           obj.start_time + tm.span * obj.part_len,
-                          outcomes.get(("tick", round(tm.time, 2)), True)))
+                          True))
         arrows = []
         spawn = obj.get_start_time() - self._preempt_for(obj)
         # Hidden does not alter reverse-arrow lifetime: a pending reverse
@@ -1840,7 +1843,7 @@ class StdScene:
             if marker is not None:
                 sx, sy = self.cam.to_screen(
                     *obj.modify_position(marker.pos, self.diff))
-                hit = outcomes.get(("repeat", round(marker.time, 2)), True)
+                hit = True
             else:   # tick walk suppressed (degenerate) — fall back to path end
                 sx, sy = pts[-1] if arrow.at_tail else pts[0]
                 hit = True
@@ -2523,13 +2526,17 @@ class StdScene:
             if not pts:
                 continue
             preempt = self._preempt_for(obj)     # FR extends per object
-            b_alpha = body_alpha(t, obj.get_start_time(), obj.get_end_time(),
-                                 preempt, fade_in)
+            b_alpha = self._slider_visual(obj).body_alpha(
+                t, preempt, fade_in, self.snaking_out)
+            if self.hidden:
+                b_alpha *= hidden_slider_fade(t, obj.get_start_time(),
+                                              obj.get_end_time(), preempt, fade_in)
             if b_alpha <= 0.0:
                 continue
             items.append((pts, snake_range(
                 t, obj.get_start_time(), obj.part_len, obj.repeat_count,
-                preempt, self.snaking_in, self.snaking_out)))
+                preempt, self.snaking_in, self.snaking_out,
+                self._slider_visual(obj).head_hit_at(t))))
             alpha = max(alpha, b_alpha)
             if color is None:
                 oc = self._color(obj)
@@ -2744,6 +2751,19 @@ class StdScene:
     def _verdict(self, obj):
         return self.judgments.verdict_for(obj) if self.judgments else None
 
+    def _slider_visual(self, obj) -> SliderVisualState:
+        cache = self._slider_visual_states
+        key = id(obj)
+        if key not in cache:
+            verdict = self._verdict(obj)
+            timeline = getattr(verdict, "slider_visuals", None)
+            variant = ("argon" if self.skin is None else "legacy"
+                       if self.skin.has("sliderfollowcircle") else "default")
+            cache[key] = SliderVisualState(timeline, obj.get_start_time(),
+                                           obj.get_end_time(), variant,
+                                           autoplay=self.judgments is None)
+        return cache[key]
+
     def _head_sprites(self, obj, t: float, pos_osu, approach_out,
                       role: str = "hit") -> list[Sprite]:
         """Hit-circle lifecycle sprites (shared by circles and slider heads).
@@ -2861,16 +2881,19 @@ class StdScene:
         preempt, fade_in = self._preempt_for(obj), self.diff.time_fade_in
         start, end = obj.get_start_time(), obj.get_end_time()
         spawn = start - preempt
-        b_alpha = body_alpha(t, start, end, preempt, fade_in)
+        visual = self._slider_visual(obj)
+        b_alpha = visual.body_alpha(t, preempt, fade_in, self.snaking_out)
         if self.hidden:                    # OsuModHidden: body fades (Easing.Out)
             b_alpha *= hidden_slider_fade(t, start, end, preempt, fade_in)
         pts = self._slider_paths.get(id(obj))
         ticks, arrows = self._slider_marks.get(id(obj), ([], []))
         snake_a, snake = snake_range(t, start, obj.part_len,
                                      obj.repeat_count, preempt,
-                                     self.snaking_in, self.snaking_out)
+                                     self.snaking_in, self.snaking_out,
+                                     visual.head_hit_at(t))
         sprites: list[Sprite] = []
-        tip = None
+        beneath: list[Sprite] = []
+        follow: list[Sprite] = []
         # FAIL: the body pass bypasses spr.post_xform, so rigid-transform the
         # body polyline here (same per-object fall) and fade with the object.
         body_pts = pts
@@ -2914,15 +2937,32 @@ class StdScene:
             # ticks of the ACTIVE span: above the body, under the circles
             sprites.extend(self._tick_sprites(t, ticks, obj, spawn, fade_in,
                                               snake_a, snake))
-            # tail end circle rides the visible body's far end: the snake
-            # tip during snake-in; the RETRACTING tip when a tail→head
-            # final span snakes out (danser: the cap follows the shrink).
-            # OsuModTraceable hides the DrawableSliderTail entirely (no cap).
-            tip = sub_path(pts, snake_a, snake)[-1]
-            if not self.traceable:
-                sprites.extend(self._plain_circle_sprites(tip[0], tip[1],
-                                                          color, b_alpha,
-                                                          role="slider_end"))
+        # DrawableSliderTail is a fixed final endpoint. Its own child entrance
+        # is independent of body opacity/snaking; Argon has no visible circle.
+        if pts and self.skin is not None and not self.traceable:
+            tx, ty = self.cam.to_screen(*obj.get_stacked_position_at(end, self.diff))
+            tail_alpha = repeat_fade_in(t, start, preempt, obj.part_len,
+                                        obj.repeat_count - 1,
+                                        fade_in if obj.repeat_count == 1 else 0,
+                                        self.snaking_in)
+            if visual.tail is not None and t >= visual.tail.time_ms:
+                anchor = visual.tail.transform_time_ms
+                if anchor is not None and not visual.tail.hit:
+                    tail_alpha *= _clamp01(1 - (t - anchor) / 100)
+            if self.hidden:
+                tail_alpha *= hidden_circle_fade(t, start, preempt,
+                                                 preempt * HIDDEN_FADE_IN_MULT)
+            sprites.extend(self._plain_circle_sprites(tx, ty, color, tail_alpha,
+                                                      role="slider_end"))
+            # Repeats have their own legacy circle under the arrow. Keeping
+            # the final tail fixed must not remove the opposite endpoint cap.
+            sprites.extend(self._repeat_circle_sprites(obj, t, arrows, pts, color))
+        # Follow has its own lifecycle, including pre-start anchors and
+        # release/end fades; it is independent of detached ball opacity.
+        bx, by = self.cam.to_screen(*obj.get_stacked_position_at(min(t, end), self.diff))
+        follow = self._follow_sprites(obj, t, bx, by, color, spawn)
+        if follow:
+            beneath, sprites = sprites, []
         # slider ball following PositionAt(t) (repeats included — scorePath
         # handles the back-and-forth). While the ruleset says tracking was
         # lost the ball dims — the visible sliderbreak cue (there is no
@@ -2937,26 +2977,10 @@ class StdScene:
             bx, by = self.cam.to_screen(
                 *obj.get_stacked_position_at(min(t, end), self.diff))
             sk = self.skin
-            # Follow circle EXPAND on tracking-gain (lazer DefaultFollowCircle):
-            # scale 1x -> FOLLOW_AREA and fade 0 -> 1 over FOLLOW_CIRCLE_IN_MS
-            # (OutQuint) instead of popping to full size. Anchored to the slider
-            # start (tracked-from-head, the common case); mid-slider re-acquire
-            # re-expand and release/end scale-down are the V3 transition model.
-            follow_f = _ease_out_quint((t - start) / FOLLOW_CIRCLE_IN_MS)
             if sk is None:                 # Argon league ball + follow circle
                 sprites.extend(self._argon_ball_sprites(bx, by, color,
-                                                        ball_alpha, tracked,
-                                                        follow_f))
+                                                        ball_alpha, False))
             else:
-                if tracked and sk.has("sliderfollowcircle"):
-                    # follow circle grows to 2.4x the circle diameter over the
-                    # tracking-gain ramp; it fades with the ball post-end.
-                    fw, fh = sk.size["sliderfollowcircle"]
-                    area = 1.0 + (FOLLOW_CIRCLE_SCALE - 1.0) * follow_f
-                    m = area * 2.0 * self.radius_px / max(fw, fh)
-                    sprites.append(Sprite(bx, by, fw * m, fh * m,
-                                          "sk_sliderfollowcircle",
-                                          (1.0, 1.0, 1.0, ball_alpha * follow_f)))
                 if sk.has("sliderb"):
                     bw, bh = sk.size["sliderb"]
                     k = self.circle_k
@@ -2972,18 +2996,31 @@ class StdScene:
             obj, t, obj.get_stacked_start_position(self.diff), approach_out,
             role="slider_head"))
         if pts:
-            # reverse arrows ON TOP of the head circle. The TAIL arrow must
-            # also draw after the head disc/number: on a SHORT single-repeat
-            # slider its pinned end position overlaps the head circle and
-            # would otherwise be occluded by it (normal-length sliders are
-            # unaffected — the two ends don't overlap). tip/ride_tip is
-            # vestigial (arrows are pinned at marker.pos), so None is correct.
+            # Reverse arrows stay above the head circle. Source entrance
+            # delays prevent first-repeat arrows appearing at a growing tip.
             sprites.extend(self._arrow_sprites(t, arrows, True, spawn,
-                                               fade_in, pts, snake, None))
+                                               fade_in, pts, snake, None, obj))
             sprites.extend(self._arrow_sprites(t, arrows, False, spawn,
-                                               fade_in, pts, snake, None))
-        if sprites:
-            self.spr.draw(sprites)
+                                               fade_in, pts, snake, None, obj))
+        draw_slider_layers(self.spr, beneath, follow, sprites, visual.parent_alpha(t))
+
+    def _follow_sprites(self, obj, t, bx, by, color, spawn):
+        state = self._slider_visual(obj).follow.at(t)
+        if state.alpha <= 0:
+            return []
+        sk = self.skin
+        if sk is not None and sk.has("sliderfollowcircle"):
+            age = t - spawn
+            fw, fh = sk.frame_size("sliderfollowcircle", age)
+            k = self.circle_k * 0.5 * state.scale
+            return [Sprite(bx, by, fw * k, fh * k,
+                           sk.frame_key("sliderfollowcircle", age),
+                           (1, 1, 1, state.alpha))]
+        diameter = 2 * self.radius_px * state.scale
+        key = "argon_follow" if sk is None else "default_follow"
+        tint = color if sk is None else (1, 165 / 255, 0)
+        return [Sprite(bx, by, diameter, diameter, key,
+                       (*tint, state.alpha), additive=True)]
 
     def _argon_body_style(self, color, b_alpha: float) -> BodyStyle:
         """ArgonSliderBody (skinless): accent border, interior = accent
@@ -3004,9 +3041,9 @@ class StdScene:
         ball_d = ARGON_BALL_DIAM_FRAC * 2.0 * self.radius_px
         if tracked:
             area = 1.0 + (ARGON_FOLLOW_AREA - 1.0) * follow_f
-            fd = area * ball_d
+            fd = area * 2.0 * self.radius_px
             out.append(Sprite(bx, by, fd, fd, "argon_follow",
-                              (*color, 0.9 * follow_f), additive=True))
+                              (*color, follow_f), additive=True))
         out.append(Sprite(bx, by, ball_d, ball_d, "argon_ball",
                           (*color, ball_alpha)))
         out.append(Sprite(bx, by, ball_d, ball_d, "argon_ball_ring",
@@ -3033,11 +3070,16 @@ class StdScene:
         tint = self._color(obj) if argon else (1.0, 1.0, 1.0)
         out: list[Sprite] = []
         k = self.circle_k
+        visual = self._slider_visual(obj)
         for tm, sx, sy, span_start, hit in ticks:
             if tm.span != active_span or not (snake_a <= tm.progress
                                               <= snake):
                 continue
-            asa = tick_alpha_scale(t, tm.time, tm.span, span_start, spawn,
+            event = visual.part_at("tick", tm.time, t)
+            notification = tm.time if visual.autoplay else math.inf
+            if event is not None and event.transform_time_ms is not None:
+                notification, hit = event.transform_time_ms, event.hit
+            asa = tick_alpha_scale(t, notification, tm.span, span_start, spawn,
                                    fade_in, hit)
             if asa is None:
                 continue
@@ -3059,11 +3101,13 @@ class StdScene:
 
     def _arrow_sprites(self, t: float, arrows, at_tail: bool, spawn: float,
                        fade_in: float, pts, snake: float,
-                       tip) -> list[Sprite]:
-        """reversearrow sprites for one end — WHITE (never combo-tinted),
-        beat-pulsed per the §3.2 version gate, pointing along the path
-        tangent INTO the slider. The tail arrow rides the snake tip while
-        the body grows."""
+                       tip, obj=None) -> list[Sprite]:
+        """White reverse arrows, with source-model endpoint/freeze geometry.
+
+        The optional object selects the model path; legacy helper-only callers
+        retain their fixed marker positions. Native rotation smoothing is not
+        inferred from the encoder frame clock.
+        """
         sel = [a for a in arrows if a[0].at_tail == at_tail]
         if not sel:
             return []
@@ -3075,16 +3119,21 @@ class StdScene:
         out: list[Sprite] = []
         k = self.circle_k
         for arrow, sx, sy, rot, hit in sel:
-            asa = arrow_alpha_scale(t, arrow, spawn, fade_in, hit)
+            if obj is None:
+                asa = arrow_alpha_scale(t, arrow, spawn, fade_in, hit)
+            else:
+                visual = self._slider_visual(obj)
+                sx, sy, rot, event = self._repeat_pose(obj, arrow, pts, t)
+                alpha = repeat_alpha(t, obj.get_start_time(), self._preempt_for(obj),
+                                     obj.part_len, arrow.r - 1, self.snaking_in, event)
+                if self.hidden and event is not None and event.transform_time_ms is not None:
+                    alpha = 0  # OsuModHidden hides the judged repeat immediately
+                if visual.autoplay and t >= arrow.time:
+                    alpha *= (1 - _clamp01((t - arrow.time) / min(300, obj.part_len))) ** 2
+                asa = (alpha, 1.0) if alpha > 0 else None
             if asa is None:
                 continue
             alpha, pop_scale = asa
-            # M-4: the reverse arrow is PINNED at the slider end (marker.pos),
-            # matching danser/lazer (DrawableSliderRepeat fades in at its fixed
-            # position during the preempt). Previously the tail arrow rode the
-            # snake-in tip (`tip`/`snake`), which floated the chevron above the
-            # end circle for slow sliders and dropped a stray crescent near the
-            # head early in snake-in — both diffed against the reference.
             p_scale, p_rot = arrow_pulse(beat_phase(t, self.beatmap.timings),
                                          legacy)
             scale = pop_scale * p_scale
@@ -3103,6 +3152,44 @@ class StdScene:
                 out.append(Sprite(sx, sy, d, d, "arrow",
                                   (1.0, 1.0, 1.0, alpha),
                                   rotation=rot + p_rot))
+        return out
+
+    def _repeat_pose(self, obj, arrow, pts, t):
+        visual = self._slider_visual(obj)
+        nominal = (obj.tick_reverse[arrow.r - 1].time
+                   if arrow.r <= len(obj.tick_reverse) else arrow.time)
+        event = visual.part_at("repeat", nominal, t)
+        freeze = visual.freezes.get(event.part_index) if event else None
+        # Left-limit geometry represents the position before the boundary's
+        # body update. Native cadence and elapsed-frame rotation are unknown.
+        pose_time = math.nextafter(freeze, -math.inf) if freeze is not None else t
+        if visual.autoplay and t >= arrow.time:
+            pose_time = math.nextafter(arrow.time, -math.inf)
+        fractions = snake_range(pose_time, obj.get_start_time(), obj.part_len,
+                                obj.repeat_count, self._preempt_for(obj),
+                                self.snaking_in, self.snaking_out,
+                                visual.head_hit_at(pose_time))
+        curve = sub_path(pts, *fractions)
+        x, y = curve[-1] if arrow.at_tail else curve[0]
+        return x, y, arrow_rotation(curve, arrow.at_tail), event
+
+    def _repeat_circle_sprites(self, obj, t, arrows, pts, color):
+        out = []
+        visual = self._slider_visual(obj)
+        for arrow, *_ in arrows:
+            x, y, _, event = self._repeat_pose(obj, arrow, pts, t)
+            alpha = repeat_alpha(t, obj.get_start_time(), self._preempt_for(obj),
+                                 obj.part_len, arrow.r - 1, self.snaking_in,
+                                 event, self.diff.time_fade_in if arrow.r == 1 else 0)
+            if self.hidden:
+                preempt = self._preempt_for(obj)
+                alpha *= hidden_circle_fade(t, obj.get_start_time(), preempt,
+                                            preempt * HIDDEN_FADE_IN_MULT)
+            if visual.autoplay and t >= arrow.time:
+                alpha *= (1 - _clamp01((t - arrow.time) / min(300, obj.part_len))) ** 2
+            if alpha > 0:
+                out.extend(self._plain_circle_sprites(x, y, color, alpha,
+                                                      role="slider_end"))
         return out
 
     def _ball_tint(self, combo_color) -> tuple[float, float, float]:
