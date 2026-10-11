@@ -52,11 +52,11 @@ judgment-driven, so they require a replay; `--no-replay` stays a bare
 debug flag (visuals only — no cursor/HUD/judgments/hitsounds).
 
 OWNER PUNCH-LIST PHASE (2026-07): distance-based long cursor trail
-(uniform spacing/brightness at any speed), per-element HUD selection
-(skin's legacy component where the skin ships it, ARGON otherwise —
-hud.py docstring; --legacy-defaults forces the ALL-LEGACY look for HUD
-AND the synth hitsound bank, --renderer-default-font-and-ranks wins
-over it for numbers/ranks), brighter-inside slider bodies (BodyStyle
+(uniform spacing/brightness at any speed), a coherent HUD skin container
+(2026-10 migration: extracted --skin selects Legacy; missing assets keep
+its anchors). --legacy-defaults also selects Legacy skinless and the
+legacy synth bank; --renderer-default-font-and-ranks changes glyph/rank
+appearance only. Brighter-inside slider bodies (BodyStyle
 defaults), the classic falling hit0 miss (--miss-fall), skin ranking-*
 images with --renderer-default-font-and-ranks, multi-reverse arrows
 gated on the head hit, the bottom-parked hit-error/UR block,
@@ -279,8 +279,8 @@ def build_parser() -> argparse.ArgumentParser:
                     default=False,
                     help="force the renderer's default (Argon) HUD numbers "
                          "+ procedural rank text even when the skin ships "
-                         "fonts / ranking-* images (wins over "
-                         "--legacy-defaults for numbers/ranks)")
+                         "fonts / ranking-* images (appearance only; "
+                         "preserves the selected HUD layout)")
     ap.add_argument("--legacy-defaults", action=BA, default=False,
                     help="the ALL-LEGACY look: every HUD element uses its "
                          "legacy component (skin textures where shipped, "
@@ -767,11 +767,10 @@ def _render(args, settings: StdRenderSettings, beatmap, frames,
                   "— static background", file=sys.stderr)
 
     # the HUD needs the judgment stream; --dump-frames without a replay
-    # sim just renders HUD-less (the Phase-1 fallback). Component set per
-    # the hud.py hybrid rule: per element, the skin's legacy component
-    # where the skin ships it, Argon otherwise (legacy_defaults → all
-    # legacy). The HP drain model (ruleset/health.py) and the .osr score
-    # pin wire in here.
+    # sim just renders HUD-less (the Phase-1 fallback). An explicit skin
+    # selects a Legacy HUD container, otherwise Argon (legacy_defaults also
+    # selects Legacy). Missing assets keep the layout. HP drain and the
+    # .osr score pin are wired here.
     hud = None
     health = None
     if judgments is not None:

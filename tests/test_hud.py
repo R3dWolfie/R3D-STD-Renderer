@@ -332,7 +332,7 @@ def test_final_acc_reads_last_event_not_a_timestamp():
     assert d.acc_at(last_obj_end + 1.0) != d.final_acc()
 
 
-# --- per-element component selection (the HYBRID rule, owner 2026-07-08) -------------
+# --- coherent HUD layout selection (supersedes hybrid geometry, 2026-10) ---
 
 class _FakeSkin:
     """Just enough of SkinElements for StdHud's selection logic."""
@@ -363,74 +363,40 @@ def _hud_with(skin, **setting_overrides):
                   health=None)
 
 
-def test_hud_component_selection_hybrid_per_element():
-    """The HYBRID rule (owner decision 2026-07-08, supersedes the
-    same-day all-legacy correction): PER ELEMENT — the skin's legacy
-    component where the skin SHIPS that element's textures, ARGON for
-    whatever the skin lacks. Skinless renders stay all-Argon."""
-    # skinless → all Argon
+def test_hud_component_selection_coherent_profile():
+    from osu_std_renderer.render.hud_layout import ARGON, LEGACY
     hud = _hud_with(None)
-    assert not hud.legacy_score and not hud.legacy_combo
-    assert not hud.legacy_health and not hud.legacy_keys
-    # a rich skin → all legacy
-    hud = _hud_with(_FakeSkin({"score_digits", "combo_digits",
-                               "scorebar-colour", "inputoverlay-key"}))
-    assert hud.legacy_score and hud.legacy_combo
-    assert hud.legacy_health and hud.legacy_keys
-    # the owner-skin shape (fonts only, e.g. osu_30196342): skin
-    # score/combo fonts render, hp bar + key counter go ARGON
-    hud = _hud_with(_FakeSkin({"score_digits", "combo_digits"}))
-    assert hud.legacy_score and hud.legacy_combo
-    assert not hud.legacy_health and not hud.legacy_keys
-    # scorebar only → legacy hp, Argon everything else; either
-    # inputoverlay texture is enough for legacy keys
-    hud = _hud_with(_FakeSkin({"scorebar-colour"}))
-    assert hud.legacy_health
-    assert not hud.legacy_score and not hud.legacy_combo
-    assert not hud.legacy_keys
-    hud = _hud_with(_FakeSkin({"inputoverlay-background"}))
-    assert hud.legacy_keys and not hud.legacy_health
-    # an EMPTY skin (zero textures) ships nothing → all-Argon HUD by
-    # default (gameplay keeps its legacy fallback — unchanged)
-    hud = _hud_with(_FakeSkin(set()))
-    assert not hud.legacy_score and not hud.legacy_combo
-    assert not hud.legacy_health and not hud.legacy_keys
+    assert hud.layout == ARGON
+    assert not any((hud.legacy_score, hud.legacy_combo, hud.legacy_health, hud.legacy_keys))
+    # Keep all former hybrid cases: completeness affects providers, never
+    # geometry. Includes fonts-only, health-only, keys-only and an empty skin.
+    for assets in ({"score_digits", "combo_digits", "scorebar-colour", "inputoverlay-key"},
+                   {"score_digits", "combo_digits"}, {"scorebar-colour"},
+                   {"inputoverlay-background"}, set()):
+        hud = _hud_with(_FakeSkin(assets))
+        assert hud.layout == LEGACY
+        assert all((hud.legacy_score, hud.legacy_combo, hud.legacy_health, hud.legacy_keys))
 
 
 def test_legacy_defaults_forces_all_legacy():
-    """legacy_defaults=ON (--legacy-defaults) = the ALL-LEGACY look:
-    every HUD element selects its legacy component even skinless / under
-    an empty skin — the lg_* bakes carry whatever the skin doesn't ship.
-    PRECEDENCE: renderer_default_font_and_ranks wins over it when both
-    are set (numbers/ranks go Argon/procedural, the rest stays legacy)."""
-    # empty skin + legacy_defaults → all legacy (legacy_only_v2 shape)
-    hud = _hud_with(_FakeSkin(set()), legacy_defaults=True)
-    assert hud.legacy_score and hud.legacy_combo
-    assert hud.legacy_health and hud.legacy_keys
-    # skinless + legacy_defaults → still all legacy
-    hud = _hud_with(None, legacy_defaults=True)
-    assert hud.legacy_score and hud.legacy_combo
-    assert hud.legacy_health and hud.legacy_keys
-    # precedence: renderer_default_font_and_ranks wins for fonts+ranks
-    hud = _hud_with(_FakeSkin(set()), legacy_defaults=True,
-                    renderer_default_font_and_ranks=True)
-    assert hud.force_default
-    assert not hud.legacy_score and not hud.legacy_combo   # Argon numbers
-    assert hud.legacy_health and hud.legacy_keys            # stay legacy
+    for skin in (None, _FakeSkin(set())):
+        for default_font in (False, True):
+            hud = _hud_with(skin, legacy_defaults=True,
+                            renderer_default_font_and_ranks=default_font)
+            assert hud.layout.legacy
+            assert all((hud.legacy_score, hud.legacy_combo, hud.legacy_health, hud.legacy_keys))
+            assert hud.force_default == default_font
 
 
 def test_renderer_default_font_and_ranks_toggle():
-    """renderer_default_font_and_ranks=ON forces the renderer's default
-    numbers (Argon) + procedural rank text even under a skin with fonts;
-    hp/keys selection is untouched (fonts + ranks only)."""
     sk = _FakeSkin({"score_digits", "combo_digits", "scorebar-colour",
                     "inputoverlay-key", "ranking-S-small"})
-    hud = _hud_with(sk)
-    assert hud.legacy_score and hud.legacy_combo and not hud.force_default
-    hud = _hud_with(sk, renderer_default_font_and_ranks=True)
-    assert hud.force_default
-    assert not hud.legacy_score and not hud.legacy_combo   # Argon numbers
-    assert hud.legacy_health and hud.legacy_keys            # unaffected
+    native = _hud_with(sk)
+    override = _hud_with(sk, renderer_default_font_and_ranks=True)
+    assert override.force_default and not native.force_default
+    assert override.layout == native.layout
+    assert all((override.legacy_score, override.legacy_combo,
+                override.legacy_health, override.legacy_keys))
 
 
 def test_hit_error_block_parks_near_the_bottom():
@@ -495,7 +461,8 @@ def _counter_hud(score, combo):
                          "show_grade": False})()
     h.es = h.lk = h.k = h.op = 1.0
     h.bank = _CounterBank()
-    h.argon_league = True          # these exercise the Argon counters
+    from osu_std_renderer.render.hud_layout import ARGON
+    h.layout = ARGON
     h._pin = 1.0
     h.data = _CounterData(score, combo)
     h.ui_w_l = 1366.0

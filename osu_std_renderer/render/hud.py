@@ -2,44 +2,16 @@
 own skin architecture (MIT, ppy/osu master; class + file cited per
 element):
 
-COMPONENT SELECTION (owner decision 2026-07-08, the HYBRID rule —
-supersedes the same-day all-legacy-under-any-skin correction): selection
-is PER ELEMENT — a custom skin's LEGACY component is used for each HUD
-element the skin actually SHIPS textures for; every element the skin
-LACKS uses the ARGON component. Skinless renders stay all-Argon:
+LAYOUT SELECTION (owner HUD separation pass, 2026-10): an explicit
+extracted legacy skin or legacy_defaults selects one LEGACY container;
+skinless selects ARGON. Missing assets use classic lg_* bakes within the
+Legacy container and never change anchors. Transparent assets stay blank.
+This supersedes the 2026-07 per-element HYBRID geometry rule.
 
-    score + accuracy   skin ships the ScorePrefix digit set →
-                       LegacyScoreCounter/LegacyAccuracyCounter (+ the
-                       legacy progress pie); otherwise → ArgonScore-
-                       Counter/ArgonAccuracyCounter (+ the Argon
-                       progress strip)
-    combo              skin ships the ComboPrefix digit set →
-                       LegacyDefaultComboCounter; otherwise →
-                       ArgonComboCounter
-    hp bar             skin ships scorebar-colour/-bg →
-                       LegacyHealthDisplay; otherwise →
-                       ArgonHealthDisplay
-    key overlay        skin ships inputoverlay-key/-background →
-                       LegacyKeyCounterDisplay; otherwise →
-                       ArgonKeyCounterDisplay
-    grade badge        skin ranking-*-small when shipped, procedural
-                       text otherwise (shared element, unchanged)
-
-Inside a SELECTED legacy component, individual textures the skin doesn't
-provide still come from the classic lg_* bakes (per-char font extras
-etc.) — a selected legacy component never mixes in Argon pieces.
-
-`legacy_defaults` (settings/CLI --legacy-defaults) forces the ALL-LEGACY
-look: EVERY HUD element uses its legacy component (skin textures where
-shipped, lg_* classic bakes otherwise — no Argon anywhere, even
-skinless). Gameplay elements already fall back skin-else-legacy in every
-mode; the synth hitsound bank follows the same league
-(record/hitsounds.synth_style_for).
-
-`renderer_default_font_and_ranks` (settings/CLI) forces the renderer's
-own default (Argon) NUMBERS and procedural RANK text even under a skin
-that ships fonts/rank images (fonts + ranks only — hp/keys keep their
-league). PRECEDENCE: it WINS over legacy_defaults when both are set.
+renderer_default_font_and_ranks changes numeric/rank appearance only.
+Legacy counters keep their right-aligned skin metrics and source anchors
+while substituting procedural numeric glyphs. legacy_defaults still
+selects the legacy synth hitsound family through the existing CLI path.
 
 THE TWO COMPONENT SETS (element classes unchanged):
 
@@ -73,9 +45,8 @@ THE TWO COMPONENT SETS (element classes unchanged):
                              row, faint density graph (200 buckets, tiered),
                              10 px rounded bar (bg gray(0.2)@0.3, white fill)
 
-  LEGACY (lazer's legacy-skin components, used only when the skin ships
-  the element's textures; classic-look lg_* bakes fill gaps INSIDE a
-  selected component):
+  LEGACY (lazer's legacy-skin container; classic-look lg_* bakes fill
+  missing assets without changing the container's geometry):
     LegacyScoreCounter       osu.Game/Skinning/LegacyScoreCounter.cs —
                              top-right ×0.96, margin 10, ScorePrefix font
                              (FixedWidth by '5', ScoreOverlap spacing),
@@ -179,6 +150,7 @@ from ..ruleset import JudgmentKind, OsuHitWindows
 from . import perf
 from .gl import Sprite
 from .textures import ARGON_GLYPH_CAP_SCALE
+from .hud_layout import HudRect, select_layout
 
 UI_HEIGHT = 1080.0             # our virtual UI space (previous phases)
 LAZER_UI_HEIGHT = 768.0        # lazer's HUD space (DrawSizePreserving 768)
@@ -1663,10 +1635,14 @@ class ArgonBarField:
 # --- the HUD ------------------------------------------------------------------------
 
 class StdHud:
-    """Draws the HUD over the scene each frame (called by StdScene after
-    the cursor — §5.3 draw order ends `cursors → HUD`). Component set per
-    the module docstring: PER ELEMENT, the skin's legacy component where
-    the skin ships it, Argon otherwise (legacy_defaults → all legacy)."""
+    """Draw one coherent skin container after the cursor, plus R3D extras."""
+
+    # Compatibility observations, not independent component switches.
+    legacy_score = property(lambda self: self.layout.legacy)
+    legacy_combo = property(lambda self: self.layout.legacy)
+    legacy_health = property(lambda self: self.layout.legacy)
+    legacy_keys = property(lambda self: self.layout.legacy)
+    argon_league = property(lambda self: not self.layout.legacy)
 
     def __init__(self, sprites, bank, settings, judgments, frames, beatmap,
                  skin_elems=None, health=None, mods: int = 0,
@@ -1677,40 +1653,11 @@ class StdHud:
         self.s = settings
         self.sk = skin_elems
         self.health = health
-        # -- component selection (module docstring, owner decision
-        # 2026-07-08 — the HYBRID rule): PER ELEMENT, the skin's legacy
-        # component where the skin SHIPS that element's textures, ARGON
-        # for whatever the skin lacks; skinless → all Argon.
-        # legacy_defaults forces every element legacy (lg_* bakes fill
-        # everything, even skinless). renderer_default_font_and_ranks
-        # forces the renderer's default numbers/ranks (Argon +
-        # procedural rank text) and WINS over legacy_defaults —
-        # fonts+ranks only, hp/keys keep their league.
-        sk = skin_elems
+        self.layout = select_layout(settings, skin_elems)
         self.force_default = bool(getattr(
             settings, "renderer_default_font_and_ranks", False))
-        self.legacy_defaults = bool(getattr(
-            settings, "legacy_defaults", False))
-        fonts_ok = not self.force_default
-
-        def ships(*names: str) -> bool:
-            return sk is not None and any(sk.has(n) for n in names)
-
-        if self.legacy_defaults:
-            self.legacy_score = fonts_ok
-            self.legacy_combo = fonts_ok
-            self.legacy_health = True
-            self.legacy_keys = True
-        else:
-            self.legacy_score = fonts_ok and ships("score_digits")
-            self.legacy_combo = fonts_ok and ships("combo_digits")
-            self.legacy_health = ships("scorebar-colour", "scorebar-bg")
-            self.legacy_keys = ships("inputoverlay-key",
-                                     "inputoverlay-background")
-        # skinless "Argon league": the hit-error meter becomes Argon's
-        # vertical SIDE bars (ArgonHitErrorMeter, left+right, mirrored);
-        # any custom skin keeps the bottom-centre house meter unchanged.
-        self.argon_league = sk is None and not self.legacy_defaults
+        self.legacy_defaults = bool(getattr(settings, "legacy_defaults", False))
+        self.bounds: dict[str, HudRect] = {}
         # -- settings-surface data (mod pills / pp / aim / strain) --------
         # mod_pills is the FULL display set (lazer_mods incl. lazer-only mods
         # + custom-rate suffix — see build_mod_pills); None falls back to the
@@ -1859,24 +1806,24 @@ class StdHud:
         (per char — stable's per-file default-skin fallback). FixedWidth:
         digits advance by the '5' cell (FixedWidthReferenceCharacter),
         ',','.','%','x' excluded. Spacing = −FontOverlap of the ACTIVE
-        skin font (0 for the baked classic set)."""
+        skin font (0 when no skin provider is active)."""
         sk = self.sk
         digit_sizes = extra_sizes = {}
         overlap = 0.0
         if sk is not None:
-            if font == "score" and sk.has("score_digits"):
-                digit_sizes = sk.score_digit_sizes
+            if font == "score":
+                digit_sizes = sk.score_digit_sizes if sk.has("score_digits") else {}
                 extra_sizes = sk.score_extra_sizes
                 overlap = sk.info.score_overlap
-            elif font == "combo" and sk.has("combo_digits"):
-                digit_sizes = sk.combo_digit_sizes
+            elif font == "combo":
+                digit_sizes = sk.combo_digit_sizes if sk.has("combo_digits") else {}
                 extra_sizes = sk.combo_extra_sizes
                 overlap = sk.info.combo_overlap
             elif font == "scoreentry" and sk.has("scoreentry_digits"):
                 digit_sizes = sk.scoreentry_digit_sizes
                 extra_sizes = {}
         skinned = bool(digit_sizes)
-        ref_h = (digit_sizes["5"][1] if skinned else LEGACY_FONT_H)
+        ref_h = max((h for _, h in digit_sizes.values()), default=LEGACY_FONT_H)
         fixed_w = (digit_sizes["5"][0] if skinned
                    else self.bank.legacy_aspect["5"] * LEGACY_FONT_H)
         suffix = {".": "dot", ",": "comma", "%": "percent", "x": "x"}
@@ -1894,6 +1841,12 @@ class StdHud:
                 h = ref_h
                 glyphs.append((f"lg_{suffix.get(ch, ch)}", asp * h, h,
                                ch.isdigit()))
+        if self.force_default:
+            # Appearance override fits the same legacy glyph slots. The
+            # score/accuracy/pie/key constraints therefore do not move.
+            glyphs = [(self.ARGON_SEG_LIT.get(ch, f"aseg_{ch}")
+                       if ch in "0123456789.%x" else f"glyph_{ch}", w, h, digit)
+                      for ch, (_, w, h, digit) in zip(text, glyphs)]
         return glyphs, fixed_w, ref_h, overlap
 
     def _legacy_text(self, out: list[Sprite], font: str, text: str,
@@ -1907,17 +1860,13 @@ class StdHud:
         (width_l, height_l) of the laid run (pre extra_scale). extra_scale
         scales around `pivot` (lazer px, absolute) — the combo pops."""
         glyphs, fixed_w, ref_h, overlap = self._legacy_glyphs(font, text)
-        adv = []
-        for key, w, h, is_digit in glyphs:
-            adv.append(fixed_w if is_digit else w)
-        total_w = sum(adv) - overlap * max(len(glyphs) - 1, 0)
+        adv, offsets, total_w, run_h = self._legacy_metrics(glyphs, fixed_w, overlap)
         x0 = (x_l - total_w * scale) if align == "right" else x_l
         px_l, py_l = pivot if pivot is not None else (x0, y_top_l)
         lk = self.lk
-        x = x0
-        for (key, w, h, is_digit), a in zip(glyphs, adv):
-            cx = x + a * scale / 2.0
-            cy = y_top_l + ref_h * scale / 2.0
+        for (key, w, h, is_digit), a, offset in zip(glyphs, adv, offsets):
+            cx = x0 + (offset + a / 2.0) * scale
+            cy = y_top_l + h * scale / 2.0
             # apply extra_scale around the pivot
             cx = px_l + (cx - px_l) * extra_scale
             cy = py_l + (cy - py_l) * extra_scale
@@ -1925,15 +1874,38 @@ class StdHud:
                               w * scale * extra_scale * lk,
                               h * scale * extra_scale * lk,
                               key, (*color, alpha), additive=additive))
-            x += (a - overlap) * scale
-        return total_w * scale, ref_h * scale
+        return total_w * scale, run_h * scale
 
     def _legacy_text_size(self, font: str, text: str,
                           scale: float) -> tuple[float, float]:
         glyphs, fixed_w, ref_h, overlap = self._legacy_glyphs(font, text)
-        adv = [fixed_w if is_digit else w for _, w, _, is_digit in glyphs]
-        total_w = sum(adv) - overlap * max(len(glyphs) - 1, 0)
-        return total_w * scale, ref_h * scale
+        _, _, width, height = self._legacy_metrics(glyphs, fixed_w, overlap)
+        return width * scale, height * scale
+
+    @staticmethod
+    def _legacy_metrics(glyphs, fixed_w, overlap):
+        adv = [fixed_w if digit else w for _, w, _, digit in glyphs]
+        # Negative/large overlaps are permitted, but never reverse the run.
+        offsets, x = [], 0.0
+        for a in adv:
+            offsets.append(x)
+            x += max(a - overlap, 0.0)
+        left = min((offset + (a-w)/2 for offset, a, (_, w, _, _) in
+                    zip(offsets, adv, glyphs)), default=0.0)
+        right = max((offset + (a+w)/2 for offset, a, (_, w, _, _) in
+                     zip(offsets, adv, glyphs)), default=0.0)
+        return adv, [x-left for x in offsets], right-left, max(
+            (h for _, _, h, _ in glyphs), default=0.0)
+
+    def _remember(self, name, sprites):
+        rect = HudRect.sprites(sprites, self.lk)
+        if rect is not None:
+            self.bounds[name] = rect
+
+    def _component(self, out, name, method, *args):
+        start = len(out)
+        method(out, *args)
+        self._remember(name, out[start:])
 
     # -- frame draw --------------------------------------------------------------------
 
@@ -1943,50 +1915,51 @@ class StdHud:
             self._draw_break_overlay(t)
 
     def _draw_timed(self, t: float) -> None:
+        self.bounds = {}
         if self.op <= 0.0:
             return
         out: list[Sprite] = []
         # strain graph first — UNDER every other HUD element
         with perf.T("hud_strain"):
             self._strain_graph(out, t)
-        # per-element skin-else-Argon (module docstring hybrid rule;
-        # legacy_defaults flips every flag legacy)
+        # One immutable profile drives every native component.
         with perf.T("hud_score_acc"):
-            if self.legacy_score:
+            if self.layout.legacy:
                 self._legacy_score_block(out, t)   # includes the legacy pie
             else:
-                self._argon_score_block(out, t)
-                self._argon_accuracy(out, t)
+                self._component(out, "score", self._argon_score_block, t)
+                self._component(out, "accuracy", self._argon_accuracy, t)
         with perf.T("hud_progress"):
-            if not self.legacy_score:
-                self._argon_progress(out, t)
+            if not self.layout.legacy:
+                self._component(out, "progress", self._argon_progress, t)
         with perf.T("hud_combo"):
-            if self.legacy_combo:
-                self._legacy_combo(out, t)
+            if self.layout.legacy:
+                self._component(out, "combo", self._legacy_combo, t)
             else:
-                self._argon_combo(out, t)
+                self._component(out, "combo", self._argon_combo, t)
         with perf.T("hud_health"), perf.P("health"):
-            if not self.legacy_health and not _ABL_NOHPBAR:
-                self._argon_health(out, t)
+            if not self.layout.legacy and not _ABL_NOHPBAR:
+                self._component(out, "health", self._argon_health, t)
         with perf.T("hud_keys"):
-            if self.legacy_keys:
-                self._legacy_key_overlay(out, t)
+            if self.layout.legacy:
+                self._component(out, "keys", self._legacy_key_overlay, t)
             else:
-                self._argon_key_overlay(out, t)
+                self._component(out, "keys", self._argon_key_overlay, t)
         with perf.T("hud_hit_error"):
-            self._hit_error(out, t)
+            self._component(out, "hit_error", self._hit_error, t)
         # settings-surface house elements (both component paths)
         with perf.T("hud_house"):
-            self._mod_pills(out, t)
-            self._hit_counter(out, t)
-            self._pp_counter(out, t)
+            self._grade_extra(out, t)
+            self._component(out, "mods", self._mod_pills, t)
+            self._component(out, "hits", self._hit_counter, t)
+            self._component(out, "pp", self._pp_counter, t)
             self._aim_error(out, t)
             self._watermark(out)
             self._break_flash(out, t)
-            if self.legacy_health:
+            if self.layout.legacy:
                 # stable draws the scorebar in FRONT of everything (LegacySkin's
                 # "hacky full screen area health bars" comment) — last.
-                self._legacy_health(out, t)
+                self._component(out, "health", self._legacy_health, t)
         perf.count("hud_sprites", len(out))
         if out:
             self.spr.draw(out)
@@ -2084,10 +2057,15 @@ class StdHud:
         # classic total shows all 7–8 digits, each backed by its own
         # wireframe cell; the run right-aligns at x=250 growing LEFTWARD.
         text = str(max(score, 0))
+        # Native counters grow leftward. At extreme totals fit the whole
+        # run within its anchored area instead of losing leading digits.
+        n = max(ARGON_SCORE_DIGITS, len(text))
+        height = ARGON_DIGIT_H * es
+        width = self._argon_seg_width(n, height)
+        height *= min(1.0, (ARGON_SCORE_RIGHT_X-8)*es/max(width,1))
         self._argon_seg_run(
             out, text, ARGON_SCORE_RIGHT_X * es, ARGON_SCORE_TOP_Y * es,
-            ARGON_DIGIT_H * es, self.op,
-            wire_n=max(ARGON_SCORE_DIGITS, len(text)))
+            height, self.op, wire_n=n)
 
     def _argon_accuracy(self, out, t: float) -> None:
         """ArgonAccuracyCounter: TopRight (-20, 20) — whole part + '.dd'
@@ -2129,9 +2107,6 @@ class StdHud:
         label_left = whole_right - w_whole
         self._lrun(out, "ACCURACY", label_left, top, ARGON_LABEL_H * es,
                    BLUE0, 0.95 * self.op)
-        if s.show_grade:
-            self._grade_badge(out, t, label_left - 14.0 * es,
-                              num_top + h / 2.0)
 
     def _argon_combo(self, out, t: float) -> None:
         """ArgonComboCounter: BottomLeft (36, -66) ×1.3 — '<n>x' with the
@@ -2411,38 +2386,52 @@ class StdHud:
         """LegacyScoreCounter (TopRight ×0.96, margin 10, 6 leading
         digits, 1 s Easing.Out roll) + LegacyAccuracyCounter (×0.576,
         margins 9/17, '0.00%') + LegacySongProgress (the pie left of the
-        accuracy) + the grade badge."""
+        accuracy). The R3D grade is laid out separately."""
         s = self.s
-        if not s.show_score:
-            return
         es = self.es
         score = int(round(self.data.score_at(t, LEGACY_SCORE_ROLL_MS)
                           * self._pin))
         text = f"{max(score, 0):06d}"
         right = self.ui_w_l - LEGACY_SCORE_MARGIN_X * es
-        sw, sh = self._legacy_text(
-            out, "score", text, right, 0.0, LEGACY_SCORE_SCALE * es,
-            self.op)
+        sw, sh = self._legacy_text_size("score", text, LEGACY_SCORE_SCALE * es)
+        # Preserve native anchors. Fit only pathological oversized fonts to
+        # the viewport, keeping every digit rather than clipping/truncating.
+        fit = min(1.0, max(right - 8*es, 1) / max(sw, 1),
+                  180*es / max(sh, 1))
+        score_start = len(out)
+        self._legacy_text(out, "score", text, right, 0.0,
+                          LEGACY_SCORE_SCALE * es * fit, self.op)
+        score_sprites = out[score_start:]
+        score_bounds = HudRect.sprites(score_sprites, self.lk)
+        sh = score_bounds.bottom
         acc = self.data.acc_at(t, LEGACY_ACC_ROLL_MS)
         disp = acc_display_value(acc,
                                  getattr(self.data, "lazer_display", False))
         acc_text = f"{disp:.2f}%"
         acc_right = self.ui_w_l - LEGACY_ACC_MARGIN[0] * es
         acc_top = sh + LEGACY_ACC_MARGIN[1] * es
-        aw, ah = self._legacy_text(
-            out, "score", acc_text, acc_right, acc_top,
-            LEGACY_ACC_SCALE * es, 0.95 * self.op)
-        # LegacySongProgress pie: right edge at (acc left − 18)
+        aw, ah = self._legacy_text_size("score", acc_text, LEGACY_ACC_SCALE * es)
+        reserve = (LEGACY_PIE_SIZE + LEGACY_PIE_GAP + 8) * es
+        acc_fit = min(1.0, max(acc_right-reserve, 1)/max(aw, 1),
+                      108*es/max(ah, 1))
+        acc_start = len(out)
+        self._legacy_text(out, "score", acc_text, acc_right, acc_top,
+                          LEGACY_ACC_SCALE * es * acc_fit, 0.95 * self.op)
+        self._remember("score", score_sprites)
+        self._remember("accuracy", out[acc_start:])
+        accuracy = self.bounds["accuracy"]
+        if not s.show_score:
+            # Progress has its own flag. Measure its native dependency but
+            # suppress only score/accuracy sprites, not the progress pie.
+            del out[score_start:]
+            self.bounds.pop("score")
+            self.bounds.pop("accuracy")
+        # The native pie is independent of the project's live grade.
         if getattr(s, "show_progress", True):
             pie_d = LEGACY_PIE_SIZE * es
-            pie_cx = acc_right - aw - LEGACY_PIE_GAP * es - pie_d / 2.0
-            pie_cy = acc_top + ah / 2.0
-            self._legacy_pie(out, t, pie_cx, pie_cy, pie_d)
-            badge_right = pie_cx - pie_d / 2.0 - 12.0 * es
-        else:
-            badge_right = acc_right - aw - 12.0 * es
-        if s.show_grade:
-            self._grade_badge(out, t, badge_right, acc_top + ah / 2.0)
+            pie_cx = accuracy.left - LEGACY_PIE_GAP * es - pie_d / 2.0
+            pie_cy = (accuracy.top + accuracy.bottom) / 2.0
+            self._component(out, "progress", self._legacy_pie, t, pie_cx, pie_cy, pie_d)
 
     def _legacy_pie(self, out, t: float, cx_l: float, cy_l: float,
                     d_l: float) -> None:
@@ -2553,8 +2542,7 @@ class StdHud:
         hp_now = _clamp01(damped(self.health.hp_at, t, 40.0))
 
         def sk_ok(name: str) -> bool:
-            return (sk is not None and sk.has(name)
-                    and name not in sk.empty)
+            return sk is not None and sk.has(name)
 
         # background
         if sk_ok("scorebar-bg"):
@@ -2656,13 +2644,13 @@ class StdHud:
         n = len(channels)
         cell = LEGACY_KEY_CELL * es
         gap = LEGACY_KEY_SPACING * es
-        total_h = n * cell + (n - 1) * gap
-        cy0 = LAZER_UI_HEIGHT / 2.0 - total_h / 2.0
+        # OsuLegacySkinTransformer: CentreRight / TopRight, (0,-40)*1.6.
+        # The container's top is fixed; changing 2 -> 4 keys grows downward.
+        cy0 = LAZER_UI_HEIGHT / 2.0 - 64.0 * es
         right = self.ui_w_l
 
         def sk_ok(name: str) -> bool:
-            return (sk is not None and sk.has(name)
-                    and name not in sk.empty)
+            return sk is not None and sk.has(name)
 
         # rotated background strip (Scale (1.05, 1), Rotation 90)
         if sk_ok("inputoverlay-background"):
@@ -2675,8 +2663,7 @@ class StdHud:
         strip_len = bw * 1.05 * es
         strip_w = bh * es
         out.append(Sprite((right - strip_w / 2.0) * lk,
-                          (cy0 + LEGACY_KEY_FLOW_OFFSET[1] * es
-                           + strip_len / 2.0 - 4.0 * es) * lk,
+                          (cy0 + strip_len / 2.0) * lk,
                           strip_len * lk, strip_w * lk, bg_key,
                           (1, 1, 1, self.op), rotation=math.pi / 2.0))
         io_text = (0, 0, 0)
@@ -2735,10 +2722,41 @@ class StdHud:
     # ==================== shared elements ==========================================
 
     def _top_right_stack_y(self) -> float:
-        """Top of the right-edge secondary stack (mod pills, hit counter)
-        — under the accuracy block (Argon) or the score+acc+pie block
-        (legacy), in lazer px."""
-        return (104.0 if self.legacy_score else 68.0) * self.es
+        """R3D extras flow below actual native readout/grade bounds.
+
+        HUDOverlay.UpdateAfterChildren similarly derives secondary flow
+        offsets from native drawable bounds, excluding oversized Legacy HP.
+        """
+        names = ('score', 'accuracy', 'progress', 'grade') if self.layout.legacy else ('accuracy', 'grade')
+        return max((self.bounds[n].bottom for n in names if n in self.bounds),
+                   default=8.0*self.es) + 12.0*self.es
+
+    def _grade_extra(self, out, t: float) -> None:
+        """Live grade is an R3D extra, below native readouts, never a pie slot.
+
+        Limit oversized rank artwork to a 48x32 slot; procedural rank text
+        uses the same independent slot. Enabling progress cannot move grade.
+        """
+        if not self.s.show_grade or t < self._first_ev_t:
+            return
+        names = ('score', 'accuracy') if self.layout.legacy else ('accuracy',)
+        top = max((self.bounds[n].bottom for n in names if n in self.bounds),
+                  default=8*self.es) + 12*self.es
+        # The pie can be taller than a tiny accuracy font, so reserve its
+        # nominal height even when progress is disabled (stable grade slot).
+        acc = self.bounds.get('accuracy')
+        if self.layout.legacy and acc is not None:
+            top = max(top, (acc.top+acc.bottom)/2 + LEGACY_PIE_SIZE*self.es/2 + 12*self.es)
+        self._component(out, 'grade', self._grade_badge, t,
+                        self._extra_right(top, 32*self.es), top+16*self.es)
+
+    def _extra_right(self, top: float, height: float) -> float:
+        """Secondary right-edge flow clears the profile's key column/row."""
+        right = self.ui_w_l - 20*self.es
+        keys = self.bounds.get('keys')
+        if keys is not None and top < keys.bottom and top+height > keys.top:
+            right = min(right, keys.left-12*self.es)
+        return right
 
     def _mod_pills(self, out, t: float) -> None:
         """§4.6 Gameplay.Mods: procedural rounded pills with the active mod
@@ -2761,13 +2779,19 @@ class StdHud:
         row_gap = MOD_PILL_ROW_GAP * es
         top0 = self._top_right_stack_y()
         right = self.ui_w_l - 20.0 * es
-        max_row_w = MOD_PILL_ROW_MAX_W * es
+        max_row_w = min(MOD_PILL_ROW_MAX_W * es, right-8*es)
         # measure each pill, then pack (in display order) into right-aligned
         # rows that never exceed max_row_w — wrap/stack downward, keeping the
         # mods' reading order left-to-right within each row.
         widths = [self._lrun_width(p.text, text_h) + 2.0 * pad
                   for p in self._mod_acrs]
         rows = pack_mod_pill_rows(widths, gap, max_row_w)
+        stack_h = len(rows)*h + max(len(rows)-1, 0)*row_gap
+        right = self._extra_right(top0, stack_h)
+        max_row_w = min(max_row_w, right-8*es)
+        rows = pack_mod_pill_rows(widths, gap, max_row_w)
+        stack_h = len(rows)*h + max(len(rows)-1, 0)*row_gap
+        right = self._extra_right(top0, stack_h)
         for r, idxs in enumerate(rows):
             top = top0 + r * (h + row_gap)
             total = sum(widths[i] for i in idxs) + gap * max(len(idxs) - 1, 0)
@@ -2803,7 +2827,7 @@ class StdHud:
             rows = max(self._mod_rows, 1)
             stack_h = rows * MOD_PILL_H + (rows - 1) * MOD_PILL_ROW_GAP
             top += (stack_h + 8.0) * es
-        right = self.ui_w_l - 20.0 * es
+        right = self._extra_right(top, len(counts)*row_h)
         for i, (label, n, color) in enumerate(
                 zip(HITC_LABELS, counts, colors)):
             y = top + i * row_h
@@ -2831,7 +2855,13 @@ class StdHud:
         num = str(int(round(v)))
         h = PP_DIGIT_H * es
         x = PP_LEFT_X * es
+        # R3D's pp remains top-left. Clear the Argon score wedge as well
+        # as the HP, and avoid adopting a skin's full-screen scorebar art
+        # as a layout obstacle (the same native health exclusion).
         y = PP_TOP_Y * es
+        if not self.layout.legacy:
+            y = max(y, max((self.bounds[n].bottom for n in ('score','health')
+                            if n in self.bounds), default=0) + 12*es)
         w = self._lrun(out, num, x, y, h, (1.0, 1.0, 1.0),
                        0.95 * self.op, mono=True)
         self._lrun(out, "pp", x + w + 3.0 * es, y + h * 0.32, h * 0.62,
@@ -2929,14 +2959,21 @@ class StdHud:
         es = self.es
         h = WATERMARK_H * es
         w = self._lrun_width(text, h)
-        self._lrun(out, text, self.ui_w_l - w - 8.0 * es,
-                   LAZER_UI_HEIGHT - h - 4.0 * es, h,
+        top = LAZER_UI_HEIGHT - h - 4.0 * es
+        # With Argon progress enabled this extra sits ABOVE its info row.
+        progress = self.bounds.get('progress')
+        if not self.layout.legacy and progress is not None:
+            top = min(top, progress.top - h - 6*es)
+        keys = self.bounds.get('keys')
+        if keys is not None and top+h > keys.top and top < keys.bottom:
+            top = keys.top - h - 6*es
+        self._lrun(out, text, self.ui_w_l - w - 8.0 * es, top, h,
                    (1.0, 1.0, 1.0), 0.5 * self.op)
 
     def _grade_badge(self, out, t: float, right_x_l: float,
                      cy_l: float) -> None:
         """In-HUD grade: the skin's ranking-*-small badge when it ships
-        one (legacy small grades, native size), the procedural coloured
+        one (legacy small grades fitted to the R3D extra slot), the procedural coloured
         text otherwise. renderer_default_font_and_ranks forces the
         procedural text even under a skin. Behind show_grade; silver
         (HD/FL) variants are not simulated."""
@@ -2946,9 +2983,11 @@ class StdHud:
         sk = self.sk
         el = GRADE_RANKING_ELEMENT.get(grade)
         if (not self.force_default and sk is not None and el is not None
-                and sk.has(el) and el not in sk.empty):
+                and sk.has(el)):
             w, h = sk.size[el]
             es, lk = self.es, self.lk
+            fit = min(1.0, 48/max(w,1), 32/max(h,1))
+            w, h = w*fit, h*fit
             out.append(Sprite((right_x_l - w * es / 2.0) * lk, cy_l * lk,
                               w * es * lk, h * es * lk, f"sk_{el}",
                               (1, 1, 1, 0.95 * self.op)))
