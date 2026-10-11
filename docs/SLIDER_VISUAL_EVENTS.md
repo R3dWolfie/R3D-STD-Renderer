@@ -4,8 +4,9 @@
 frozen **before** replay-header reconciliation. It now combines the original
 raw R3D observations with a chronological, source-derived drawable model.
 Neither stream is an observed osu!lazer runtime trace. Score, combo,
-`PartOutcome`, tracking intervals, hitsounds and scene consumers retain their
-existing behaviour. The scene does not consume the new events yet.
+`PartOutcome`, tracking intervals and hitsounds retain their existing behaviour.
+The scene now consumes model events for follow, body and marker animations;
+see [SLIDER_VISUAL_ANIMATIONS.md](SLIDER_VISUAL_ANIMATIONS.md).
 
 ## Schema and provenance
 
@@ -167,7 +168,7 @@ stacking and replay interpolation are the existing R3D input contract, not a
 new osu!lazer curve/conversion port. Even when durations coincide, native
 geometry/input equality has not been proven.
 
-A future consumer must select `source_model` events and consider model-scoped
+Visual consumers must select `source_model` events and consider model-scoped
 gaps. Use forwarded published tracking edges for press/release, `part_judged`
 for tick/break/tail, `repeat_freeze.time_ms` for arrow freeze, model head hit for
 body progression, and `slider_judged` for parent completion. Never silently

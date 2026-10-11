@@ -21,6 +21,8 @@ MODULES = [
     "tests.test_ruleset",
     "tests.test_slider_visual_events",
     "tests.test_slider_chronological",
+    "tests.test_slider_visual_animation",
+    "tests.test_slider_visual_render",
     "tests.test_health",
     "tests.test_slider_body",
     "tests.test_playfield_pipeline",
