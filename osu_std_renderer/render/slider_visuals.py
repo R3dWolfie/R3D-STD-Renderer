@@ -77,6 +77,55 @@ class FollowState:
     alpha: float
 
 
+def ball_variant(skin):
+    """Resolve the loaded ball component independently of the follow asset.
+
+    SkinElements.has includes supplied blank textures and resolved sliderb0
+    frames. Companion-only assets do not select LegacySliderBall.
+    """
+    return "argon" if skin is None else "legacy" if skin.has("sliderb") else "default"
+
+
+@dataclass(frozen=True)
+class BallAnimation:
+    """Intrinsic child opacity; draw_slider_layers applies parent alpha once.
+
+    A known result uses its notification prefix and hit-state transform
+    anchor. Missing results have an explicitly approximate nominal visual
+    retirement, without producing or modifying any model callbacks. A known
+    result with an unknown anchor cannot support a source-defined fade.
+    """
+    start: float
+    end: float
+    parent: object = None
+    autoplay: bool = False
+
+    @property
+    def provenance(self):
+        if self.parent is None:
+            return "approximate_debug_no_replay" if self.autoplay else "approximate_nominal_retirement"
+        anchor = self.parent.transform_time_ms
+        return ("unsupported_parent_anchor" if anchor is None or not math.isfinite(anchor)
+                else "source_model")
+
+    def at(self, time, variant, active_alpha=1.0):
+        if variant not in ("argon", "default", "legacy"):
+            raise ValueError(f"Unknown ball variant: {variant}")
+        if time < self.start:
+            return 0.0
+        parent = self.parent
+        if parent is not None:
+            anchor = parent.transform_time_ms
+            if time < parent.time_ms or anchor is None or not math.isfinite(anchor):
+                return active_alpha
+        else:
+            anchor = self.end  # Visual-only fallback; never a source callback.
+        if variant == "legacy":
+            return active_alpha if time < anchor else 0.0
+        duration, easing = (50.0, "out_quint") if variant == "argon" else (112.5, "out")
+        return active_alpha * (1 - ease((time - anchor) / duration, easing))
+
+
 class FollowAnimation:
     """Compile bounded channel snapshots once; queries never change history.
 
@@ -174,6 +223,7 @@ class SliderVisualState:
         self.freezes = {e.part_index: e.time_ms for e in self.events if e.kind == "repeat_freeze"}
         self.tail = next((e for e in self.events if e.kind == "part_judged" and e.part_kind == "tail"), None)
         self.follow = FollowAnimation(timeline, start, end, variant, autoplay)
+        self.ball = BallAnimation(start, end, self.parent, autoplay)
         self.retire = max(end + 240, self.follow.finish,
                           (self.parent.time_ms + 240) if self.parent else end)
 

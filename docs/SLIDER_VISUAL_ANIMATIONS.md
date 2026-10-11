@@ -59,8 +59,46 @@ An unresolved/missing timeline never invents release, tail or parent events.
 For conservative retirement only, absent parent data gets a nominal end +
 240 ms fade. A supplied parent without an anchor is held until retirement;
 it does not acquire a guessed anchor. Debug no-replay mode explicitly assumes
-perfect play without writing fabricated model records. The ball's existing
-raw tracking dim and 50 ms fade are separate from follow animation.
+perfect play without writing fabricated model records.
+
+## Ball child lifecycle
+
+`BallAnimation` evaluates intrinsic ball opacity separately from the follow
+channels. It uses `slider_judged.time_ms` to gate visibility of the result,
+then evaluates the fade at `transform_time_ms`. A delayed result does not
+change frames before its notification, even when the anchor precedes it.
+Head success, parent hit/miss, snaking and merge settings do not gate this fade.
+
+| Resolved ball | Child fade | Source |
+| --- | --- | --- |
+| No skin: Argon | 50 ms OutQuint | `ArgonSliderBall.cs:102` |
+| Active skin without loaded `sliderb`: Default | 112.5 ms OutQuad | `DefaultSliderBall.cs:92` |
+| Loaded `sliderb` or undashed `sliderb0` frames: Legacy | Instant | `LegacySliderBall.cs:141` |
+
+The resource test is independent of `sliderfollowcircle`. Transparent loaded
+ball assets still select Legacy and suppress the procedural fallback.
+`sliderb-nd`/`sliderb-spec` alone do not select Legacy. Existing resource
+priority, @2x sizing, frame phase, tint and detached opacity (.35) remain;
+tracking and ball position freeze at nominal end during the brief child fade.
+The parent alpha is multiplied **once**, in `draw_slider_layers`, rather than
+being included in child opacity. Follow, tail, head and repeat lifecycles stay
+separate and can remain visible after the Legacy ball has disappeared.
+
+Missing parent data uses `approximate_nominal_retirement`, a visual-only fade
+at nominal end with the selected child envelope. Debug no-replay uses
+`approximate_debug_no_replay`. Neither creates events or changes gap records.
+A supplied parent with an unavailable/non-finite anchor is labelled
+`unsupported_parent_anchor` and receives no guessed child fade; existing
+scene retirement remains conservative. Supporting that case requires the
+producer to supply an independently justified `transform_time_ms`, already
+present in the contract. It must not be inferred from reconciled outcomes.
+
+This end-opacity correction retains existing entrance/scale/icon/rotation
+approximations and does not add Legacy companion layers or change animation
+cadence. It is source-conforming consumption of the chronological surrogate,
+not proof of native callback or pixel parity.
+
+## Endpoint components
 
 Legacy final tails stay at their true final endpoint for every span parity.
 Repeat circle pieces share their repeat's moving/frozen position beneath its
@@ -111,6 +149,16 @@ parser; both captures use identical decoded inputs. Run the same script with
 `PYTHONPATH` pointing at an archive of the pre-change commit for `--label before`.
 See the untracked Stage 3 report for exact commands, hashes and owner QA notes.
 
+For ball-specific evidence, `tests/capture_slider_ball_lifecycle.py` adds a
+distinct visible `legacy-ball` fixture while leaving the old follow-only
+`legacy` fixture intact. It captures Argon, Default ball with Legacy follow,
+Legacy ball, and four real replay objects on an absolute map-clock 60 fps grid,
+including a delayed parent. Manifests record notification/anchor, ball
+resources, sprite IDs and effective alpha. Pass `--repo` with the real input
+checkout and separate `--label before`/`after`; run the script against an
+archived baseline via `PYTHONPATH` for the before capture. Existing owner
+inputs and Stage 3 artifacts are never overwritten.
+
 ## Source references
 
 Inspected local `ppy/osu` commit `8a942790906a37930a0f55c5d27e498159835885`:
@@ -120,6 +168,10 @@ Inspected local `ppy/osu` commit `8a942790906a37930a0f55c5d27e498159835885`:
   `Legacy/LegacyFollowCircle.cs`: callback transforms and component visuals.
 - `Legacy/OsuLegacySkinTransformer.cs`, `osu.Game/Skinning/LegacySkinExtensions.cs`:
   resource naming, cadence, native dimensions and max-size crop.
+- `Argon/ArgonSliderBall.cs:102`, `Default/DefaultSliderBall.cs:92`,
+  `Legacy/LegacySliderBall.cs:141`: independent ball child fade transforms.
+  `osu.Game/Rulesets/Objects/Drawables/DrawableHitObject.cs:682`: nominal start
+  and result/fallback-end hit-state anchors; `:483` rebuilds hit-state transforms.
 - `Objects/Drawables/DrawableSliderBall.cs`, `DrawableSlider.cs`,
   `DrawableSliderTail.cs`, `DrawableSliderRepeat.cs`, `DrawableOsuHitObject.cs`:
   layers, body/parent fades, endpoints, freeze and ApplyRepeatFadeIn.

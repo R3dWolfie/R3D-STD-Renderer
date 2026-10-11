@@ -10,11 +10,11 @@ import numpy as np
 from PIL import Image
 
 from osu_std_renderer.render.slider_visuals import (
-    FollowAnimation, SliderVisualState, repeat_alpha, repeat_fade_in,
+    BallAnimation, ball_variant, FollowAnimation, SliderVisualState, repeat_alpha, repeat_fade_in,
 )
 from osu_std_renderer.render.scene import snake_range
 from osu_std_renderer.render.skin_elements import SkinElements
-from osu_std_renderer.ruleset.slider_visual import SliderVisualEvent, SliderVisualTimeline
+from osu_std_renderer.ruleset.slider_visual import SliderVisualEvent, SliderVisualGap, SliderVisualTimeline
 from osu_std_renderer.skin.skin import Skin
 from tests.test_skin_elements import FakeRenderer
 
@@ -44,6 +44,141 @@ def part(time, kind="tick", hit=True, sequence=0, anchor=None, index=1):
 
 def close(actual, expected):
     assert abs(actual - expected) < 1e-9, (actual, expected)
+
+
+def test_ball_exact_child_envelopes_at_anchor_half_completion_and_epsilon():
+    ball = BallAnimation(1000, 2000, event(2000, "slider_judged", hit=True))
+    for variant, duration, halfway in (("argon", 50, 1/32), ("default", 112.5, 1/4)):
+        for active in (1, .35):
+            assert ball.at(999, variant, active) == 0
+            assert ball.at(1999, variant, active) == active
+            assert ball.at(2000, variant, active) == active
+            close(ball.at(2000 + duration/2, variant, active), active * halfway)
+            assert ball.at(2000 + duration, variant, active) == 0
+            assert ball.at(2000 + duration + 1e-6, variant, active) == 0
+    assert ball.at(2000 - 1e-6, "legacy") == 1
+    assert ball.at(2000, "legacy") == ball.at(2000 + 1e-6, "legacy") == 0
+
+
+def test_ball_parent_body_and_follow_are_independent_channels():
+    events = timeline(press(), event(1000, "head_judged", hit=True),
+                      part(2000, "tail"), event(2000, "slider_judged", hit=True))
+    state = SliderVisualState(events, 1000, 2000, "legacy")
+    assert state.ball.at(2000, "legacy") == 0
+    close(state.parent_alpha(2120), .5)
+    close(state.body_alpha(2020, 600, 400, True), (1 - 20/240)*.5)
+    assert state.body_alpha(2040, 600, 400, True) == 0
+    assert state.follow.at(2120).alpha > 0
+    assert state.parent_alpha(2240) == 0
+    close(state.ball.at(2025, "argon") * state.parent_alpha(2025), (1/32)*(1-25/240))
+    close(state.ball.at(2056.25, "default") * state.parent_alpha(2056.25), .25*(1-56.25/240))
+
+
+def test_ball_delayed_parent_prefix_backdated_anchor_and_seek_idempotence():
+    # The actual parent notification is later than its transform anchor.
+    state = SliderVisualState(timeline(event(2050, "slider_judged", anchor=2000, hit=False)),
+                              1000, 2000, "legacy")
+    queries = (2100, 2049, 2050, 2000, 2049, 999, 2200, 2050)
+    for variant in ("argon", "default", "legacy"):
+        expected = {t: state.ball.at(t, variant) for t in sorted(set(queries))}
+        assert [state.ball.at(t, variant) for t in queries] == [expected[t] for t in queries]
+        assert state.ball.at(2049, variant) == 1
+    assert state.ball.at(2050, "legacy") == state.ball.at(2050, "argon") == 0
+    close(state.ball.at(2050, "default"), (1 - 50/112.5)**2)
+    assert state.parent_alpha(2049) == 1
+    close(state.parent_alpha(2050), 1-50/240)
+
+
+def test_ball_parent_future_anchor_respects_both_notification_and_anchor():
+    ball = BallAnimation(1000, 2000, event(1950, "slider_judged", anchor=2000))
+    assert ball.at(1999, "legacy") == 1
+    assert ball.at(2000, "legacy") == 0
+    assert ball.at(2000, "default") == 1
+
+
+def test_ball_missing_parent_gap_and_debug_fallbacks_do_not_invent_events():
+    missing = dataclasses.replace(timeline(press()), unavailable=(
+        SliderVisualGap("slider_judged", "replay_ended", provenance="source_model"),))
+    for events, autoplay, provenance in ((missing, False, "approximate_nominal_retirement"),
+                                         (None, False, "approximate_nominal_retirement"),
+                                         (None, True, "approximate_debug_no_replay")):
+        state = SliderVisualState(events, 1000, 2000, "default", autoplay)
+        snapshot = tuple(state.events)
+        assert state.parent is None and state.ball.provenance == provenance
+        assert state.ball.at(2000, "legacy") == 0
+        assert state.ball.at(2025, "argon") == 1/32
+        assert state.ball.at(2056.25, "default") == .25
+        assert state.events == snapshot
+        if events is not None:
+            assert events.unavailable == missing.unavailable
+
+
+def test_ball_unknown_anchor_is_unsupported_and_never_guessed_from_result():
+    for anchor in (None, math.inf, math.nan):
+        parent = dataclasses.replace(event(2050, "slider_judged", hit=True,
+                                           result_time_ms=2000), transform_time_ms=anchor)
+        ball = BallAnimation(1000, 2000, parent)
+        assert ball.provenance == "unsupported_parent_anchor"
+        for variant in ("argon", "default", "legacy"):
+            assert ball.at(2100, variant, .35) == .35
+
+
+def test_ball_parent_miss_and_follow_sequence_cannot_resurrect_ball():
+    for hit in (True, False):
+        events = timeline(press(), event(2000, "slider_judged", sequence=1, hit=hit),
+                          press(2000, sequence=2), part(2100, sequence=3))
+        state = SliderVisualState(events, 1000, 2000, "legacy")
+        assert state.ball.at(2000, "legacy") == 0
+        assert state.ball.at(2200, "default") == 0
+        assert state.ball.at(2200, "argon") == 0
+        assert state.follow.at(2100).alpha > 0
+
+
+def test_ball_variant_resource_matrix_is_independent_of_follow():
+    assert ball_variant(None) == "argon"
+    for ball_name in (None, "sliderb.png", "sliderb0.png", "sliderb1.png",
+                      "sliderb-nd.png", "sliderb-spec.png"):
+        for follow in (False, True):
+            for blank in (False, True):
+                with tempfile.TemporaryDirectory() as folder:
+                    root = Path(folder)
+                    if ball_name:
+                        Image.new("RGBA", (128, 128), (255, 0, 0, 0 if blank else 255)).save(root / ball_name)
+                    if follow:
+                        Image.new("RGBA", (256, 256), (255, 255, 255, 255)).save(root / "sliderfollowcircle.png")
+                    skin = SkinElements(Skin(skin_dir=root), FakeRenderer())
+                    expected = "legacy" if ball_name in ("sliderb.png", "sliderb0.png") else "default"
+                    assert ball_variant(skin) == expected
+                    if expected == "legacy" and blank:
+                        assert "sliderb" in skin.empty
+                    assert skin.has("sliderfollowcircle") == follow
+
+
+def test_ball_source_priority_first_frame_and_2x_resolution_are_preserved():
+    with tempfile.TemporaryDirectory() as folder:
+        root = Path(folder)
+        current, fallback, local = (root / name for name in ("current", "fallback", "local"))
+        for path in (current, fallback, local):
+            path.mkdir()
+        Image.new("RGBA", (128, 128), (255, 255, 255, 255)).save(local / "sliderb.png")
+        Image.new("RGBA", (256, 256), (0, 255, 0, 255)).save(fallback / "sliderb0@2x.png")
+        Image.new("RGBA", (128, 128), (0, 0, 255, 255)).save(local / "sliderb1.png")
+        resources = Skin(skin_dir=current, fallback_dir=fallback, local_dir=local)
+        frames = resources.find_frames("sliderb")
+        assert len(frames) == 1 and frames[0].path == fallback / "sliderb0@2x.png"
+        elements = SkinElements(resources, FakeRenderer())
+        assert ball_variant(elements) == "legacy" and elements.size["sliderb"] == (128, 128)
+        # A higher-priority single beats fallback animation; blank still wins.
+        Image.new("RGBA", (64, 64), (0, 0, 0, 0)).save(current / "sliderb.png")
+        resources = Skin(skin_dir=current, fallback_dir=fallback, local_dir=local)
+        assert resources.find_frames("sliderb")[0].path == current / "sliderb.png"
+        elements = SkinElements(resources, FakeRenderer())
+        assert ball_variant(elements) == "legacy" and "sliderb" in elements.empty
+        # Same-source frame zero wins the single and stops at a missing frame.
+        Image.new("RGBA", (128, 128), (255, 0, 0, 255)).save(current / "sliderb0.png")
+        Image.new("RGBA", (128, 128), (0, 255, 0, 255)).save(current / "sliderb2.png")
+        resources = Skin(skin_dir=current, fallback_dir=fallback, local_dir=local)
+        assert [f.path for f in resources.find_frames("sliderb")] == [current / "sliderb0.png"]
 
 
 def test_modern_press_scale_alpha_out_quint_and_variant_identity():

@@ -18,7 +18,7 @@ from osu_std_renderer.render.playfield import PlayfieldCamera
 from osu_std_renderer.render.scene import StdScene, snake_range
 from osu_std_renderer.render.skin_elements import SkinElements
 from osu_std_renderer.render.slider_body import SliderBodyRenderer, sub_path
-from osu_std_renderer.render.slider_visuals import draw_slider_layers
+from osu_std_renderer.render.slider_visuals import ball_variant, draw_slider_layers
 from osu_std_renderer.render.textures import TextureBank, bake_argon_follow
 from osu_std_renderer.ruleset import JudgmentKind, StdRuleset
 from osu_std_renderer.skin.skin import Skin
@@ -50,6 +50,227 @@ def _layers():
     follow = [Sprite(32, 32, 44, 44, color=(0, 1, 0, 1), additive=True)]
     ball = [Sprite(32, 32, 20, 20, color=(0, 0, 1, 1))]
     return beneath, follow, ball
+
+
+def test_legacy_ball_disappears_while_follow_and_parent_continue():
+    with tempfile.TemporaryDirectory() as folder:
+        root = Path(folder)
+        Image.new("RGBA", (128, 128), (255, 0, 0, 255)).save(root / "sliderb.png")
+        Image.new("RGBA", (256, 256), (0, 255, 0, 255)).save(root / "sliderfollowcircle.png")
+        scene, renderer = _scene(skin_dir=root)
+        try:
+            obj = scene.objects[0]
+            end = obj.get_end_time()
+            captured = []
+            original = renderer.draw
+            def spy(sprites):
+                captured.extend(sprites)
+                original(sprites)
+            renderer.draw = spy
+            scene.frame_rgb(end + 60)
+            assert not any(s.texture_key.startswith("sk_sliderb") and s.color[3] > 0
+                           for s in captured)
+            assert any(s.texture_key == "sk_sliderfollowcircle" and s.color[3] > 0
+                       for s in captured)
+            assert scene._slider_visual(obj).parent_alpha(end + 60) == .75
+        finally:
+            renderer.release()
+
+
+def test_actual_gl_ball_child_and_parent_opacity_compose_once():
+    for variant, offset, intrinsic in (("argon", 25, 1/32), ("default", 56.25, .25)):
+        with tempfile.TemporaryDirectory() as folder:
+            scene, renderer = _scene(skin_dir=Path(folder) if variant == "default" else None)
+            try:
+                obj = scene.objects[0]
+                end = obj.get_end_time()
+                time = end + offset
+                scene._advance(time)
+                ball = scene._slider_ball_sprites(obj, time, (1, 0, 0))
+                assert ball and all(abs(s.color[3] - intrinsic) < 1e-9 for s in ball)
+                actual = []
+                original = renderer.draw
+                def spy(sprites):
+                    actual.extend(sprites)
+                    original(sprites)
+                renderer.draw = spy
+                # The procedural disc has existing texture shading. Compare
+                # the same raster/position at full opacity, not an assumed
+                # solid-red texture; the alpha multiplication is independent.
+                if variant == "default":
+                    renderer.begin((0, 0, 0))
+                    original([dataclasses.replace(s, color=(*s.color[:3], 1)) for s in ball])
+                    x, y = scene.cam.to_screen(*obj.get_stacked_position_at(end, scene.diff))
+                    full_red = int(renderer.read_rgb()[round(y), round(x), 0])
+                renderer.begin((0, 0, 0))
+                parent_alpha = scene._slider_visual(obj).parent_alpha(time)
+                draw_slider_layers(renderer, [], [], ball, parent_alpha)
+                assert all(abs(s.color[3] - intrinsic * (1-offset/240)) < 1e-9 for s in actual)
+                pixels = renderer.read_rgb()
+                assert pixels.max() > 0
+                if variant == "default":
+                    x, y = scene.cam.to_screen(*obj.get_stacked_position_at(end, scene.diff))
+                    assert abs(int(pixels[round(y), round(x), 0]) - full_red*intrinsic*parent_alpha) <= 1
+                renderer.begin((0, 0, 0))
+                draw_slider_layers(renderer, [], [], scene._slider_ball_sprites(obj, end+120, (1, 0, 0)), .5)
+                assert renderer.read_rgb().max() == 0
+            finally:
+                renderer.release()
+
+
+def test_actual_gl_legacy_pixels_vanish_without_cutting_follow():
+    with tempfile.TemporaryDirectory() as folder:
+        root = Path(folder)
+        Image.new("RGBA", (128, 128), (255, 0, 0, 255)).save(root / "sliderb.png")
+        Image.new("RGBA", (256, 256), (0, 255, 0, 255)).save(root / "sliderfollowcircle.png")
+        scene, renderer = _scene(skin_dir=root)
+        try:
+            obj = scene.objects[0]
+            end = obj.get_end_time()
+            for time in (end-1, end, end+60):
+                scene._advance(time)
+                x, y = scene.cam.to_screen(*obj.get_stacked_position_at(min(time, end), scene.diff))
+                follow = scene._follow_sprites(obj, time, x, y, (1, 1, 1), 400)
+                ball = scene._slider_ball_sprites(obj, time, (1, 1, 1))
+                renderer.begin((0, 0, 0))
+                draw_slider_layers(renderer, [], follow, ball, scene._slider_visual(obj).parent_alpha(time))
+                pixels = renderer.read_rgb()
+                assert (pixels[..., 0].max() > 0) == (time < end)
+                assert pixels[..., 1].max() > 0
+        finally:
+            renderer.release()
+
+
+def test_ball_tracking_detachment_reacquisition_and_endpoint_stay_unchanged():
+    bm = _map("256,192,1000,2,0,L|376:192,1,120\n")
+    obj = bm.hit_objects[0]
+    frames = _frames([(1000, 256, 192, 4)] + _ball_frames(obj, 1010, 1250) +
+                     [(1260, 0, 0, 0)] + _ball_frames(obj, 1400, 1900))
+    scene, renderer = _scene(bm, frames)
+    try:
+        for time, alpha in ((1200, 1), (1300, .35), (1450, 1)):
+            scene.frame_rgb(time)
+            ball = scene._slider_ball_sprites(obj, time, (1, 0, 0))
+            assert all(s.color[3] == alpha for s in ball)
+            position = scene.cam.to_screen(*obj.get_stacked_position_at(time, scene.diff))
+            assert all((s.x, s.y) == position for s in ball)
+        end = obj.get_end_time()
+        scene.frame_rgb(end+25)
+        ball = scene._slider_ball_sprites(obj, end+25, (1, 0, 0))
+        assert all((s.x, s.y) == scene.cam.to_screen(*obj.get_stacked_position_at(end, scene.diff)) for s in ball)
+        assert scene._slider_ball_sprites(obj, end+50, (1, 0, 0)) == []
+        assert scene._slider_ball_sprites(obj, end+120, (1, 0, 0)) == []
+    finally:
+        renderer.release()
+
+
+def test_scene_delayed_parent_keeps_ball_until_notification_not_nominal_end():
+    bm = _map("256,192,1000,2,0,L|266:192,1,10\n")
+    obj = bm.hit_objects[0]
+    frames = _frames([(1120, 256, 192, 4), (1300, 266, 192, 4)])
+    with tempfile.TemporaryDirectory() as folder:
+        root = Path(folder)
+        Image.new("RGBA", (128, 128), (255, 0, 0, 255)).save(root / "sliderb.png")
+        scene, renderer = _scene(bm, frames, skin_dir=root)
+        try:
+            state = scene._slider_visual(obj)
+            assert state.parent.time_ms == 1120 and state.parent.transform_time_ms == 1050
+            for time, visible in ((1050, True), (1119, True), (1120, False), (1200, False)):
+                scene.frame_rgb(time)
+                ball = scene._slider_ball_sprites(obj, time, (1, 1, 1))
+                assert bool(ball) == visible
+            # The pure child query may be repeated/rewound without changing history.
+            assert scene._slider_ball_sprites(obj, 1119, (1, 1, 1))
+            assert not scene._slider_ball_sprites(obj, 1120, (1, 1, 1))
+        finally:
+            renderer.release()
+
+
+def test_ball_missing_and_no_replay_fallback_provenance_in_real_scene():
+    for no_replay, frames in ((True, []), (False, _frames([(1000, 256, 192, 4)])), (False, [])):
+        scene, renderer = _scene(frames=frames, no_replay=no_replay)
+        try:
+            obj = scene.objects[0]
+            state = scene._slider_visual(obj)
+            timeline = scene._verdict(obj).slider_visuals if not no_replay else None
+            snapshot = dataclasses.asdict(timeline) if timeline is not None else None
+            assert state.parent is None
+            expected = "approximate_debug_no_replay" if no_replay else "approximate_nominal_retirement"
+            assert state.ball.provenance == expected
+            scene.frame_rgb(obj.get_end_time()+25)
+            assert scene._slider_ball_sprites(obj, obj.get_end_time()+25, (1, 0, 0))
+            scene.frame_rgb(obj.get_end_time()+50)
+            assert not scene._slider_ball_sprites(obj, obj.get_end_time()+50, (1, 0, 0))
+            if timeline is not None:
+                assert dataclasses.asdict(timeline) == snapshot
+        finally:
+            renderer.release()
+
+
+def test_blank_first_legacy_ball_animation_never_falls_back_to_disc():
+    with tempfile.TemporaryDirectory() as folder:
+        root = Path(folder)
+        (root / "skin.ini").write_text("[General]\nAnimationFramerate: 10\n")
+        Image.new("RGBA", (256, 256), (0, 0, 0, 0)).save(root / "sliderb0@2x.png")
+        Image.new("RGBA", (128, 128), (255, 0, 0, 255)).save(root / "sliderb1.png")
+        scene, renderer = _scene(skin_dir=root)
+        try:
+            obj = scene.objects[0]
+            assert ball_variant(scene.skin) == "legacy"
+            for time, key, visible in ((1200, "sk_sliderb", False), (1300, "sk_sliderb_f1", True)):
+                scene._advance(time)
+                ball = scene._slider_ball_sprites(obj, time, (1, 1, 1))
+                assert len(ball) == 1 and ball[0].texture_key == key
+                assert ball[0].w == 128 * scene.circle_k
+                renderer.begin((0, 0, 0))
+                renderer.draw(ball)
+                assert (renderer.read_rgb().max() > 0) == visible
+            assert not scene._slider_ball_sprites(obj, obj.get_end_time(), (1, 1, 1))
+        finally:
+            renderer.release()
+
+
+def test_ball_end_fade_ignores_spans_head_result_snaking_merge_hidden_traceable():
+    with tempfile.TemporaryDirectory() as folder:
+        root = Path(folder)
+        Image.new("RGBA", (128, 128), (255, 0, 0, 255)).save(root / "sliderb.png")
+        # Real ruleset notifications, including partial loss, short catch-up,
+        # missed heads and 1–4 spans; independently vary all rendering flags.
+        for spans, length, pattern in ((1, 10, "late"), (2, 120, "tracked"),
+                                       (3, 120, "missed_head"), (4, 250, "detached")):
+            bm = _map(f"256,192,1000,2,0,L|506:192,{spans},{length}\n")
+            obj = bm.hit_objects[0]
+            end = obj.get_end_time()
+            if pattern == "late":
+                frames = _frames([(1120, 256, 192, 4), (1400, 266, 192, 4)])
+            elif pattern == "missed_head":
+                frames = _frames([(900, 0, 0, 4)] + _ball_frames(obj, 1010, end+300))
+            elif pattern == "detached":
+                frames = _frames([(1000, 256, 192, 4)] + _ball_frames(obj, 1010, end-100) +
+                                 [(end-90, 0, 0, 4), (end+300, 0, 0, 0)])
+            else:
+                frames = _follow(obj)
+            sim = StdRuleset(bm, frames, lazer=True).run()
+            for merge, snake, mods, traceable in ((False, False, 0, False), (True, True, 0, False),
+                                                 (False, True, 8, False), (True, False, 0, True)):
+                scene, renderer = _scene(bm, frames, sim=sim, skin_dir=root, merge=merge,
+                                         snaking_out=snake, mods=mods, traceable=traceable)
+                try:
+                    state = scene._slider_visual(obj)
+                    assert state.parent is not None
+                    notification = state.parent.time_ms
+                    scene.frame_rgb(notification - 1e-5)
+                    assert scene._slider_ball_sprites(obj, notification-1e-5, (1, 1, 1))
+                    paths = tuple(scene._slider_paths[id(obj)])
+                    marks = repr(scene._slider_marks[id(obj)])
+                    scene.frame_rgb(notification)
+                    assert not scene._slider_ball_sprites(obj, notification, (1, 1, 1))
+                    assert tuple(scene._slider_paths[id(obj)]) == paths
+                    assert repr(scene._slider_marks[id(obj)]) == marks
+                    scene.frame_rgb(notification+120)
+                    assert not scene._slider_ball_sprites(obj, notification+120, (1, 1, 1))
+                finally:
+                    renderer.release()
 
 
 def test_gl_additive_follow_below_normal_ball_actual_pixels():
@@ -84,6 +305,33 @@ def test_actual_metal_draw_method_records_additive_then_ball_in_order():
     draw_slider_layers(recorder, *_layers())
     assert [op[3] for op in recorder._scene] == [False, True, False]
     assert [tuple(op[1][0, 5:8]) for op in recorder._scene] == [(1, 0, 0), (0, 1, 0), (0, 0, 1)]
+
+
+def test_actual_metal_draw_method_ball_fades_and_parent_composition():
+    from osu_std_renderer.render.slider_visuals import BallAnimation
+    from osu_std_renderer.ruleset.slider_visual import SliderVisualEvent
+    path = Path(__file__).resolve().parents[1] / "osu_std_renderer/render/metal/renderer.py"
+    cls = next(n for n in ast.parse(path.read_text()).body
+               if isinstance(n, ast.ClassDef) and n.name == "MetalSpriteRenderer")
+    method = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "draw")
+    namespace = dict(np=np, perf=perf, plan_texture_batches=plan_texture_batches, _UNITS=16)
+    exec(compile(ast.Module(body=[method], type_ignores=[]), str(path), "exec"), namespace)
+    recorder = SimpleNamespace(post_xform=None, _tex={"ball": 7, "follow": 8}, _white=123, _scene=[])
+    recorder.draw = lambda sprites: namespace["draw"](recorder, sprites)
+    parent = SliderVisualEvent(2000, 0, "slider_judged", "source_model", transform_time_ms=2000)
+    animation = BallAnimation(1000, 2000, parent)
+    for variant, offset, expected in (("argon", 25, 1/32), ("default", 56.25, .25), ("legacy", 0, 0)):
+        recorder._scene.clear()
+        alpha = animation.at(2000+offset, variant)
+        ball = [Sprite(32, 32, 20, 20, "ball", color=(0, 0, 1, alpha))] if alpha > 0 else []
+        follow = [Sprite(32, 32, 40, 40, "follow", additive=True)]
+        draw_slider_layers(recorder, [], follow, ball, 1-offset/240)
+        ops = recorder._scene
+        assert ops[0][3] is True  # Independent follow continues first.
+        assert len(ops) == (2 if expected else 1)
+        if expected:
+            assert ops[1][2] == [7] and ops[1][3] is False
+            assert abs(float(ops[1][1][0, 8]) - expected*(1-offset/240)) < 1e-7
 
 
 def test_native_metal_follow_order_when_available():

@@ -162,7 +162,7 @@ from .effects import (LOGO_UI_SIZE, SMOKE_DEFAULT_WIDTH_OSU,
                       seizure_alpha, smoke_point_alpha, smoke_segments,
                       triangle_field, triangle_states, warning_arrow_alpha)
 from .gl import _GPU_YUV, Sprite
-from .slider_visuals import (SliderVisualState, draw_slider_layers,
+from .slider_visuals import (SliderVisualState, ball_variant, draw_slider_layers,
                              repeat_alpha, repeat_fade_in)
 from .hud import layout_run
 from .mods import (HIDDEN_FADE_IN_MULT, MOD_FLASHLIGHT, MOD_HIDDEN,
@@ -290,25 +290,9 @@ CURSOR_RADIUS_OSU = 14.0       # cursor core sizing base, osu!px
 CURSOR_GLOW_COLOR = (1.0, 0.30, 0.35)   # R3D red
 DIGIT_SPACING = 0.06           # of digit height, between combo digits
 BALL_DETACHED_ALPHA = 0.35     # slider ball while tracking is lost
-BALL_FADE_OUT_MS = 240.0       # DrawableSlider.FadeOut(240).Expire() at EndTime
 FOLLOW_CIRCLE_IN_MS = 300.0    # DefaultFollowCircle tracking-gain: ScaleTo(FOLLOW_AREA,300,OutQuint) + FadeIn
 
 
-def slider_ball_alpha(t: float, start: float, end: float,
-                      active_alpha: float) -> float | None:
-    """Slider-ball alpha over its lifetime, or None outside it.
-
-    From `start` to `end` the ball shows at `active_alpha` (1.0 tracking,
-    BALL_DETACHED_ALPHA when tracking is lost). At EndTime osu's
-    DrawableSlider does FadeOut(240).Expire(); the ball, a child, fades
-    linearly (Easing.None) from its current alpha to 0 over
-    BALL_FADE_OUT_MS instead of hard-cutting. OsuModHidden's body fade
-    never touches the ball. None before `start` or after the fade."""
-    if t < start or t > end + BALL_FADE_OUT_MS:
-        return None
-    if t <= end:
-        return active_alpha
-    return active_alpha * max(0.0, 1.0 - (t - end) / BALL_FADE_OUT_MS)
 POPUP_HEIGHT_FRAC = 0.62       # judgment number height / circle radius
 POPUP_COLORS = {
     JudgmentKind.HIT300: (0.38, 0.72, 1.00),   # Argon-ish blue
@@ -2963,34 +2947,7 @@ class StdScene:
         follow = self._follow_sprites(obj, t, bx, by, color, spawn)
         if follow:
             beneath, sprites = sprites, []
-        # slider ball following PositionAt(t) (repeats included — scorePath
-        # handles the back-and-forth). While the ruleset says tracking was
-        # lost the ball dims — the visible sliderbreak cue (there is no
-        # tail explosion to lose in this phase).
-        if start <= t <= end + BALL_FADE_OUT_MS:
-            v = self._verdict(obj)
-            # tracking is sampled at min(t, end): during the post-end fade
-            # the ball keeps whatever alpha it had when the slider expired.
-            tracked = v is None or v.tracked_at(min(t, end))
-            active_ball_alpha = 1.0 if tracked else BALL_DETACHED_ALPHA
-            ball_alpha = slider_ball_alpha(t, start, end, active_ball_alpha)
-            bx, by = self.cam.to_screen(
-                *obj.get_stacked_position_at(min(t, end), self.diff))
-            sk = self.skin
-            if sk is None:                 # Argon league ball + follow circle
-                sprites.extend(self._argon_ball_sprites(bx, by, color,
-                                                        ball_alpha, False))
-            else:
-                if sk.has("sliderb"):
-                    bw, bh = sk.size["sliderb"]
-                    k = self.circle_k
-                    sprites.append(Sprite(bx, by, bw * k, bh * k,
-                                          sk.frame_key("sliderb", min(t, end)),
-                                          (*self._ball_tint(color), ball_alpha)))
-                else:
-                    d = 2.0 * self.radius_px
-                    sprites.append(Sprite(bx, by, d, d, "disc",
-                                          (*color, ball_alpha)))
+        sprites.extend(self._slider_ball_sprites(obj, t, color))
         # head circle (+ its approach ring) on top of body/ball
         sprites.extend(self._head_sprites(
             obj, t, obj.get_stacked_start_position(self.diff), approach_out,
@@ -3003,6 +2960,29 @@ class StdScene:
             sprites.extend(self._arrow_sprites(t, arrows, False, spawn,
                                                fade_in, pts, snake, None, obj))
         draw_slider_layers(self.spr, beneath, follow, sprites, visual.parent_alpha(t))
+
+    def _slider_ball_sprites(self, obj, t, color):
+        """Ball-only child lifecycle; follow and parent compositing stay separate."""
+        end = obj.get_end_time()
+        v = self._verdict(obj)
+        # Keep the existing detached cue and freeze it at nominal end.
+        tracked = v is None or v.tracked_at(min(t, end))
+        active_alpha = 1.0 if tracked else BALL_DETACHED_ALPHA
+        sk = self.skin
+        alpha = self._slider_visual(obj).ball.at(t, ball_variant(sk), active_alpha)
+        if alpha <= 0:
+            return []
+        bx, by = self.cam.to_screen(*obj.get_stacked_position_at(min(t, end), self.diff))
+        if sk is None:
+            return self._argon_ball_sprites(bx, by, color, alpha, False)
+        if sk.has("sliderb"):
+            bw, bh = sk.size["sliderb"]
+            k = self.circle_k
+            return [Sprite(bx, by, bw * k, bh * k,
+                           sk.frame_key("sliderb", min(t, end)),
+                           (*self._ball_tint(color), alpha))]
+        d = 2.0 * self.radius_px
+        return [Sprite(bx, by, d, d, "disc", (*color, alpha))]
 
     def _follow_sprites(self, obj, t, bx, by, color, spawn):
         state = self._slider_visual(obj).follow.at(t)
