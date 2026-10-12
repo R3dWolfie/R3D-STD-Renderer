@@ -50,7 +50,7 @@ def resource_trace(resources, skin, key):
     frame=None
     if '_f' in name:
         name,frame=name.rsplit('_f',1)
-    found=resources.find_frames(name) if name=='scorebar-colour' else []
+    found=resources.find_frames(name, use_dash=True) if name=='scorebar-colour' else []
     tf=(found[int(frame or 0)] if found else resources.find_texture(name))
     return dict(asset=name,provider=tf.source.name if tf else 'unresolved',
                 path=str(tf.path.resolve()) if tf else None,two_x=tf.two_x if tf else None,

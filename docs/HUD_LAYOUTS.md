@@ -55,15 +55,90 @@ hit-error/UR behavior remain in their original components. Skinless
 Argon uses side hit-error bars; Legacy uses the existing bottom meter.
 BreakOverlay remains a separate later batch, above HUD opacity.
 
+### Temporary Legacy placement calibration (12 October 2026)
+
+The owner review pass adds presentation offsets to the immutable `LEGACY`
+layout: score X −26, accuracy X +14 / Y −4, in 768-high logical HUD units.
+The stock source margins above remain explicit in `hud.py`; effective project
+insets are score 36, accuracy 3, and a score-to-accuracy gap of 5. Score still
+starts at Y=0. Glyph dimensions, prefix, overlap, UVs and aspect remain unchanged
+for normal fonts. Accuracy follows the actual measured score bottom, and the
+pie/grade/secondary collision flow consumes the resulting bounds.
+
+These are provisional owner-feedback calibration values, **not stock lazer
+geometry or an implementation of `MainHUDComponents.json`**. They apply to
+every Legacy profile, including other custom skins and skinless
+`--legacy-defaults`; Argon has zero offsets. This shared-profile consequence
+requires owner visual signoff. Set the two layout offsets back to zero to
+restore stock placement without changing providers or the CLI/API contract.
+No new setting or skin-specific detection was added.
+
+At HUD scale 1, score moves −24.375 px horizontally at 1280×720 and −36.5625 px
+at 1920×1080. Accuracy moves (+13.125, −3.75) and (+19.6875, −5.625) px,
+respectively. Source-geometry tests retain the stock 10/17/9 expectations with
+zero calibration; paired sprite tests separately check the displacement,
+unchanged glyph properties, viewport constraints and independent Argon layout.
+
+After the owner's first screenshot review, revision 2 moves score another 8
+logical units left and accuracy 2 down relative to that first calibration:
+−7.5 / −11.25 output pixels for score at 720p / 1080p, and +1.875 / +2.8125
+pixels vertically for accuracy. Score Y and accuracy X remain unchanged.
+
+The subsequent 100.00% review moves accuracy another 7 logical units right
+(6.5625 / 9.84375 output pixels at 720p / 1080p), retaining its Y and size.
+In the real replay at 10,000 ms, the leading 1 previously crossed the rounded
+left edge of the skin's foreground `scorebar-bg`; this revision clears that
+edge while keeping the complete glyph run in-frame. Grade and progress pie
+follow the measured accuracy bounds with their existing gaps. This remains
+presentation calibration for the shared Legacy profile, not a glyph clipping
+bug or saved-layout support; health artwork and its overlay order are intact.
+
+The owner fixture's health provider remains Legacy: `scorebar-bg@2x.png`
+(1366×786 logical), 120 `scorebar-colour` frames (388×78 logical), and an
+explicitly blank 1×1 `scorebar-marker.png`. Large background art is drawn once
+at (0,0), height-scaled with native aspect and clipped by the viewport; its
+visible artwork extends well beyond the top-left HP bar. Horizontal UV crop
+preserves the fill's transparent padding. A blank marker selects new-style
+fill positioning but draws no visible marker or procedural replacement.
+
+This is consistent with the audited Legacy provider, native-size geometry,
+fill crop and overlay order. It does **not** match the skin's saved customised
+`ArgonHealthDisplay`, which uses relative width, a custom position, anchor/origin
+and bar-height settings. Saved HUD deserialisation remains deferred; Argon's
+provider is not selected by partially reading these JSON entries. Legacy HP
+uses R3D's existing stateless damping/animation approximation, so this audit
+does not assert frame-exact lazer animation parity or universal equivalence
+of fallback-provider selection.
+
+Fresh baseline, real replay scenes, 720p/1080p component traces and pixel
+comparisons for this pass are in
+`/home/theaussie/std-test/hud-calibration-20261012/`; the follow-up screenshot
+review is in `/home/theaussie/std-test/hud-calibration-20261012-revision2/`.
+The subsequent marked grade-slot review is in
+`/home/theaussie/std-test/hud-calibration-20261012-grade/`.
+The full-accuracy edge review is in
+`/home/theaussie/std-test/hud-calibration-20261012-accuracy100/`.
+The pending Argon visual
+fidelity overhaul remains separate, with `theaussie.main` as its technical
+reference and R3D's Nunito/procedural counter fonts retained initially.
+
 ## R3D extras and overflow adaptations
 
 Live grade is an R3D extra; neither native MainHUDComponents container has
-this grade slot. Its dedicated top-right slot lies below the actual native
-readout bounds. Legacy reserves the pie's nominal height even when progress
-is disabled, so changing the progress flag does not move the grade. Rank
-art fits a maximum 48x32 slot; procedural rank text shares that slot.
+this grade slot. In Legacy it is centred vertically on measured accuracy,
+with its right edge 12 logical units left of the reserved 33-unit progress
+pie (which itself clears accuracy by 18 units). This follows the owner's
+marked screenshot location. The pie remains reserved with progress OFF,
+so toggling progress does not move grade. Measured accuracy also anchors
+grade and secondary flow when score/accuracy sprites are hidden. Rank art
+still fits a maximum 48x32 slot; procedural rank text shares that slot.
+For pathological fonts that leave insufficient space beside accuracy, grade
+uses an in-frame slot below the readouts at the left margin. Argon's existing
+grade slot below accuracy is unchanged. None of this consumes saved HUD JSON.
 
-Mod pills flow below those measured bounds and the grade. Hit counts follow
+Legacy mod pills flow below native readout/pie bounds, without including
+grade in that vertical stack; showing grade no longer pushes mods down.
+Argon retains its existing flow below accuracy and grade. Hit counts follow
 the complete wrapped mod stack. These extras move inward when their
 vertical interval crosses the profile's key display, preserving a 12-unit
 gap. PP retains R3D's existing top-left placement, clearing the Argon score

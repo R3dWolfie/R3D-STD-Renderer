@@ -72,6 +72,29 @@ python -m osu_std_renderer.merge …                                    # showdo
 
 Run the tests: `python -m tests.run_all`.
 
+### Local render dashboard
+
+Use the mobile-friendly dashboard adapted from the mania renderer:
+
+```bash
+./tools/start-local-render-web.sh
+```
+
+The launcher uses `uv` to prepare an ignored `.dashboard-venv/` with Python 3.12
+and the renderer dependencies. It preserves the existing `.venv/`.
+After setup, `python tools/local_render_web.py` also switches to this environment
+when the current Python is missing renderer dependencies.
+
+Open `http://127.0.0.1:7377`, or the printed LAN URL from another device.
+The dashboard runs this checkout's `osu_std_renderer` and scans this repo's
+`test-render/` for replays, beatmaps, and extracted skins. It matches the
+replay to an exact `.osu`, supports manual map selection, and includes
+progress, cancellation, video playback, and render history. Generated videos
+go to the ignored `local-web-renders/` folder.
+
+See [dashboard usage and options](docs/LOCAL_RENDER_WEB.md). Run its HTTP,
+subprocess, and browser-state tests with `python -m pytest -q tests/test_local_render_web.py`.
+
 ## Requirements
 
 - **Python 3.12** (stack is version-locked; verify if targeting another version)
@@ -82,7 +105,9 @@ Run the tests: `python -m tests.run_all`.
 - **rosu-pp-py** — star rating / pp (renders fail-soft, hiding the pp counter, if absent)
 - **ffmpeg** on `PATH` — raw-RGB frames are piped to a single ffmpeg process for encode + audio mux; encoder auto-detects `h264_nvenc → h264_vaapi → libx264`
 
-There is **no `requirements.txt` / `pyproject.toml`** in the repo (verify — deps are installed from the locked stack above; the old README used `pip install numpy pillow osrparse moderngl`). Audio is mixed offline via numpy + ffmpeg — **no BASS**.
+The local dashboard's verified dependency versions are in
+`tools/local-render-requirements.txt`. There is no package `pyproject.toml`.
+Audio is mixed offline via numpy + ffmpeg — **no BASS**.
 
 ## Layout
 

@@ -2386,13 +2386,16 @@ class StdHud:
         """LegacyScoreCounter (TopRight ×0.96, margin 10, 6 leading
         digits, 1 s Easing.Out roll) + LegacyAccuracyCounter (×0.576,
         margins 9/17, '0.00%') + LegacySongProgress (the pie left of the
-        accuracy). The R3D grade is laid out separately."""
+        accuracy). Project placement offsets live in the immutable layout;
+        these are review calibration, not saved-HUD JSON support or a change
+        to the stock source margins. The R3D grade is laid out separately."""
         s = self.s
         es = self.es
         score = int(round(self.data.score_at(t, LEGACY_SCORE_ROLL_MS)
                           * self._pin))
         text = f"{max(score, 0):06d}"
-        right = self.ui_w_l - LEGACY_SCORE_MARGIN_X * es
+        right = self.ui_w_l + (self.layout.legacy_score_offset_x
+                               - LEGACY_SCORE_MARGIN_X) * es
         sw, sh = self._legacy_text_size("score", text, LEGACY_SCORE_SCALE * es)
         # Preserve native anchors. Fit only pathological oversized fonts to
         # the viewport, keeping every digit rather than clipping/truncating.
@@ -2408,8 +2411,9 @@ class StdHud:
         disp = acc_display_value(acc,
                                  getattr(self.data, "lazer_display", False))
         acc_text = f"{disp:.2f}%"
-        acc_right = self.ui_w_l - LEGACY_ACC_MARGIN[0] * es
-        acc_top = sh + LEGACY_ACC_MARGIN[1] * es
+        acc_dx, acc_dy = self.layout.legacy_accuracy_offset
+        acc_right = self.ui_w_l + (acc_dx - LEGACY_ACC_MARGIN[0]) * es
+        acc_top = sh + (LEGACY_ACC_MARGIN[1] + acc_dy) * es
         aw, ah = self._legacy_text_size("score", acc_text, LEGACY_ACC_SCALE * es)
         reserve = (LEGACY_PIE_SIZE + LEGACY_PIE_GAP + 8) * es
         acc_fit = min(1.0, max(acc_right-reserve, 1)/max(aw, 1),
@@ -2420,6 +2424,9 @@ class StdHud:
         self._remember("score", score_sprites)
         self._remember("accuracy", out[acc_start:])
         accuracy = self.bounds["accuracy"]
+        # Grade and secondary flow use the measured readout dependency even
+        # when its display flag suppresses the score/accuracy sprites.
+        self._legacy_accuracy_bounds = accuracy
         if not s.show_score:
             # Progress has its own flag. Measure its native dependency but
             # suppress only score/accuracy sprites, not the progress pie.
@@ -2722,31 +2729,48 @@ class StdHud:
     # ==================== shared elements ==========================================
 
     def _top_right_stack_y(self) -> float:
-        """R3D extras flow below actual native readout/grade bounds.
+        """R3D extras flow below the profile's measured readout bounds.
 
         HUDOverlay.UpdateAfterChildren similarly derives secondary flow
         offsets from native drawable bounds, excluding oversized Legacy HP.
         """
-        names = ('score', 'accuracy', 'progress', 'grade') if self.layout.legacy else ('accuracy', 'grade')
-        return max((self.bounds[n].bottom for n in names if n in self.bounds),
-                   default=8.0*self.es) + 12.0*self.es
+        names = ('score', 'accuracy', 'progress') if self.layout.legacy else ('accuracy', 'grade')
+        bottom = max((self.bounds[n].bottom for n in names if n in self.bounds),
+                     default=8.0*self.es)
+        if self.layout.legacy:
+            accuracy = getattr(self, '_legacy_accuracy_bounds', None)
+            if accuracy is not None:
+                bottom = max(bottom, accuracy.bottom)
+        return bottom + 12.0*self.es
 
     def _grade_extra(self, out, t: float) -> None:
-        """Live grade is an R3D extra, below native readouts, never a pie slot.
+        """Live grade is an R3D extra in an independent profile slot.
 
         Limit oversized rank artwork to a 48x32 slot; procedural rank text
         uses the same independent slot. Enabling progress cannot move grade.
         """
         if not self.s.show_grade or t < self._first_ev_t:
             return
-        names = ('score', 'accuracy') if self.layout.legacy else ('accuracy',)
-        top = max((self.bounds[n].bottom for n in names if n in self.bounds),
+        if self.layout.legacy:
+            accuracy = getattr(self, '_legacy_accuracy_bounds', None)
+            if accuracy is not None:
+                es = self.es
+                # Owner's marked slot: beside accuracy, to the LEFT of the
+                # pie's reserved rectangle. Reserve it with progress OFF too.
+                cy = (accuracy.top + accuracy.bottom) / 2.0
+                top = max(0.0, cy - 16*es)
+                right = accuracy.left - (LEGACY_PIE_GAP + LEGACY_PIE_SIZE + 12)*es
+                if right < 56*es or accuracy.bottom-accuracy.top < 8*es:
+                    # Pathological wide/tiny fonts leave no side slot. Keep
+                    # the badge in-frame below readouts at the left margin,
+                    # clear of the right-hand mods/hit-count stack.
+                    right = 56*es
+                    top = max(accuracy.bottom, cy+LEGACY_PIE_SIZE*es/2) + 12*es
+                self._component(out, 'grade', self._grade_badge, t,
+                                min(right, self._extra_right(top, 32*es)), top+16*es)
+                return
+        top = max((self.bounds[n].bottom for n in ('accuracy',) if n in self.bounds),
                   default=8*self.es) + 12*self.es
-        # The pie can be taller than a tiny accuracy font, so reserve its
-        # nominal height even when progress is disabled (stable grade slot).
-        acc = self.bounds.get('accuracy')
-        if self.layout.legacy and acc is not None:
-            top = max(top, (acc.top+acc.bottom)/2 + LEGACY_PIE_SIZE*self.es/2 + 12*self.es)
         self._component(out, 'grade', self._grade_badge, t,
                         self._extra_right(top, 32*self.es), top+16*self.es)
 

@@ -16,6 +16,10 @@ class HudLayout:
     score_anchor: str
     keys_anchor: str
     keys_origin: str
+    # Temporary project presentation calibration, separate from stock lazer
+    # margins. Applies to every Legacy profile; saved skin JSON is not read.
+    legacy_score_offset_x: float = 0.0
+    legacy_accuracy_offset: tuple[float, float] = (0.0, 0.0)
 
     @property
     def legacy(self) -> bool:
@@ -23,7 +27,9 @@ class HudLayout:
 
 
 ARGON = HudLayout('argon', 'TopLeft', 'BottomRight', 'BottomRight')
-LEGACY = HudLayout('legacy', 'TopRight', 'CentreRight', 'TopRight')
+LEGACY = HudLayout('legacy', 'TopRight', 'CentreRight', 'TopRight',
+                   legacy_score_offset_x=-26.0,
+                   legacy_accuracy_offset=(14.0, -4.0))
 
 
 def select_layout(settings, skin_elems) -> HudLayout:
