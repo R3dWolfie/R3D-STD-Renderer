@@ -77,7 +77,7 @@ def test_partial_or_empty_legacy_never_changes_layout(bank, skins, skin):
     assert 'argon_wedge' not in {s.texture_key for s in sprites}
     assert not any((s.texture_key or '').startswith('aglyph_') for s in sprites)
     assert hud.bounds['score'].right == pytest.approx(
-        hud.ui_w_l-10+hud.layout.legacy_score_offset_x)
+        hud.ui_w_l-3)
     assert hud.bounds['keys'].top < 384
     assert 'progress' in hud.bounds and hud.bounds['progress'].top < 200
     if skin in ('keys-only','empty'):
@@ -105,7 +105,7 @@ def test_skinless_defaults_and_immutable_profile(bank, skins):
         assert all(forced.bounds.get(k) is None for k in ('score','keys'))
         render(forced, rec)
         assert forced.bounds['score'].right == pytest.approx(
-            forced.ui_w_l-10+forced.layout.legacy_score_offset_x)
+            forced.ui_w_l-3)
 
 
 def test_fallback_provider_and_explicit_path_selection(skins, tmp_path):
@@ -119,7 +119,7 @@ def test_fallback_provider_and_explicit_path_selection(skins, tmp_path):
     assert hud.layout==LEGACY
     render(hud,rec)
     assert hud.bounds['score'].right==pytest.approx(
-        hud.ui_w_l-10+hud.layout.legacy_score_offset_x)
+        hud.ui_w_l-3)
 
 
 @pytest.mark.parametrize('resolution', [(1280,720),(1920,1080),(1024,768),(2560,1080)])
@@ -137,14 +137,12 @@ def test_actual_score_bounds_accuracy_pie_and_viewport(bank, tmp_path, resolutio
         size=(round(font_size*.65 + i)*factor, (font_size+i)*factor)
         Image.new('RGBA',size,'white').save(root/f'{prefix}-{i}{"@2x" if factor==2 else ""}.png')
     hud,rec=make_hud(bank,folder=root,renderer=Recorder(*resolution),hud_scale=scale)
-    # Retain the upstream geometry checks. Project calibration is covered
-    # separately by paired sprite comparisons, rather than replacing these
-    # stock source expectations with the owner's provisional numbers.
-    hud.layout=dataclasses.replace(hud.layout, legacy_score_offset_x=0.0,
-                                   legacy_accuracy_offset=(0.0,0.0))
+    # Removing accuracy calibration retains its native margin/gap; the
+    # owner-selected shared alignment still applies to both counters.
+    hud.layout=dataclasses.replace(hud.layout, legacy_accuracy_offset=(0.0,0.0))
     sprites=render(hud,rec)
     score,acc,pie=(hud.bounds[n] for n in ('score','accuracy','progress'))
-    assert score.right==pytest.approx(hud.ui_w_l-10*scale)
+    assert score.right==pytest.approx(acc.right)
     assert acc.right==pytest.approx(hud.ui_w_l-17*scale)
     assert acc.top-score.bottom==pytest.approx(9*scale)
     assert acc.left-pie.right==pytest.approx(18*scale)
@@ -165,44 +163,31 @@ def test_actual_score_bounds_accuracy_pie_and_viewport(bank, tmp_path, resolutio
 @pytest.mark.parametrize('resolution', [(1280,720),(1920,1080)])
 @pytest.mark.parametrize('scale', [.75,1,1.25])
 @pytest.mark.parametrize('override', [False,True])
-def test_legacy_calibration_moves_measured_runs_without_changing_glyphs(
+def test_shared_right_calibration_preserves_accuracy_vertical_and_glyph_metrics(
         bank, skins, resolution, scale, override):
     hud,rec=make_hud(bank,folder=skins/'complete',renderer=Recorder(*resolution),
                      hud_scale=scale,renderer_default_font_and_ranks=override,
                      show_progress=False)
     layout=hud.layout
-    hud.layout=dataclasses.replace(layout,legacy_score_offset_x=0.0,
-                                   legacy_accuracy_offset=(0.0,0.0))
+    hud.layout=dataclasses.replace(layout,legacy_accuracy_offset=(0.0,0.0))
     before=[]
     hud._legacy_score_block(before,2300)
     original=dict(hud.bounds)
-    # The preceding owner calibration: now move accuracy farther right to
-    # clear the backing's rounded left edge at 100.00%, retaining score/Y.
-    hud.layout=dataclasses.replace(layout,legacy_accuracy_offset=(7.0,-4.0))
-    previous=[]
-    hud._legacy_score_block(previous,2300)
     hud.layout=layout
     after=[]
     hud._legacy_score_block(after,2300)
     assert len(before)==len(after)
     for old,new in zip(before,after):
         score=old.y+old.h/2 <= original['score'].bottom*hud.lk+1e-6
-        dx,dy=(-26,0) if score else (14,-4)
-        assert new.x-old.x==pytest.approx(dx*scale*resolution[1]/768)
-        assert new.y-old.y==pytest.approx(dy*scale*resolution[1]/768)
-        # Texture, alpha, UV crop, aspect, dimensions and character count
-        # remain identical; only layout positions may change.
+        assert new.x-old.x==pytest.approx(14*scale*resolution[1]/768)
+        assert new.y-old.y==pytest.approx((0 if score else -4)*scale*resolution[1]/768)
         assert dataclasses.replace(new,x=old.x,y=old.y)==old
-    for old,new in zip(previous,after):
-        score=old.y+old.h/2 <= original['score'].bottom*hud.lk+1e-6
-        dx,dy=(0,0) if score else (7,0)
-        assert new.x-old.x==pytest.approx(dx*scale*resolution[1]/768)
-        assert new.y-old.y==pytest.approx(dy*scale*resolution[1]/768)
-        assert dataclasses.replace(new,x=old.x,y=old.y)==old
+    assert hud.bounds['score'].right==pytest.approx(hud.bounds['accuracy'].right)
+    assert hud.bounds['accuracy'].right==pytest.approx(hud.ui_w_l-3*scale)
     assert hud.bounds['score'].top==0
     assert hud.bounds['score'].bottom==original['score'].bottom
     assert hud.bounds['accuracy'].top-hud.bounds['score'].bottom==pytest.approx(5*scale)
-    assert ARGON.legacy_score_offset_x==0 and ARGON.legacy_accuracy_offset==(0,0)
+    assert ARGON.legacy_accuracy_offset==(0,0)
     sprites=render(hud,rec,2300)
     for name in ('score','accuracy','progress','grade','mods'):
         if name in hud.bounds:
@@ -222,7 +207,7 @@ def test_legacy_full_accuracy_keeps_leading_digit_and_fixed_right_edge(
                      hud_scale=scale,renderer_default_font_and_ranks=override)
     # Exercise the extra integer digit at the 100% boundary, rather than
     # checking offsets alone. Score, right anchor and glyph scale must stay
-    # fixed as accuracy grows; the pie and grade follow the measured left edge.
+    # fixed as accuracy grows; only the native pie follows the measured left edge.
     snapshots=[]
     glyph_keys={g[0] for g in hud._legacy_glyphs('score','100.99%')[0]}
     for value in (.9999,1.0):
@@ -251,7 +236,170 @@ def test_legacy_full_accuracy_keeps_leading_digit_and_fixed_right_edge(
     shift=full['accuracy'].left-fraction['accuracy'].left
     assert shift<0
     assert full['progress'].left-fraction['progress'].left==pytest.approx(shift)
-    assert full['grade'].right-fraction['grade'].right==pytest.approx(shift)
+    assert full['grade']==fraction['grade']
+
+
+SCORE_GROWTH_CASES = [(0,'000000'), (1,'000001'), (999999,'999999'),
+                      (1000000,'1000000'), (1001273,'1001273'),
+                      (9999999,'9999999'), (10000000,'10000000')]
+
+
+@pytest.fixture(scope='module')
+def blank_score_skin(tmp_path_factory):
+    folder=tmp_path_factory.mktemp('blank-score')
+    (folder/'skin.ini').write_text('[Fonts]\nScorePrefix: transparent\nScoreOverlap: 3\n')
+    for i in range(10):
+        factor=2 if i%2 else 1
+        Image.new('RGBA',(30*factor,48*factor)).save(
+            folder/f'transparent-{i}{"@2x" if factor==2 else ""}.png')
+    return folder
+
+
+def growth_hud(bank,skins,blank_score_skin,skin,resolution,scale):
+    if skin=='owner':
+        folder=Path(__file__).resolve().parents[1]/'test-render/skin'
+        if not folder.is_dir():pytest.skip('owner extracted skin is a local QA input')
+    elif skin=='blank-digits':folder=blank_score_skin
+    elif skin in ('asset-fallback','font-override'):folder=skins/'empty' if skin=='asset-fallback' else skins/'complete'
+    elif skin=='legacy-defaults':folder=None
+    else:folder=skins/skin
+    hud,rec=make_hud(bank,folder=folder,renderer=Recorder(*resolution),
+                     hud_scale=scale,legacy_defaults=skin=='legacy-defaults',
+                     renderer_default_font_and_ranks=skin=='font-override',
+                     show_hit_counter=True)
+    if skin=='asset-fallback':
+        hud.sk=SkinElements(Skin(skin_dir=folder,fallback_dir=skins/'digits-only'),rec)
+        assert hud.sk.skin.find_texture('numeric/score-5').source.name=='FALLBACK'
+    hud._pin=1
+    return hud,rec
+
+
+def score_sprites(hud,sprites):
+    rect=hud.bounds['score']
+    keys={g[0] for g in hud._legacy_glyphs('score','0123456789')[0]}
+    return [s for s in sprites if s.y-s.h/2>=rect.top*hud.lk-1e-6
+            and s.y+s.h/2<=rect.bottom*hud.lk+1e-6
+            and s.texture_key in keys]
+
+
+@pytest.mark.parametrize('resolution',[(1280,720),(1920,1080)])
+@pytest.mark.parametrize('scale',[.75,1,1.25])
+@pytest.mark.parametrize('skin',['owner','complete','digits-only','empty','blank-digits',
+                                 'asset-fallback','legacy-defaults','font-override'])
+def test_legacy_minimum_score_grows_left_with_native_glyphs_and_shared_right(
+        bank,skins,blank_score_skin,resolution,scale,skin):
+    hud,rec=growth_hud(bank,skins,blank_score_skin,skin,resolution,scale)
+    states={}
+    fixed_right=resolution[0]-3*scale*resolution[1]/768
+    stable_bounds=None
+    for value,text in SCORE_GROWTH_CASES+[(1999999,'1999999')]:
+        hud.data.score_at=lambda *args,v=value:v
+        sprites=render(hud,rec,5000)
+        digits=score_sprites(hud,sprites)
+        expected,cell,_,overlap=hud._legacy_glyphs('score',text)
+        assert [s.texture_key for s in digits]==[g[0] for g in expected]
+        assert len(digits)==len(text)
+        score,acc=hud.bounds['score'],hud.bounds['accuracy']
+        assert score.right*hud.lk==pytest.approx(fixed_right)
+        assert acc.right==pytest.approx(score.right)
+        for sp,(_,w,h,_) in zip(digits,expected):
+            # No safety fit at ordinary six, seven or eight-digit lengths.
+            assert (sp.w,sp.h)==pytest.approx((w*.96*scale*hud.lk,h*.96*scale*hud.lk))
+            assert sp.uv_off==(0,0) and sp.uv_scale==(1,1)
+            assert sp.x-sp.w/2>=0 and sp.x+sp.w/2<=resolution[0]
+        other={k:v for k,v in hud.bounds.items() if k!='score'}
+        if stable_bounds is not None:assert other==stable_bounds
+        stable_bounds=other
+        for name in ('accuracy','progress','grade','mods','hits','keys'):
+            assert not score.intersects(hud.bounds[name]),name
+        states[text]=(digits,score)
+    # Same suffix glyphs remain byte-for-byte the same sprites. The seventh
+    # leading character alone expands left by the fixed '5' advance/overlap.
+    for short,long in [('000000','1000000'),('999999','1999999')]:
+        six,six_rect=states[short];seven,seven_rect=states[long]
+        for old,new in zip(six,seven[1:]):
+            assert new.x==pytest.approx(old.x,abs=1e-9)
+            assert dataclasses.replace(new,x=old.x)==old
+        _,cell,_,overlap=hud._legacy_glyphs('score',long)
+        assert six_rect.left-seven_rect.left==pytest.approx(max(cell-overlap,0)*.96*scale)
+    if skin=='blank-digits':
+        assert all(not rec.uploaded[f'sk_score_{i}'][:,:,3].any() for i in range(10))
+    if skin in ('complete','digits-only','asset-fallback','blank-digits'):
+        assert hud.sk.score_digit_sizes['5']==(30,48)  # mixed @2x normalises
+    if skin=='owner':
+        assert hud.sk.info.score_prefix=='Assets/score/score'
+        assert hud.sk.info.score_overlap==5
+
+
+@pytest.mark.parametrize('resolution',[(1280,720),(1920,1080)])
+@pytest.mark.parametrize('scale',[.75,1,1.25])
+def test_legacy_rolling_score_crosses_million_without_anchor_or_scale_jump(
+        bank,skins,blank_score_skin,resolution,scale):
+    from osu_std_renderer.render.hud import HudData,LEGACY_SCORE_ROLL_MS
+    from osu_std_renderer.ruleset import JudgmentEvent,JudgmentKind
+    hud,rec=growth_hud(bank,skins,blank_score_skin,'owner',resolution,scale)
+    events=[JudgmentEvent(1000,JudgmentKind.HIT300,0,100,100,1,999999,1),
+            JudgmentEvent(3000,JudgmentKind.HIT300,1,200,100,2,1001273,1)]
+    hud.data=HudData(SimpleNamespace(events=events,verdicts={},combo_timeline=[],
+                                     final_max_combo=2,lazer=True))
+    sizes={};lengths=[]
+    for t in (2999,3000,3000.1,3000.2,3016.6666667,3500,4000):
+        value=round(hud.data.score_at(t,LEGACY_SCORE_ROLL_MS))
+        digits=score_sprites(hud,render(hud,rec,t))
+        text=f'{value:06d}'
+        assert [s.texture_key for s in digits]==[f'sk_score_{ch}' for ch in text]
+        assert hud.bounds['score'].right==pytest.approx(hud.ui_w_l-3*scale)
+        assert hud.bounds['accuracy'].right==pytest.approx(hud.bounds['score'].right)
+        assert digits[-1].x+digits[-1].w/2==pytest.approx(resolution[0]-3*scale*hud.lk)
+        for sp in digits:
+            properties=(sp.y,sp.w,sp.h,sp.uv_off,sp.uv_scale)
+            if sp.texture_key in sizes:assert properties==sizes[sp.texture_key]
+            sizes[sp.texture_key]=properties
+        lengths.append(len(digits))
+    assert lengths[:3]==[6,6,6] and lengths[3:]==[7,7,7,7]
+    assert text=='1001273'
+    # The query remains deterministic after out-of-order seeks.
+    assert round(hud.data.score_at(3000,LEGACY_SCORE_ROLL_MS))==999999
+
+
+@pytest.mark.parametrize('overlap',[-8,3])
+def test_legacy_growth_retains_nonuniform_glyphs_punctuation_and_overlap(bank,tmp_path,overlap):
+    (tmp_path/'skin.ini').write_text(f'[Fonts]\nScorePrefix: native\nScoreOverlap: {overlap}\n')
+    for i in range(10):
+        factor=2 if i%2 else 1
+        Image.new('RGBA',((25+i)*factor,48*factor),'white').save(
+            tmp_path/f'native-{i}{"@2x" if factor==2 else ""}.png')
+    Image.new('RGBA',(9,48),'white').save(tmp_path/'native-dot.png')
+    Image.new('RGBA',(15,48),'white').save(tmp_path/'native-percent.png')
+    hud,rec=make_hud(bank,folder=tmp_path)
+    hud._pin=1
+    states=[]
+    for n in (0,1000000):
+        hud.data.score_at=lambda *args,v=n:v
+        states.append(score_sprites(hud,render(hud,rec)))
+    for old,new in zip(states[0],states[1][1:]):
+        assert new.x==pytest.approx(old.x,abs=1e-9)
+        assert dataclasses.replace(new,x=old.x)==old
+    delta=states[0][0].x-states[1][0].x
+    assert delta==pytest.approx((30-overlap)*.96*hud.lk)
+    glyphs,cell,_,actual_overlap=hud._legacy_glyphs('score','5.5%')
+    advances,_,_,_=hud._legacy_metrics(glyphs,cell,actual_overlap)
+    assert advances==[30,9,30,15]  # punctuation excluded from digit cells
+
+
+def test_legacy_pathological_long_score_fits_four_three_without_losing_digits(bank,tmp_path):
+    (tmp_path/'skin.ini').write_text('[Fonts]\nScorePrefix: huge\nScoreOverlap: -12\n')
+    for i in range(10):Image.new('RGBA',(400+i,500+i),'white').save(tmp_path/f'huge-{i}.png')
+    hud,rec=make_hud(bank,folder=tmp_path,renderer=Recorder(1024,768))
+    hud._pin=1
+    hud.data.score_at=lambda *args:1234567890123456
+    digits=score_sprites(hud,render(hud,rec))
+    text='1234567890123456'
+    assert [s.texture_key for s in digits]==[f'sk_score_{ch}' for ch in text]
+    assert len(digits)==16
+    assert hud.bounds['score'].right==pytest.approx(hud.bounds['accuracy'].right)
+    assert hud.bounds['score'].left>=8-1e-6 and hud.bounds['score'].bottom<=180+1e-6
+    assert all(s.w<400*.96 for s in digits)  # deliberate viewport fitting
 
 
 @pytest.mark.parametrize('resolution', [(1280,720),(1920,1080),(2560,1080)])
@@ -373,11 +521,113 @@ def test_legacy_grade_side_slot_preserves_mods_and_other_sprites(
             assert (grade.top+grade.bottom)/2==pytest.approx(
                 (accuracy.top+accuracy.bottom)/2)
             reserved_pie_left=accuracy.left-(33+18)*scale
-            assert reserved_pie_left-grade.right==pytest.approx(12*scale)
+            assert reserved_pie_left-grade.right>=scale-1e-6
             assert 0<=grade.left<grade.right<=hud.ui_w_l
             assert 0<=grade.top<grade.bottom<=768
             for name in ('score','accuracy','progress','mods','hits','keys'):
                 if name in hud.bounds:assert not grade.intersects(hud.bounds[name]),name
+
+
+@pytest.mark.parametrize('resolution', [(1280,720),(1920,1080)])
+@pytest.mark.parametrize('scale', [.75,1,1.25])
+@pytest.mark.parametrize('skin', ['varied-art','empty','owner'])
+def test_grade_pivot_is_independent_of_accuracy_score_and_rank_art(
+        bank, skins, tmp_path, resolution, scale, skin):
+    if skin == 'owner':
+        folder=Path(__file__).resolve().parents[1]/'test-render/skin'
+        if not folder.is_dir():pytest.skip('owner extracted skin is a local QA input')
+    elif skin == 'varied-art':
+        folder=fixtures(tmp_path)/'complete'
+        for rank,size in [('X',(60,38)),('S',(90,28)),('A',(25,50)),
+                          ('B',(100,120)),('C',(12,16)),('D',(40,32))]:
+            Image.new('RGBA',size,'white').save(folder/f'ranking-{rank}-small.png')
+    else:
+        folder=skins/'empty'
+    hud,rec=make_hud(bank,folder=folder,renderer=Recorder(*resolution),
+                     hud_scale=scale,show_hit_counter=True)
+    pivot=None
+    states=[(1,'SS'),(.9999,'S'),(.9768,'S'),(.9,'A'),(.8,'B'),(.7,'C'),(.0699,'D')]
+    for progress in (False,True):
+        hud.s.show_progress=progress
+        for i,(acc,rank) in enumerate(states):
+            # This isolates layout from scoring: coherent numeric/rank targets
+            # change while fonts, profile and resolution remain identical.
+            hud.data.acc_at=lambda *args,a=acc:a
+            hud.data.grade_at=lambda t,g=rank:g
+            hud.data.score_at=lambda *args,n=i:n*1234567+3473
+            hud.s.show_grade=False
+            without=render(hud,rec,2300)
+            native=dict(hud.bounds)
+            hud.s.show_grade=True
+            with_grade=render(hud,rec,2300)
+            if pivot is None:pivot=hud._legacy_grade_anchor
+            assert hud._legacy_grade_anchor==pytest.approx(pivot)
+            grade=hud.bounds['grade']
+            assert grade.right==pytest.approx(pivot[0])
+            assert (grade.top+grade.bottom)/2==pytest.approx(pivot[1])
+            assert 0<=grade.left<grade.right<=hud.ui_w_l
+            assert 0<=grade.top<grade.bottom<=768
+            assert {k:v for k,v in hud.bounds.items() if k!='grade'}==native
+            for name,rect in native.items():
+                if name in ('score','accuracy','progress','mods','hits','keys'):
+                    assert not grade.intersects(rect),name
+            # A visibility toggle adds only grade sprites. Existing opacity,
+            # textures, dimensions, UVs, native pie and other components persist.
+            added=[sp for sp in with_grade if sp not in without]
+            assert added and [sp for sp in with_grade if sp not in added]==without
+            if hud.sk.has('ranking-X-small' if rank=='SS' else f'ranking-{rank}-small'):
+                sprite=added[0]
+                element='ranking-X-small' if rank=='SS' else f'ranking-{rank}-small'
+                w,h=hud.sk.size[element]
+                assert sprite.texture_key==f'sk_{element}'
+                assert sprite.w/sprite.h==pytest.approx(w/h)
+    render(hud,rec,999)
+    assert 'grade' not in hud.bounds
+
+
+@pytest.mark.parametrize('skin', ['complete','owner'])
+def test_reconciled_slider_accuracy_selects_matching_rank_art(bank, skins, skin):
+    from tests.test_ruleset import _multi_slider, _perfect_slider_frames, _lazer_stats_meta
+    from osu_std_renderer.ruleset import StdRuleset
+    from osu_std_renderer.render.hud import HudData
+    folder=skins/'complete' if skin=='complete' else Path(__file__).resolve().parents[1]/'test-render/skin'
+    if not folder.is_dir():pytest.skip('owner extracted skin is a local QA input')
+    bm=_multi_slider(8);frames=_perfect_slider_frames(bm)
+    meta=_lazer_stats_meta(8,large_tick_hit=14,large_tick_miss=2,
+                          slider_tail_hit=5,max_large_tick=16,max_slider_tail=8,max_combo=24)
+    sim=StdRuleset(bm,frames,meta).run()
+    rec=Recorder();sk=SkinElements(Skin(skin_dir=folder),rec)
+    hud=StdHud(rec,bank,StdRenderSettings(skin_dir=folder),sim,frames,bm,skin_elems=sk)
+    assert sim.final_counts==(8,0,0,0) and HudData(sim).final_acc()==.875
+    assert hud.data.grade_at(100000)=='B'
+    out=[];hud._grade_badge(out,100000,1230,74)
+    assert 'sk_ranking-X-small' not in {sp.texture_key for sp in out}
+    if skin=='owner':
+        assert len(out)==1 and out[0].texture_key=='sk_ranking-B-small'
+        # Also check the packet's 97.68% S case through the popup-only
+        # compatibility input, where the old independent count authority failed.
+        sim.accuracy_timeline=()
+        sim.events[-1]=dataclasses.replace(sim.events[-1],acc_after=.9768)
+        hud.data=HudData(sim);out=[];hud._grade_badge(out,100000,1230,74)
+        assert len(out)==1 and out[0].texture_key=='sk_ranking-S-small'
+    else:
+        assert out and all(not (sp.texture_key or '').startswith('sk_ranking') for sp in out)
+
+
+def test_break_overlay_uses_same_nested_raw_accuracy_and_rank(bank, skins):
+    from tests.test_ruleset import _multi_slider, _frames
+    from osu_std_renderer.ruleset import StdRuleset
+    from osu_std_renderer.replay.replay import KEY_K1
+    from osu_std_renderer.render.hud import HudData
+    bm=_multi_slider(2)
+    sim=StdRuleset(bm,_frames([(1000,256,192,KEY_K1),(1010,256,192,0)]),
+                   lazer=True,reconcile=False).run()
+    point=next(p for p in sim.accuracy_timeline if p.kind=='tick')
+    hud,_=make_hud(bank,folder=skins/'complete')
+    hud.data=HudData(sim);calls=[]
+    hud.break_overlay=SimpleNamespace(draw=lambda *args,**kwargs:calls.append((args,kwargs)))
+    hud._draw_break_overlay(point.time_ms)
+    assert calls[-1]==((point.time_ms,300/330,'A'),{'lazer_display':True})
 
 
 @pytest.mark.parametrize('channels', [2,4])

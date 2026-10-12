@@ -57,41 +57,55 @@ BreakOverlay remains a separate later batch, above HUD opacity.
 
 ### Temporary Legacy placement calibration (12 October 2026)
 
-The owner review pass adds presentation offsets to the immutable `LEGACY`
-layout: score X −26, accuracy X +14 / Y −4, in 768-high logical HUD units.
-The stock source margins above remain explicit in `hud.py`; effective project
-insets are score 36, accuracy 3, and a score-to-accuracy gap of 5. Score still
-starts at Y=0. Glyph dimensions, prefix, overlap, UVs and aspect remain unchanged
-for normal fonts. Accuracy follows the actual measured score bottom, and the
-pie/grade/secondary collision flow consumes the resulting bounds.
+The owner-selected Legacy calibration uses **one shared right edge** for
+score and accuracy: `layout.legacy_counter_right(width, scale)` returns
+`width + (legacy_accuracy_offset.x - 17)*scale`, currently
+`width - 3*scale` in the 768-high HUD space. Accuracy retains its approved
+`legacy_accuracy_offset=(14,-4)`, `.576` text scale and vertical placement
+at actual score bottom + `5*scale`. Score retains `.96` scale and Y=0.
 
-These are provisional owner-feedback calibration values, **not stock lazer
-geometry or an implementation of `MainHUDComponents.json`**. They apply to
-every Legacy profile, including other custom skins and skinless
-`--legacy-defaults`; Argon has zero offsets. This shared-profile consequence
-requires owner visual signoff. Set the two layout offsets back to zero to
-restore stock placement without changing providers or the CLI/API contract.
-No new setting or skin-specific detection was added.
+This supersedes the earlier score X offset of −26 (effective inset 36).
+Relative to that immediately preceding result, score moves right by
+`33*scale` logical units: 30.9375 pixels at 1280×720 and 46.40625 pixels
+at 1920×1080 with scale 1. Score/accuracy drawable right-edge separation
+is now zero. Their shared output X is `output_width - 3*scale*height/768`:
+1277.1875 at 720p and 1915.78125 at 1080p, scale 1.
 
-At HUD scale 1, score moves −24.375 px horizontally at 1280×720 and −36.5625 px
-at 1920×1080. Accuracy moves (+13.125, −3.75) and (+19.6875, −5.625) px,
-respectively. Source-geometry tests retain the stock 10/17/9 expectations with
-zero calibration; paired sprite tests separately check the displacement,
-unchanged glyph properties, viewport constraints and independent Argon layout.
+This is **project calibration**, not stock lazer's separate score/accuracy
+margins of 10/17, and not saved `MainHUDComponents.json` support. It applies
+to every Legacy profile: complete, partial, empty and blank custom skins,
+asset fallbacks, the existing font override and skinless `--legacy-defaults`.
+Argon remains independent. There is no separate score X calibration to
+silently drift from accuracy. Setting accuracy offsets to zero gives both
+counters the native accuracy margin/gap; it does not restore the independent
+stock score margin.
 
-After the owner's first screenshot review, revision 2 moves score another 8
-logical units left and accuracy 2 down relative to that first calibration:
-−7.5 / −11.25 output pixels for score at 720p / 1080p, and +1.875 / +2.8125
-pixels vertically for accuracy. Score Y and accuracy X remain unchanged.
+Standardised score formatting remains a **minimum of six digits**: `000000`,
+`999999`, `1000000`, `1001273`, through eight digits and beyond. Normal fonts
+expand left as a leading digit is added, retaining the rightmost glyph,
+fixed-width `'5'` advance minus overlap, native `ScorePrefix` glyph sizes,
+`@2x` normalization and UVs. Punctuation uses its own advance. The existing
+one-second roll can keep the displayed score below one million briefly after
+the target crosses it. These checks concern the settled/rolled value, not
+new score calculation or an eight-digit Classic minimum.
 
-The subsequent 100.00% review moves accuracy another 7 logical units right
-(6.5625 / 9.84375 output pixels at 720p / 1080p), retaining its Y and size.
-In the real replay at 10,000 ms, the leading 1 previously crossed the rounded
-left edge of the skin's foreground `scorebar-bg`; this revision clears that
-edge while keeping the complete glyph run in-frame. Grade and progress pie
-follow the measured accuracy bounds with their existing gaps. This remains
-presentation calibration for the shared Legacy profile, not a glyph clipping
-bug or saved-layout support; health artwork and its overlay order are intact.
+Viewport width/height fitting remains for unusually large fonts or long
+runs. That deliberate adaptation can reduce all score glyphs and change
+accuracy's dependent vertical position when fit activates. Nonuniform
+native glyph heights/overhang may also affect drawable bounds; extreme
+positive overlap keeps the existing non-reversing zero-advance guard.
+No fit activates for the owner's six, seven or eight digits at tested
+720p/1080p and HUD scales .75/1/1.25. Grade's fixed font-derived pivot,
+native pie and all other HUD positions remain unchanged in those cases.
+
+The supplied 12 October screenshot references show different gameplay
+moments and different artwork from the current extracted test skin. They
+establish the requested right-alignment/digit-growth contract, not matched
+frame or font pixel parity. Native-resolution before/after EGL captures
+and glyph/visible-ink measurements are recorded in
+`/home/theaussie/std-test/legacy-score-alignment-20261012/`. Million-score
+captures there are explicitly labelled synthetic HUD fixtures; the owner's
+real replay is preserved separately.
 
 The owner fixture's health provider remains Legacy: `scorebar-bg@2x.png`
 (1366×786 logical), 120 `scorebar-colour` frames (388×78 logical), and an
@@ -125,16 +139,45 @@ reference and R3D's Nunito/procedural counter fonts retained initially.
 ## R3D extras and overflow adaptations
 
 Live grade is an R3D extra; neither native MainHUDComponents container has
-this grade slot. In Legacy it is centred vertically on measured accuracy,
-with its right edge 12 logical units left of the reserved 33-unit progress
-pie (which itself clears accuracy by 18 units). This follows the owner's
-marked screenshot location. The pie remains reserved with progress OFF,
-so toggling progress does not move grade. Measured accuracy also anchors
-grade and secondary flow when score/accuracy sprites are hidden. Rank art
-still fits a maximum 48x32 slot; procedural rank text shares that slot.
-For pathological fonts that leave insufficient space beside accuracy, grade
-uses an in-frame slot below the readouts at the left margin. Argon's existing
-grade slot below accuracy is unchanged. None of this consumes saved HUD JSON.
+this grade slot. Legacy now uses a **fixed right-centre pivot**, measured from
+the selected font and immutable profile, independently of the current score,
+accuracy string or rank artwork. The reference is the owner's preferred
+two-integer-digit `97.68%` placement, 12 logical units left of its reserved
+33-unit pie (which itself clears accuracy by 18). The slot also clears the
+widest legal percentage's pie with a one-unit minimum gap; wide/nonuniform
+fonts can therefore move this reference slightly left. The owner's extracted
+font gives a pivot of `(1238.333333, 73.64)` in 768-high HUD coordinates at
+16:9 and scale 1, versus the previous width-dependent X of `1227.333333` at
+100% and `1238.853333` at 97.68%. This is project presentation calibration,
+not native lazer grade placement. Accuracy placement remains unchanged by
+the subsequent shared-right-edge score fix.
+
+The pivot stays fixed with progress OFF or hidden score/accuracy. The native
+pie retains its existing current-string placement; grade no longer inherits
+that motion. Rank art still fits a maximum 48x32 slot, retains aspect ratio,
+and uses the same right-centre pivot as procedural text. Pathological fonts
+that leave insufficient side space use a fixed left-margin slot below the
+font's readout envelope. Argon's grade placement is unchanged. None of this
+consumes saved HUD JSON.
+
+Live lazer rank now uses raw scoring accuracy and the ordinary object Miss
+count, with exact 1.0 required for SS, then .95/.90/.80/.70 cutoffs. An ordinary
+Miss caps S/SS at A; missed ticks and tails lower accuracy without incrementing
+that cap. Stable/Classic `grade_for()` callers retain object-count accuracy.
+Rank is never derived from rolled/truncated/rounded counter glyphs.
+
+`SimResult.accuracy_timeline` contains frozen samples from the **existing**
+chronological scoring lattice for object, tick, repeat and tail results.
+HUD accuracy and rank share those samples; BreakOverlay reads the same raw
+accuracy/rank. Provenance is `derived-lattice` or `reconciled-lattice`, not a
+claim of native callback timing. Popup-only/older inputs use the deterministic
+`object-events-fallback` authority for lazer, without invented nested times.
+The established last-popup final accuracy pin is preserved (`canonical-final-pin`
+or `lattice-final-pin`) and wins from that popup onward. Consequently, a map
+ending on a slider can still present its eventual/canonical final accuracy
+before the tail's nominal time. Reconciled part positions and the sim's tail
+timing/rolling-counter approximations remain limitations; this HUD fix does
+not modify judged outcomes, score events or slider visual lifecycles.
 
 Legacy mod pills flow below native readout/pie bounds, without including
 grade in that vertical stack; showing grade no longer pushes mods down.

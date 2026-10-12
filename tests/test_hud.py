@@ -11,7 +11,7 @@ from pathlib import Path
 from osu_std_renderer.render.hud import (
     ARGON_ROLL_MS, ERR_ARROW_N, HudData, KeySeries, acc_display_value,
     argon_combo_scale_at, ease_out_quad, grade_for, layout_run,
-    legacy_combo_display_timeline, rolled, std_accuracy, unstable_rate,
+    legacy_combo_display_timeline, rank_from_accuracy, rolled, std_accuracy, unstable_rate,
 )
 from osu_std_renderer.beatmap import load_full
 from osu_std_renderer.replay.replay import (
@@ -70,6 +70,54 @@ def test_std_accuracy():
                - (300 * 589 + 100 * 8) / (300.0 * 599)) < 1e-12
     assert std_accuracy(0, 0, 0, 5) == 0.0
     assert abs(std_accuracy(0, 3, 0, 0) - 1.0 / 3.0) < 1e-12
+
+
+def test_rank_from_raw_accuracy_boundaries_and_ordinary_miss_cap():
+    cases = [(1.0, 'SS'), (.99999, 'S'), (.9768, 'S'), (.95, 'S'),
+             (math.nextafter(.95, 0), 'A'), (.9, 'A'),
+             (math.nextafter(.9, 0), 'B'), (.8, 'B'),
+             (math.nextafter(.8, 0), 'C'), (.7, 'C'),
+             (math.nextafter(.7, 0), 'D'), (0.0, 'D')]
+    for acc, rank in cases:
+        assert rank_from_accuracy(acc) == rank
+        assert rank_from_accuracy(acc, 1) == ('A' if rank in ('S', 'SS') else rank)
+    assert acc_display_value(.99999) == 100.0  # rounding never establishes perfect rank
+    assert rank_from_accuracy(math.nextafter(1.0, math.inf)) == 'S'
+
+
+def test_lazer_popup_only_fallback_uses_accuracy_and_chronological_misses():
+    import dataclasses
+    sim = _three_circle_run(click_third=True)
+    sim.lazer = True
+    sim.events = [dataclasses.replace(e, acc_after=acc) for e, acc in
+                  zip(sim.events, (1.0, .9768, .99999))]
+    d = HudData(sim)
+    assert d.accuracy_source == 'object-events-fallback'
+    assert d.grade_at(500) == 'SS'
+    assert d.grade_at(1000) == 'SS'
+    assert d.grade_at(2000) == 'S' and d.acc_at(2300) == .9768
+    assert d.grade_at(3000) == 'S'  # rank updates before accuracy finishes rolling
+    sim.events[-1] = dataclasses.replace(sim.events[-1], kind=sim.events[-1].kind.MISS)
+    d = HudData(sim)
+    assert d.grade_at(2999) == 'S'  # a future ordinary Miss cannot cap an earlier S
+    assert d.grade_at(3000) == 'A'
+    for t in (3300, 500, 2000, 1000, 3000, 2300, 2000):
+        assert d.grade_at(t) == ('SS' if t < 2000 else 'S' if t < 3000 else 'A')
+
+
+def test_stable_and_classic_grade_keep_object_count_semantics():
+    import dataclasses
+    sim = _three_circle_run(click_third=False)
+    for classic in (False, True):
+        sim.classic = classic
+        d = HudData(sim)
+        assert d.accuracy_source == 'object-events'
+        for e in sim.events:
+            assert d.grade_at(e.time_ms) == grade_for(*d.counts_at(e.time_ms))
+        # Object counts, rather than a lazer-only canonical accuracy authority,
+        # remain the rank input on stable/Classic compatibility callers.
+        sim.events[-1] = dataclasses.replace(sim.events[-1], acc_after=.9768)
+        assert HudData(sim).grade_at(5000) == 'D'
 
 
 def test_acc_display_matches_replay_meta_derivation():

@@ -150,7 +150,7 @@ from ..ruleset import JudgmentKind, OsuHitWindows
 from . import perf
 from .gl import Sprite
 from .textures import ARGON_GLYPH_CAP_SCALE
-from .hud_layout import HudRect, select_layout
+from .hud_layout import LEGACY_ACCURACY_MARGIN_X, HudRect, select_layout
 
 UI_HEIGHT = 1080.0             # our virtual UI space (previous phases)
 LAZER_UI_HEIGHT = 768.0        # lazer's HUD space (DrawSizePreserving 768)
@@ -273,10 +273,9 @@ HP_MISS_EASE_MS = 300.0
 
 # --- legacy constants ---------------------------------------------------------------
 LEGACY_SCORE_SCALE = 0.96
-LEGACY_SCORE_MARGIN_X = 10.0
 LEGACY_SCORE_ROLL_MS = 1000.0
 LEGACY_ACC_SCALE = 0.6 * 0.96
-LEGACY_ACC_MARGIN = (17.0, 9.0)          # horizontal, vertical
+LEGACY_ACC_MARGIN = (LEGACY_ACCURACY_MARGIN_X, 9.0)  # horizontal, vertical
 LEGACY_ACC_ROLL_MS = 375.0     # PercentageCounter.RollingDuration
 LEGACY_PIE_SIZE = 33.0
 LEGACY_PIE_GAP = 18.0
@@ -518,19 +517,17 @@ def acc_display_value(acc: float, lazer: bool = False) -> float:
     return round(acc * 100.0, 2)
 
 
-def grade_for(c300: int, c100: int, c50: int, cmiss: int) -> str:
-    """osu!(lazer)-EXACT rank. Ported from
+def rank_from_accuracy(acc: float, ordinary_misses: int = 0) -> str:
+    """Rank from raw scoring accuracy, never rounded/rolled display digits.
+
+    Ported from
     osu.Game/Rulesets/Scoring/ScoreProcessor.RankFromScore (accuracy
     cutoffs X=1 / S=.95 / A=.9 / B=.8 / C=.7 / D=0) with the std override
     osu.Game.Rulesets.Osu/Scoring/OsuScoreProcessor.RankFromScore, which
     downgrades S/X to A when any Miss is present. Silver (HD/FL SH/XH)
     variants are a display concern, skipped."""
-    total = c300 + c100 + c50 + cmiss
-    if total == 0:
-        return "SS"          # nothing judged yet — the rank Bindable starts X
-    acc = std_accuracy(c300, c100, c50, cmiss)
     # ScoreProcessor.RankFromScore (accuracy is 0..1; X requires exactly 1)
-    if acc >= 1.0:
+    if acc == 1.0:
         rank = "SS"
     elif acc >= 0.95:
         rank = "S"
@@ -543,9 +540,14 @@ def grade_for(c300: int, c100: int, c50: int, cmiss: int) -> str:
     else:
         rank = "D"
     # OsuScoreProcessor override: a miss caps S/X at A
-    if cmiss > 0 and rank in ("S", "SS"):
+    if ordinary_misses > 0 and rank in ("S", "SS"):
         rank = "A"
     return rank
+
+
+def grade_for(c300: int, c100: int, c50: int, cmiss: int) -> str:
+    """Compatibility helper for stable/Classic object-count accuracy."""
+    return rank_from_accuracy(std_accuracy(c300, c100, c50, cmiss), cmiss)
 
 
 def unstable_rate(deltas) -> float:
@@ -773,7 +775,8 @@ class BreakInfo:
 
 class HudData:
     """Arrays the per-frame draws bisect into, built once from the ruleset
-    SimResult: score/acc/grade per object judgment, the part-level combo
+    SimResult: score/counts per object judgment, shared accuracy/rank samples,
+    the part-level combo
     timeline (+ the Argon pop change list and the LEGACY displayed-count
     two-counter timeline), break moments, and the signed hit-delta series
     with prefix sums for O(log n) live UR."""
@@ -798,9 +801,28 @@ class HudData:
                                    c[JudgmentKind.HIT100],
                                    c[JudgmentKind.HIT50],
                                    c[JudgmentKind.MISS]))
-            self.ev_grades.append(grade_for(
-                c[JudgmentKind.HIT300], c[JudgmentKind.HIT100],
-                c[JudgmentKind.HIT50], c[JudgmentKind.MISS]))
+            self.ev_grades.append(
+                rank_from_accuracy(e.acc_after, c[JudgmentKind.MISS])
+                if self.lazer_display else grade_for(*self.ev_counts[-1]))
+
+        # A presentation-only timeline collected during the same scoring pass
+        # supplies existing nested timestamps. Its outcomes may be reconciled;
+        # it is not a record of native lazer callbacks. Older/partial SimResult
+        # callers deterministically fall back to popup accuracy, with no made-up
+        # nested timestamps. Stable/Classic keep their object-count contract.
+        points = getattr(sim, "accuracy_timeline", ()) if self.lazer_display else ()
+        if points:
+            self.acc_times = tuple(p.time_ms for p in points)
+            self.acc_values = tuple(p.accuracy for p in points)
+            self.rank_values = tuple(rank_from_accuracy(p.accuracy, p.ordinary_misses)
+                                     for p in points)
+            self.accuracy_source = getattr(sim, "accuracy_source", "derived-lattice")
+        else:
+            self.acc_times = tuple(self.ev_times)
+            self.acc_values = tuple(self.ev_accs)
+            self.rank_values = tuple(self.ev_grades)
+            self.accuracy_source = ("object-events-fallback" if self.lazer_display
+                                    else "object-events")
 
         tl = sim.combo_timeline
         self.ct_times = [t for t, _ in tl]
@@ -846,11 +868,16 @@ class HudData:
                       roll_ms)
 
     def acc_at(self, t: float, roll_ms: float = ARGON_ROLL_MS) -> float:
-        i = bisect.bisect_right(self.ev_times, t) - 1
+        i = bisect.bisect_right(self.acc_times, t) - 1
         if i < 0:
             return 1.0
-        prev = self.ev_accs[i - 1] if i > 0 else 1.0
-        return rolled(prev, self.ev_accs[i], t - self.ev_times[i], roll_ms)
+        prev = self.acc_values[i - 1] if i > 0 else 1.0
+        return rolled(prev, self.acc_values[i], t - self.acc_times[i], roll_ms)
+
+    def raw_acc_at(self, t: float) -> float:
+        """Un-rolled scoring target shared by live rank and the break overlay."""
+        i = bisect.bisect_right(self.acc_times, t) - 1
+        return self.acc_values[i] if i >= 0 else 1.0
 
     def final_acc(self) -> float:
         """The end-state accuracy: the LAST event's value — NOT a sample
@@ -863,8 +890,8 @@ class HudData:
         return self.ev_scores[-1] if self.ev_scores else 0
 
     def grade_at(self, t: float) -> str:
-        i = bisect.bisect_right(self.ev_times, t) - 1
-        return self.ev_grades[i] if i >= 0 else "SS"
+        i = bisect.bisect_right(self.acc_times, t) - 1
+        return self.rank_values[i] if i >= 0 else "SS"
 
     def counts_at(self, t: float) -> tuple[int, int, int, int]:
         """(300s, 100s, 50s, misses) judged so far — the hit counter."""
@@ -1973,13 +2000,11 @@ class StdHud:
         scene's fade-to-black / results / fail layers (scene.py draws
         those after hud.draw), matching lazer's Player container order.
         Values are the engine's LIVE HUD numbers, sampled per frame like
-        lazer's bindables: the raw event accuracy (un-rolled — the
+        lazer's bindables: the raw scoring accuracy (un-rolled — the
         bindable, not the rolling display) and grade_at (this ruleset's
         grade rules incl. the miss-caps-S/X-at-A override)."""
         d = self.data
-        i = bisect.bisect_right(d.ev_times, t) - 1
-        acc = d.ev_accs[i] if i >= 0 else 1.0
-        self.break_overlay.draw(t, acc, d.grade_at(t),
+        self.break_overlay.draw(t, d.raw_acc_at(t), d.grade_at(t),
                                 lazer_display=d.lazer_display)
 
     # ==================== ARGON components (skinless default) =======================
@@ -2383,19 +2408,19 @@ class StdHud:
     # ==================== LEGACY components (custom-skin path) ======================
 
     def _legacy_score_block(self, out, t: float) -> None:
-        """LegacyScoreCounter (TopRight ×0.96, margin 10, 6 leading
+        """LegacyScoreCounter (TopRight ×0.96, minimum 6 leading
         digits, 1 s Easing.Out roll) + LegacyAccuracyCounter (×0.576,
         margins 9/17, '0.00%') + LegacySongProgress (the pie left of the
-        accuracy). Project placement offsets live in the immutable layout;
-        these are review calibration, not saved-HUD JSON support or a change
-        to the stock source margins. The R3D grade is laid out separately."""
+        accuracy). Both counters share the layout's owner-calibrated right
+        edge; stock lazer uses independent score/accuracy margins of 10/17.
+        This is not saved-HUD JSON support. The grade is laid out separately.
+        """
         s = self.s
         es = self.es
         score = int(round(self.data.score_at(t, LEGACY_SCORE_ROLL_MS)
                           * self._pin))
         text = f"{max(score, 0):06d}"
-        right = self.ui_w_l + (self.layout.legacy_score_offset_x
-                               - LEGACY_SCORE_MARGIN_X) * es
+        right = self.layout.legacy_counter_right(self.ui_w_l, es)
         sw, sh = self._legacy_text_size("score", text, LEGACY_SCORE_SCALE * es)
         # Preserve native anchors. Fit only pathological oversized fonts to
         # the viewport, keeping every digit rather than clipping/truncating.
@@ -2411,8 +2436,8 @@ class StdHud:
         disp = acc_display_value(acc,
                                  getattr(self.data, "lazer_display", False))
         acc_text = f"{disp:.2f}%"
-        acc_dx, acc_dy = self.layout.legacy_accuracy_offset
-        acc_right = self.ui_w_l + (acc_dx - LEGACY_ACC_MARGIN[0]) * es
+        _, acc_dy = self.layout.legacy_accuracy_offset
+        acc_right = right
         acc_top = sh + (LEGACY_ACC_MARGIN[1] + acc_dy) * es
         aw, ah = self._legacy_text_size("score", acc_text, LEGACY_ACC_SCALE * es)
         reserve = (LEGACY_PIE_SIZE + LEGACY_PIE_GAP + 8) * es
@@ -2752,27 +2777,56 @@ class StdHud:
         if not self.s.show_grade or t < self._first_ev_t:
             return
         if self.layout.legacy:
-            accuracy = getattr(self, '_legacy_accuracy_bounds', None)
-            if accuracy is not None:
-                es = self.es
-                # Owner's marked slot: beside accuracy, to the LEFT of the
-                # pie's reserved rectangle. Reserve it with progress OFF too.
-                cy = (accuracy.top + accuracy.bottom) / 2.0
-                top = max(0.0, cy - 16*es)
-                right = accuracy.left - (LEGACY_PIE_GAP + LEGACY_PIE_SIZE + 12)*es
-                if right < 56*es or accuracy.bottom-accuracy.top < 8*es:
-                    # Pathological wide/tiny fonts leave no side slot. Keep
-                    # the badge in-frame below readouts at the left margin,
-                    # clear of the right-hand mods/hit-count stack.
-                    right = 56*es
-                    top = max(accuracy.bottom, cy+LEGACY_PIE_SIZE*es/2) + 12*es
-                self._component(out, 'grade', self._grade_badge, t,
-                                min(right, self._extra_right(top, 32*es)), top+16*es)
-                return
+            right, cy = self._legacy_grade_pivot()
+            self._legacy_grade_anchor = (right, cy)
+            self._component(out, 'grade', self._grade_badge, t, right, cy)
+            return
         top = max((self.bounds[n].bottom for n in ('accuracy',) if n in self.bounds),
                   default=8*self.es) + 12*self.es
         self._component(out, 'grade', self._grade_badge, t,
                         self._extra_right(top, 32*self.es), top+16*self.es)
+
+    def _legacy_grade_pivot(self) -> tuple[float, float]:
+        """Fixed right-centre slot derived only from profile/font/viewport.
+
+        Prefer the owner's two-integer-digit (97.68%) slot. Reserve the
+        widest percentage plus the unchanged native pie with a one-unit gap;
+        large or nonuniform fonts may require a slightly more leftward slot.
+        Neither current accuracy nor score digits nor rank art set the pivot.
+        """
+        key = (self.layout, self.es, self.ui_w_l)
+        if getattr(self, '_legacy_grade_slot_key', None) == key:
+            return self._legacy_grade_slot
+        es = self.es
+        _, dy = self.layout.legacy_accuracy_offset
+        acc_right = self.layout.legacy_counter_right(self.ui_w_l, es)
+        _, score_h = self._legacy_text_size('score', '0123456789', LEGACY_SCORE_SCALE*es)
+        score_h = min(score_h, 180*es)
+        # Repeated digits cover each fixed-width slot's largest glyph extent;
+        # 100.00% is the only legal three-integer-digit percentage.
+        samples = ['100.00%'] + [f'{d}{d}.{d}{d}%' for d in range(10)]
+        sizes = [self._legacy_text_size('score', text, LEGACY_ACC_SCALE*es)
+                 for text in samples]
+        max_w = max(w for w, _ in sizes)
+        max_h = max(h for _, h in sizes)
+        available = max(acc_right-(LEGACY_PIE_SIZE+LEGACY_PIE_GAP+8)*es, 1)
+        ref_w, ref_h = self._legacy_text_size('score', '97.68%', LEGACY_ACC_SCALE*es)
+        ref_fit = min(1.0, available/max(ref_w, 1), 108*es/max(ref_h, 1))
+        pie_reserve = (LEGACY_PIE_GAP+LEGACY_PIE_SIZE)*es
+        right = min(acc_right-ref_w*ref_fit-pie_reserve-12*es,
+                    acc_right-min(max_w, available)-pie_reserve-es)
+        acc_h = min(max_h, 108*es)
+        acc_top = score_h+(LEGACY_ACC_MARGIN[1]+dy)*es
+        cy = max(16*es, acc_top+acc_h/2)
+        if right < 56*es or acc_h < 8*es:
+            # A static left-margin fallback clears pathological readout fonts
+            # and the right-hand extras, without moving any native component.
+            right = 56*es
+            cy = max(acc_top+acc_h, cy+LEGACY_PIE_SIZE*es/2)+28*es
+        right = min(right, self._extra_right(cy-16*es, 32*es))
+        self._legacy_grade_slot_key = key
+        self._legacy_grade_slot = (right, cy)
+        return self._legacy_grade_slot
 
     def _extra_right(self, top: float, height: float) -> float:
         """Secondary right-edge flow clears the profile's key column/row."""

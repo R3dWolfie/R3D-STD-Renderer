@@ -372,6 +372,19 @@ class ObjectVerdict:
         return any(t0 <= t <= t1 for t0, t1 in self.tracking)
 
 
+@dataclass(frozen=True)
+class AccuracyPoint:
+    """Presentation sample from the existing scoring lattice, not a native callback.
+
+    Tick/repeat/tail times and outcomes inherit the sim's source-model and
+    reconciliation limits. Only object MISS increments ordinary_misses.
+    """
+    time_ms: float
+    accuracy: float
+    ordinary_misses: int
+    kind: str
+
+
 @dataclass
 class SimResult:
     """Judgment sim output: per-object verdicts + the popup/combo/score
@@ -395,6 +408,11 @@ class SimResult:
     # the HUD combo counter steps mid-slider and breaks at the REAL break
     # moment (not the next object judgment). Built alongside events.
     combo_timeline: list[tuple[float, int]] = field(default_factory=list)
+    # Immutable presentation-only accuracy/rank input. Popup events, scoring
+    # and judged outcomes retain their existing contract. The existing final
+    # accuracy pin wins from the last popup onward, including on slider ends.
+    accuracy_timeline: tuple[AccuracyPoint, ...] = ()
+    accuracy_source: str = "object-events"
 
     def verdict_for(self, obj) -> ObjectVerdict | None:
         return self.verdicts.get(id(obj))
@@ -508,7 +526,9 @@ class StdRuleset:
     def run(self) -> SimResult:
         sims = self.simulate()
         sim_counts = self._tally(sims)
-        sim_events, sim_max_combo, sim_timeline = self._build_events(sims)
+        accuracy_points: list[AccuracyPoint] = []
+        sim_events, sim_max_combo, sim_timeline = self._build_events(
+            sims, accuracy_timeline=accuracy_points)
         relabeled = 0
         real_counts = None
         real_max_combo = None
@@ -546,10 +566,13 @@ class StdRuleset:
                 and sum(real_counts) == len(sims)):
             combo_reconciled = self._reconcile_max_combo(sims, real_max_combo)
         final_counts = self._tally(sims)
-        events, final_max_combo, timeline = (
-            self._build_events(sims)
-            if (relabeled or parts_reconciled or combo_reconciled)
-            else (sim_events, sim_max_combo, sim_timeline))
+        reconciled = bool(relabeled or parts_reconciled or combo_reconciled)
+        if reconciled:
+            accuracy_points.clear()
+            events, final_max_combo, timeline = self._build_events(
+                sims, accuracy_timeline=accuracy_points)
+        else:
+            events, final_max_combo, timeline = sim_events, sim_max_combo, sim_timeline
         verdicts = {id(s.obj): self._verdict(s) for s in sims}
         return SimResult(
             verdicts=verdicts, events=events,
@@ -562,6 +585,9 @@ class StdRuleset:
             classic=self.classic,
             detail_lines=self._detail_lines(sims),
             combo_timeline=timeline,
+            accuracy_timeline=tuple(accuracy_points),
+            accuracy_source=("reconciled-lattice" if reconciled else "derived-lattice")
+            if self.lazer else "object-events",
         )
 
     def _detail_lines(self, sims: list[_ObjSim]) -> list[str]:
@@ -1761,6 +1787,7 @@ class StdRuleset:
 
     def _build_events(
             self, sims: list[_ObjSim],
+            *, accuracy_timeline: list[AccuracyPoint] | None = None,
     ) -> tuple[list[JudgmentEvent], int, list[tuple[float, int]]]:
         """Combo (stable semantics), accuracy and lazer-standardised score
         over the full event lattice; emits one JudgmentEvent per OBJECT
@@ -1818,6 +1845,7 @@ class StdRuleset:
         # replay's numbers are float-identical to the pre-split code.
         acc_num = 0.0
         acc_den = 0.0
+        ordinary_misses = 0
         for t, kind, is_obj, s, b, bmax, mode, hit, part_kind in lattice:
             cur_base += b
             cur_max_base += bmax
@@ -1828,6 +1856,9 @@ class StdRuleset:
                 if hit:
                     acc_num += w
                 acc_den += w
+                if accuracy_timeline is not None:
+                    accuracy_timeline.append(AccuracyPoint(
+                        t, acc_num / acc_den, ordinary_misses, part_kind))
             if mode != "none":
                 if hit:
                     combo += 1
@@ -1842,6 +1873,7 @@ class StdRuleset:
                 continue
             obj_n += 1
             obj_base += BASE_SCORE[kind.value]
+            ordinary_misses += kind is JudgmentKind.MISS
             if self.lazer:
                 # lazer: the object judgment joins the tick/tail terms
                 # (ScoreProcessor uses THIS accuracy in the score formula
@@ -1849,6 +1881,9 @@ class StdRuleset:
                 acc_num += BASE_SCORE[kind.value]
                 acc_den += 300.0
                 acc = acc_num / acc_den if acc_den > 0 else 1.0
+                if accuracy_timeline is not None:
+                    accuracy_timeline.append(AccuracyPoint(
+                        t, acc, ordinary_misses, "object"))
             else:
                 acc = obj_base / (300.0 * obj_n)
             if max_combo_portion > 0 and max_base_total > 0:
@@ -1886,6 +1921,17 @@ class StdRuleset:
             if final is not None:
                 events[-1] = dataclasses.replace(events[-1],
                                                  acc_after=final)
+                if accuracy_timeline is not None:
+                    # Preserve the established LAST-POPUP presentation pin.
+                    # Do not let later tail samples overwrite it or pretend
+                    # canonical ScoreInfo provides their native timestamps.
+                    last = events[-1].time_ms
+                    accuracy_timeline[:] = [p for p in accuracy_timeline
+                                            if p.time_ms < last]
+                    source = ("canonical-final-pin" if self.do_reconcile
+                              and canonical is not None else "lattice-final-pin")
+                    accuracy_timeline.append(AccuracyPoint(
+                        last, final, ordinary_misses, source))
         return events, max_combo, timeline
 
     def _popup_pos(self, s: _ObjSim) -> tuple[float, float]:

@@ -9,6 +9,8 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
+LEGACY_ACCURACY_MARGIN_X = 17.0  # upstream LegacyAccuracyCounter
+
 
 @dataclass(frozen=True)
 class HudLayout:
@@ -18,17 +20,25 @@ class HudLayout:
     keys_origin: str
     # Temporary project presentation calibration, separate from stock lazer
     # margins. Applies to every Legacy profile; saved skin JSON is not read.
-    legacy_score_offset_x: float = 0.0
     legacy_accuracy_offset: tuple[float, float] = (0.0, 0.0)
 
     @property
     def legacy(self) -> bool:
         return self.name == 'legacy'
 
+    def legacy_counter_right(self, width: float, scale: float) -> float:
+        """Owner-calibrated shared score/accuracy right edge in HUD units.
+
+        Accuracy retains its stock margin and project offset. Score adopts
+        that edge instead of a separate horizontal calibration; this is not
+        stock lazer's independent score margin of 10.
+        """
+        return width + (self.legacy_accuracy_offset[0]
+                        - LEGACY_ACCURACY_MARGIN_X) * scale
+
 
 ARGON = HudLayout('argon', 'TopLeft', 'BottomRight', 'BottomRight')
 LEGACY = HudLayout('legacy', 'TopRight', 'CentreRight', 'TopRight',
-                   legacy_score_offset_x=-26.0,
                    legacy_accuracy_offset=(14.0, -4.0))
 
 
