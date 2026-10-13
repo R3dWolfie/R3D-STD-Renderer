@@ -21,6 +21,9 @@ class HudLayout:
     # Temporary project presentation calibration, separate from stock lazer
     # margins. Applies to every Legacy profile; saved skin JSON is not read.
     legacy_accuracy_offset: tuple[float, float] = (0.0, 0.0)
+    # R3D live grade: centre offset from the right edge, absolute HUD Y.
+    # Independent of the native score/accuracy/pie and their font metrics.
+    legacy_grade_offset: tuple[float, float] = (0.0, 0.0)
 
     @property
     def legacy(self) -> bool:
@@ -39,7 +42,8 @@ class HudLayout:
 
 ARGON = HudLayout('argon', 'TopLeft', 'BottomRight', 'BottomRight')
 LEGACY = HudLayout('legacy', 'TopRight', 'CentreRight', 'TopRight',
-                   legacy_accuracy_offset=(14.0, -4.0))
+                   legacy_accuracy_offset=(14.0, -4.0),
+                   legacy_grade_offset=(-31.0, 247.0))
 
 
 def select_layout(settings, skin_elems) -> HudLayout:

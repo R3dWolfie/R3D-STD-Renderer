@@ -44,7 +44,7 @@ imported.
 | Argon progress | `Screens/Play/HUD/ArgonSongProgress.cs` / `ArgonSongProgressBar.cs`, `ArgonSkin.cs:228–242`: BottomCentre, 90% width, bottom padding 10 |
 | Legacy score | `osu.Game/Skinning/LegacyScoreCounter.cs`: TopRight, scale .96, horizontal margin 10 |
 | Legacy accuracy | `LegacyAccuracyCounter.cs`, `LegacySkin.cs:428–443`: TopRight, scale .576, horizontal margin 17, top = actual score bottom + 9 |
-| Legacy progress | `LegacySongProgress.cs`, `LegacySkin.cs:436–443`: 33-unit pie, right edge 18 units left of accuracy, centre aligned with accuracy |
+| Legacy progress | Stable `ScoreDisplay.LeftOfDisplay`, `ProgressBarCircular`, `CircularProgress`: fixed initial `00.00%`, native right inset 9.6 plus font advance and 38.4 gap, sector radius 16, independent 42-unit overlay, signed 40-division sweep from noon |
 | Legacy keys | `osu.Game.Rulesets.Osu/Skinning/Legacy/OsuLegacySkinTransformer.cs:62–72`, `LegacyKeyCounterDisplay.cs`, `LegacyKeyCounter.cs`: CentreRight anchor, TopRight origin, top = 384-64*HUD scale; background begins at container top, key flow begins 7 units lower; 46-unit cells and 1.8 spacing |
 | Legacy HP | `LegacySkin.cs:462–465`, `LegacyHealthDisplay.cs`: native texture dimensions and fill/marker placement; frontmost normal HUD art, including deliberate oversized full-screen scorebars |
 | Font metrics | `LegacySpriteText.cs`: fixed digit cell from '5', prefix and negative overlap spacing; use actual glyph rectangles to derive score/accuracy bounds |
@@ -95,8 +95,9 @@ accuracy's dependent vertical position when fit activates. Nonuniform
 native glyph heights/overhang may also affect drawable bounds; extreme
 positive overlap keeps the existing non-reversing zero-advance guard.
 No fit activates for the owner's six, seven or eight digits at tested
-720p/1080p and HUD scales .75/1/1.25. Grade's fixed font-derived pivot,
-native pie and all other HUD positions remain unchanged in those cases.
+720p/1080p and HUD scales .75/1/1.25. That score-alignment pass preserved
+the grade, native pie and other HUD positions. The subsequent owner-marked
+grade placement is described below.
 
 The supplied 12 October screenshot references show different gameplay
 moments and different artwork from the current extracted test skin. They
@@ -139,26 +140,45 @@ reference and R3D's Nunito/procedural counter fonts retained initially.
 ## R3D extras and overflow adaptations
 
 Live grade is an R3D extra; neither native MainHUDComponents container has
-this grade slot. Legacy now uses a **fixed right-centre pivot**, measured from
-the selected font and immutable profile, independently of the current score,
-accuracy string or rank artwork. The reference is the owner's preferred
-two-integer-digit `97.68%` placement, 12 logical units left of its reserved
-33-unit pie (which itself clears accuracy by 18). The slot also clears the
-widest legal percentage's pie with a one-unit minimum gap; wide/nonuniform
-fonts can therefore move this reference slightly left. The owner's extracted
-font gives a pivot of `(1238.333333, 73.64)` in 768-high HUD coordinates at
-16:9 and scale 1, versus the previous width-dependent X of `1227.333333` at
-100% and `1238.853333` at 97.68%. This is project presentation calibration,
-not native lazer grade placement. Accuracy placement remains unchanged by
-the subsequent shared-right-edge score fix.
+this grade slot. The 13 October owner-marked Legacy placement supersedes
+the earlier font-derived slot beside accuracy. Its preferred **centre** is
+`(HUD width - 31, 247)` with one visible mod row, in 768-high coordinates,
+between the judgement counter and key overlay. Different rank widths stay
+centred on that point.
+The original texture selection, opacity, aspect and maximum 48x32 fit are
+unchanged. This is owner-directed project placement, not native lazer layout
+or saved HUD JSON support. Argon's grade and every other component retain
+their existing positions and drawing paths.
 
-The pivot stays fixed with progress OFF or hidden score/accuracy. The native
-pie retains its existing current-string placement; grade no longer inherits
-that motion. Rank art still fits a maximum 48x32 slot, retains aspect ratio,
-and uses the same right-centre pivot as procedural text. Pathological fonts
-that leave insufficient side space use a fixed left-margin slot below the
-font's readout envelope. Argon's grade placement is unchanged. None of this
-consumes saved HUD JSON.
+At the production HUD scale 1.0, the owner's replay/skin has a 98.04-unit gap:
+counter bottom 221.96, key top 320. The unchanged 32-unit badge spans Y=231–263,
+leaving 9.04 units above and 57 below. Counter ON/OFF, changing judgement
+counts, score, accuracy, grade and progress do not move that normal anchor.
+The grade now follows the hit counter's visible mod-stack offset: with no
+mods, or mod display OFF, its preferred centre moves up 48 scaled units
+(Y=199 at scale 1); additional wrapped rows move it down by the same stack
+height as the counter. A single-row modded replay retains the marked Y=247.
+
+Crowded mod stacks, large fonts or non-default scales reserve a maximum-size
+grade slot with eight scaled units of padding. Placement uses immutable font
+heights, the configured mod list, resting key geometry and the full replay's
+maximum count-digit envelope; it never follows the current displayed values.
+When the badge cannot fit vertically before the keys, only the grade moves
+beside the existing stack. No counter/mod/key rearrangement is performed.
+The probe calls geometry-only builders on a shallow HUD copy, with private
+bounds and presentation-only probe data. It performs no draw/texture writes
+and never mutates the live scoring, key or health objects. Placement is cached
+per layout/viewport/scale/display configuration. Hidden readouts and progress
+still reserve their static envelope, so toggling them cannot move the grade.
+Mod/no-mod and hidden-mod captures, collision checks and preservation evidence
+for this follow-up are in
+`/home/theaussie/std-test/legacy-grade-mod-flow-20261013/`.
+The stable pie independently retains its initial `00.00%` anchor. Its native
+6-unit right inset converts to 9.6 HUD units; the approved live counters
+retain their own 3-unit right inset. This pie-only horizontal distinction
+follows the owner's subsequent native-position correction. Its vertical
+reference remains the approved constructor accuracy top plus half the
+stable initial font height. Current accuracy ink and grade cannot move it.
 
 Live lazer rank now uses raw scoring accuracy and the ordinary object Miss
 count, with exact 1.0 required for SS, then .95/.90/.80/.70 cutoffs. An ordinary
@@ -179,7 +199,8 @@ before the tail's nominal time. Reconciled part positions and the sim's tail
 timing/rolling-counter approximations remain limitations; this HUD fix does
 not modify judged outcomes, score events or slider visual lifecycles.
 
-Legacy mod pills flow below native readout/pie bounds, without including
+Legacy mod pills retain their incoming readout/33-unit pie flow reservation,
+independently of the isolated stable pie's new draw bounds, without including
 grade in that vertical stack; showing grade no longer pushes mods down.
 Argon retains its existing flow below accuracy and grade. Hit counts follow
 the complete wrapped mod stack. These extras move inward when their
@@ -228,3 +249,14 @@ PYTHONPATH=. "$PYTHON" tests/capture_hud_layout.py \
 Before and after labels write different files. Full-scene CLI dumps and
 the actual replay videos complement these HUD-isolated captures. Owner
 visual review remains the acceptance gate.
+
+The isolated stable progress contract is tested in
+`tests/test_stable_progress_pie.py`: initial font advance (including trailing
+ScoreOverlap), first-glyph height, @2x/blank/missing punctuation, static
+anchors, native intro lead, signed 40-division endpoints, opacity and actual
+720p/1080p/non-16:9 EGL pixels. The 42-unit circularmetre canvas is independent
+of the 32-unit sector. Its procedural ring/glow/dot approximates inspected
+stock artwork rather than bundling that image. Existing fallback font
+providers, foreground HP layering and all other components remain intact.
+See `std-stable-progress-pie-report.md` for native before/after evidence,
+resource provenance, limitations and owner approval status.

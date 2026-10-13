@@ -62,8 +62,8 @@ schedule/lifecycle math — see its docstring for the semantics):
   * slider heads/tails use sliderstartcircle/sliderendcircle(+overlays)
     when the skin ships them (§3.3 GetMostSpecific vs hitcircle).
 
-CURSOR TRAIL (§3.3 two-mode rule, skin cursor only): skin HAS
-cursormiddle (or ForceLongTrail) → the LONG CONNECTED trail, STRICTLY
+CURSOR TRAIL (§3.3 two-mode rule, skin cursor only): cursor's provider HAS
+cursormiddle (or ForceLongTrail) → the LONG CONNECTED additive trail, STRICTLY
 DISTANCE-BASED (owner-directed 2026-07): the whole replay path is
 resampled ONCE at init into points every LONG_TRAIL_SPACING_OSU osu!px
 of cursor TRAVEL (build_distance_trail — interpolating between replay
@@ -74,8 +74,9 @@ can never stack up and over-brighten in place). Per frame the points
 inside the last LONG_TRAIL_WINDOW_MS are drawn (newest
 LONG_TRAIL_MAX_POINTS≈stable's 2048 at most), each at a UNIFORM base
 alpha scaled only by its age fade along the ribbon.
-No cursormiddle → the classic sparse trail: one sprite dropped every
-16.67 ms, each fading over TRAIL_SPRITE_LIFE_MS. The procedural (non-skin)
+No same-provider cursormiddle → the classic sparse normal-blend trail:
+one sprite dropped every 16.67 ms, each fading over TRAIL_SPRITE_LIFE_MS.
+The procedural (non-skin)
 cursor keeps its shader-style glow trail.
 
 SPINNER PHASE (render/spinner.py holds the pure math — see its docstring
@@ -864,7 +865,7 @@ def trail_times(t: float, window_ms: float = TRAIL_WINDOW_MS,
 
 
 def skin_trail_is_long(has_cursormiddle: bool, force_long: bool) -> bool:
-    """§3.3: long connected trail when `cursormiddle` exists or
+    """§3.3: long connected trail when the cursor provider has a middle or
     ForceLongTrail; else the sparse 16.67 ms sprite trail."""
     return has_cursormiddle or force_long
 
@@ -1062,10 +1063,13 @@ class StdScene:
         self.skin = skin_elems            # skin_elements.SkinElements | None
         self.use_skin_cursor = bool(use_skin_cursor and skin_elems is not None
                                     and skin_elems.has("cursor"))
-        # §3.3 trail mode: cursormiddle present (or forced) → long trail;
+        # SkinElements locks cursormiddle to the resolved cursor provider.
+        # A middle from a fallback/local provider cannot change this mode.
+        # §3.3 same-provider middle (or forced) → long additive trail;
         # the long trail is DISTANCE-resampled once from the full replay
         self.long_trail = skin_trail_is_long(
-            skin_elems is not None and skin_elems.has("cursormiddle"),
+            skin_elems is not None and skin_elems.has("cursor")
+            and skin_elems.has("cursormiddle"),
             force_long_trail)
         self._trail_pts: list[tuple[float, float, float]] = []
         self._trail_times: list[float] = []
@@ -1951,7 +1955,8 @@ class StdScene:
                 if _sm:
                     self.spr.draw(self._merge_smoke_sprites(_sm, _mc_color, t))
             for _mc_frames, _mc_color, _mc_end in self.merge_cursors:
-                self.spr.draw(self._merge_cursor_sprites(_mc_frames, _mc_color, t, _mc_end))
+                self._draw_cursor_sprites(
+                    self._merge_cursor_sprites(_mc_frames, _mc_color, t, _mc_end))
             for _mm_misses, _mm_color in self.merge_misses:
                 self.spr.draw(self._merge_miss_sprites(_mm_misses, _mm_color, t))
             self._uninstall_barrel()
@@ -1962,7 +1967,7 @@ class StdScene:
                                       "mrgd_board", (1.0, 1.0, 1.0, 1.0))])
         elif self.draw_cursor and self.frames:
             self._install_barrel(t)
-            self.spr.draw(self._cursor_sprites(t))
+            self._draw_cursor_sprites(self._cursor_sprites(t))
             self._uninstall_barrel()
         if self.hud is not None:
             self.hud.draw(t)          # §5.3 draw order: … → cursors → HUD
@@ -2048,7 +2053,7 @@ class StdScene:
 
         # cursor frozen at the death position (no fall — you died there)
         if self.draw_cursor and self.frames:
-            self.spr.draw(self._cursor_sprites(ft))
+            self._draw_cursor_sprites(self._cursor_sprites(ft))
         # HUD frozen at death → the score/combo/acc/hits AS THEY WERE
         if self.hud is not None:
             self.hud.draw(ft)
@@ -3728,6 +3733,25 @@ class StdScene:
                                   additive=True))
         return out
 
+    def _draw_cursor_sprites(self, sprites: list[Sprite]) -> None:
+        """Preserve skin cursor painter order through GL and Metal batching.
+
+        Each backend sorts normal before additive inside a draw call. Submit
+        consecutive homogeneous passes so connected additive trail stays
+        below the normal cursor/middle. Wrappers have already applied BM/NS;
+        backend post transforms still run once on each sprite. Merge and fail
+        use this same boundary. Procedural/Argon retain their existing batch.
+        """
+        if not any(sp.texture_key == "sk_cursor" for sp in sprites):
+            self.spr.draw(sprites)
+            return
+        start = 0
+        for i in range(1, len(sprites)):
+            if sprites[i].additive != sprites[start].additive:
+                self.spr.draw(sprites[start:i])
+                start = i
+        self.spr.draw(sprites[start:])
+
     def _cursor_sprites(self, t: float) -> list[Sprite]:
         sprites = self._base_cursor_sprites(t)
         # BM (bloom): scale the cursor about its screen centre; NS (no scope):
@@ -3823,7 +3847,7 @@ class StdScene:
                 tw, th = sk.size["cursortrail"]
                 tw, th = tw * self.trail_scale, th * self.trail_scale
                 ox, oy = (0.0, 0.0) if centre else (tw * k / 2.0, th * k / 2.0)
-                if self.long_trail:            # cursormiddle present -> connected ribbon
+                if self.long_trail:            # same-provider middle / explicit override
                     _tp = self._merge_trail_cache.get(id(frames))
                     if _tp is None:
                         _pts = build_distance_trail(frames)
@@ -3833,14 +3857,14 @@ class StdScene:
                         sx, sy = self.cam.to_screen(x, y)
                         out.append(Sprite(sx + ox, sy + oy, tw * k, th * k,
                                           "sk_cursortrail", (*accent, 0.85 * strength),
-                                          additive=True))   # glowing trail (adds onto pixels below)
+                                          additive=True))
                 else:
                     for ti, strength in sparse_trail_times(t):
                         x, y, _ = cursor_at(frames, ti)
                         sx, sy = self.cam.to_screen(x, y)
                         out.append(Sprite(sx + ox, sy + oy, tw * k, th * k,
                                           "sk_cursortrail", (*accent, 0.85 * strength),
-                                          additive=True))   # glowing trail (adds onto pixels below)
+                                          additive=False))  # disjoint inherits normal blend
             x, y, keys = cursor_at(frames, t)
             sx, sy = self.cam.to_screen(x, y)
             cs = 0.75 if (keys & 0b1111) else 1.0
@@ -3934,8 +3958,8 @@ class StdScene:
         screen_h/768 × cursor_scale — NOT circle-tied). CursorCentre=0
         hangs the texture from the pointer (stable's top-left anchor).
 
-        Trail per the §3.3 two-mode rule (self.long_trail): cursormiddle
-        present (or ForceLongTrail) → LONG CONNECTED trail — cursortrail
+        Trail per the §3.3 two-mode rule (self.long_trail): same-provider
+        cursormiddle (or ForceLongTrail) → LONG CONNECTED additive trail,
         laid along the cursor path strictly by DISTANCE (the
         build_distance_trail resample: uniform spacing at any speed,
         uniform base alpha, age fade along the ribbon); else the classic
@@ -3967,7 +3991,7 @@ class StdScene:
                     out.append(Sprite(sx + ox, sy + oy, tw * k, th * k,
                                       "sk_cursortrail",
                                       (*tint, 0.85 * strength),
-                                      additive=True))
+                                      additive=False))
         x, y, _ = cursor_at(self.frames, t)
         sx, sy = self.cam.to_screen(x, y)
         cw, ch = sk.size["cursor"]

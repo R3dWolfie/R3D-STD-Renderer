@@ -267,6 +267,7 @@ def test_existing_renderer_parser_reads_standard_and_rejects_invalid_replays(tmp
     ("skin_hitsounds", "true"), ("legacy_defaults", 1), ("renderer_default_font_and_ranks", "yes"),
     ("start", -1), ("start", True), ("end", "10"), ("end", float("nan")),
     ("start", float("inf")), ("end", 86401), ("end", 0), ("no_loudnorm", True), ("extra_args", "--allow-converted"),
+    ("progress_style", "pie"), ("hud_scale", 1.25),
 ])
 def test_ids_and_options_cannot_accept_paths_or_command_fragments(app, processes, field, value):
     with pytest.raises(web.APIError) as error:
@@ -320,12 +321,14 @@ def test_command_is_fixed_argv_current_python_and_repo_cwd(app, processes):
 def test_selected_skin_and_advanced_flags_are_forwarded(app, processes):
     skin = next(iter(app.catalog.skins.values()))
     app.start(selection(app, skin=skin.id, skin_hitsounds=True, legacy_defaults=True,
-                        renderer_default_font_and_ranks=True, start=35, end=40,
+                        renderer_default_font_and_ranks=True, hit_counter=True,
+                        show_progress=True, start=35, end=40,
                         resolution="1920x1080", fps=30, encoder="libx264"))
     process, command, _ = processes[0]
     assert command[-2:] == ["--skin", str(skin.path)]
     assert "--use-skin-hitsounds" in command and "--legacy-defaults" in command
     assert "--renderer-default-font-and-ranks" in command
+    assert "--hit-counter" in command and command.count("--show-progress") == 1
     assert command[command.index("--start") + 1] == "35"
     assert command[command.index("--max-seconds") + 1] == "40"
     assert "--allow-converted" not in command and "--convert-to-keys" not in command
@@ -334,9 +337,19 @@ def test_selected_skin_and_advanced_flags_are_forwarded(app, processes):
     parsed = build_parser().parse_args(command[3:])
     assert parsed.skin == skin.path and parsed.use_skin_hitsounds
     assert parsed.legacy_defaults and parsed.renderer_default_font_and_ranks
+    assert parsed.hit_counter and parsed.show_progress and parsed.progress_style == "pie"
     assert parsed.start == 35 and parsed.max_seconds == 40
     process.complete(1)
     joined(app, "failed")
+
+
+@pytest.mark.parametrize("value", [None, 0, 1, 0.0, 1.0, "true", "false", "--hit-counter", [], {}])
+@pytest.mark.parametrize("field", ["hit_counter", "show_progress"])
+def test_advanced_toggles_require_a_boolean_before_launch(app, processes, field, value):
+    with pytest.raises(web.APIError, match=f"{field} must be true or false") as error:
+        app.start(selection(app, **{field: value}))
+    assert error.value.status == 400
+    assert not processes and app.job is None
 
 
 def test_manual_difficulty_override_passes_selected_osu_file(app, processes):
@@ -642,6 +655,39 @@ def test_render_and_conflict_http_response(app, server, processes):
     joined(app, "failed")
 
 
+@pytest.mark.parametrize("field,flag", [
+    ("hit_counter", "--hit-counter"), ("show_progress", "--show-progress"),
+])
+@pytest.mark.parametrize("value", [None, False, True])
+def test_render_api_advanced_toggle_maps_to_existing_cli_flag(app, server, processes, field, flag, value):
+    options = {} if value is None else {field: value}
+    enabled = value is True
+    payload = json.dumps(selection(app, **options))
+    status, _, body = request(server, "/api/render", method="POST", body=payload,
+                              headers={"Content-Type": "application/json"})
+    assert status == 202 and json.loads(body)["state"] == "rendering"
+    process, command, launch_options = processes[0]
+    assert command.count(flag) == int(enabled)
+    assert "--no-" + flag[2:] not in command
+    assert launch_options["shell"] is False
+    from osu_std_renderer.cli import build_parser
+
+    parsed = build_parser().parse_args(command[3:])
+    assert getattr(parsed, field) is enabled
+    assert parsed.progress_style == "pie" and "--progress-style" not in command
+    process.complete(1)
+    joined(app, "failed")
+
+
+@pytest.mark.parametrize("field", ["hit_counter", "show_progress"])
+def test_render_api_rejects_invalid_advanced_toggle_without_launch(app, server, processes, field):
+    status, _, body = request(server, "/api/render", method="POST",
+                              body=json.dumps(selection(app, **{field: "true"})),
+                              headers={"Content-Type": "application/json"})
+    assert status == 400 and json.loads(body)["error"] == f"{field} must be true or false"
+    assert not processes and app.job is None
+
+
 def test_cancel_http_action_and_idle_conflict(app, server, processes, monkeypatch):
     headers = {"Content-Type": "application/json"}
     assert request(server, "/api/cancel", method="POST", body="{}", headers=headers)[0] == 409
@@ -686,6 +732,18 @@ def test_mobile_page_contains_controls_inline_video_and_saved_selections(server)
     assert "perReplay" in page and "preference(selected().id).skin" in page
 
 
+@pytest.mark.parametrize("field", ["hit_counter", "show_progress"])
+def test_advanced_toggle_checkbox_is_unchecked_in_advanced_settings(server, field):
+    status, _, body = request(server, "/")
+    assert status == 200
+    advanced = body.decode().split("<details><summary>Advanced</summary>", 1)[1].split("</details>", 1)[0]
+    checkbox = re.search(rf'<input\b[^>]*\bid="{field}"[^>]*>', advanced)
+    assert checkbox and 'type="checkbox"' in checkbox.group()
+    assert not re.search(r'\bchecked\b', checkbox.group())
+    if field == "show_progress":
+        assert "Show song progress (Legacy pie / Argon progress)" in advanced
+
+
 @pytest.fixture
 def run_page_js():
     """Optional Node exercises the actual embedded JS; no DOM package or renderer required."""
@@ -701,7 +759,7 @@ def run_page_js():
 const assert=require('node:assert/strict');
 class Element{
 constructor(select){this.select=select;this.options=[];this._value='';this.dataset={};
-this.textContent='';this.hidden=false;this.children=[];this.classes=new Set();
+this.textContent='';this.hidden=false;this.checked=false;this.children=[];this.classes=new Set();
 this.classList={toggle:(key,on)=>on?this.classes.add(key):this.classes.delete(key)}}
 get value(){return this._value}
 set value(value){this._value=!this.select||this.options.some(o=>o.value===String(value))?
@@ -750,6 +808,36 @@ diagnostics:[]};
         assert result.returncode == 0, result.stderr
 
     return run
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("progress", [False, True])
+def test_page_submits_advanced_booleans_and_preserves_other_render_options(run_page_js, enabled, progress):
+    run_page_js(f"const enabled={json.dumps(enabled)},progress={json.dumps(progress)};\n" + """
+setCatalog(data);
+assert.equal($('hit_counter').checked,false);
+assert.equal($('show_progress').checked,false);
+$('hit_counter').checked=enabled;
+$('show_progress').checked=progress;
+$('skin').value='skin-night';$('resolution').value='1920x1080';
+$('fps').value='30';$('encoder').value='libx264';
+$('skin_hitsounds').checked=true;$('legacy_defaults').checked=true;
+$('renderer_default_font_and_ranks').checked=true;
+$('start').value='35';$('end').value='40';
+let payload,prevented=false;
+globalThis.fetch=async(path,options)=>{
+assert.equal(path,'/api/render');assert.equal(options.method,'POST');
+assert.equal(options.headers['Content-Type'],'application/json');
+payload=JSON.parse(options.body);
+return {ok:true,json:async()=>({state:'rendering'})};
+};
+await $('form').onsubmit({preventDefault(){prevented=true}});
+assert(prevented);
+assert.deepEqual(payload,{replay:'replay-a',beatmap:'map-a',skin:'skin-night',
+resolution:'1920x1080',fps:30,encoder:'libx264',skin_hitsounds:true,
+legacy_defaults:true,renderer_default_font_and_ranks:true,hit_counter:enabled,
+show_progress:progress,start:35,end:40});
+""")
 
 
 @pytest.mark.parametrize("remembered", [None, "invalid", "disappeared"])

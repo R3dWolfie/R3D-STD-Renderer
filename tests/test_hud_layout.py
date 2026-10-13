@@ -145,9 +145,15 @@ def test_actual_score_bounds_accuracy_pie_and_viewport(bank, tmp_path, resolutio
     assert score.right==pytest.approx(acc.right)
     assert acc.right==pytest.approx(hud.ui_w_l-17*scale)
     assert acc.top-score.bottom==pytest.approx(9*scale)
-    assert acc.left-pie.right==pytest.approx(18*scale)
-    assert (pie.top+pie.bottom)/2==pytest.approx((acc.top+acc.bottom)/2)
-    for r in (score,acc,pie):
+    # Stable's constructor reference is fixed, even for fonts whose native
+    # overlap yields unusual/off-viewport advances. It is not current ink.
+    assert pie.right-pie.left==pytest.approx(42*scale)
+    anchor=tuple((pie.left+pie.right)/2 if i==0 else (pie.top+pie.bottom)/2 for i in (0,1))
+    hud.data.acc_at=lambda *args: .9768
+    render(hud,rec)
+    assert tuple(((hud.bounds['progress'].left+hud.bounds['progress'].right)/2,
+                  (hud.bounds['progress'].top+hud.bounds['progress'].bottom)/2))==pytest.approx(anchor)
+    for r in (score,acc):
         assert r.left>=-1e-6 and r.top>=-1e-6
         assert r.right<=hud.ui_w_l+1e-6 and r.bottom<=768
     score_sprites=[s for s in sprites if (s.texture_key or '').startswith('sk_score_') and s.y+s.h/2<=score.bottom*hud.lk+.001]
@@ -207,7 +213,7 @@ def test_legacy_full_accuracy_keeps_leading_digit_and_fixed_right_edge(
                      hud_scale=scale,renderer_default_font_and_ranks=override)
     # Exercise the extra integer digit at the 100% boundary, rather than
     # checking offsets alone. Score, right anchor and glyph scale must stay
-    # fixed as accuracy grows; only the native pie follows the measured left edge.
+    # fixed as accuracy grows; stable's pie retains its constructor anchor.
     snapshots=[]
     glyph_keys={g[0] for g in hud._legacy_glyphs('score','100.99%')[0]}
     for value in (.9999,1.0):
@@ -221,7 +227,7 @@ def test_legacy_full_accuracy_keeps_leading_digit_and_fixed_right_edge(
         for s in readout:
             assert s.x-s.w/2>=0
             assert s.x+s.w/2<=resolution[0]+1e-6
-        assert not acc.intersects(hud.bounds['progress'])
+        # Historic 00.00% reference may overlap the extra 100% digit.
         assert not hud.bounds['grade'].intersects(hud.bounds['progress'])
     (fraction,short),(full,long)=snapshots
     assert len(long)==len(short)+1
@@ -235,7 +241,7 @@ def test_legacy_full_accuracy_keeps_leading_digit_and_fixed_right_edge(
         assert (new.w,new.h,new.uv_off,new.uv_scale)==(old.w,old.h,old.uv_off,old.uv_scale)
     shift=full['accuracy'].left-fraction['accuracy'].left
     assert shift<0
-    assert full['progress'].left-fraction['progress'].left==pytest.approx(shift)
+    assert full['progress']==fraction['progress']
     assert full['grade']==fraction['grade']
 
 
@@ -310,7 +316,9 @@ def test_legacy_minimum_score_grows_left_with_native_glyphs_and_shared_right(
         other={k:v for k,v in hud.bounds.items() if k!='score'}
         if stable_bounds is not None:assert other==stable_bounds
         stable_bounds=other
-        for name in ('accuracy','progress','grade','mods','hits','keys'):
+        # The stable overlay includes glow padding; its bounding quad may
+        # cross score ink. Other approved components retain collision checks.
+        for name in ('accuracy','grade','mods','hits','keys'):
             assert not score.intersects(hud.bounds[name]),name
         states[text]=(digits,score)
     # Same suffix glyphs remain byte-for-byte the same sprites. The seventh
@@ -517,11 +525,12 @@ def test_legacy_grade_side_slot_preserves_mods_and_other_sprites(
             grade=hud.bounds['grade']
             if slot is not None:assert grade==slot
             slot=grade
-            accuracy=hud._legacy_accuracy_bounds
-            assert (grade.top+grade.bottom)/2==pytest.approx(
-                (accuracy.top+accuracy.bottom)/2)
-            reserved_pie_left=accuracy.left-(33+18)*scale
-            assert reserved_pie_left-grade.right>=scale-1e-6
+            assert (grade.left+grade.right)/2==pytest.approx(hud._legacy_grade_anchor[0])
+            assert (grade.top+grade.bottom)/2==pytest.approx(hud._legacy_grade_anchor[1])
+            if scale<=1:
+                assert hud._legacy_grade_anchor==pytest.approx((hud.ui_w_l-31,247))
+                assert grade.top>=hud.bounds['hits'].bottom+8*scale
+                assert grade.bottom+8*scale<=hud.bounds['keys'].top
             assert 0<=grade.left<grade.right<=hud.ui_w_l
             assert 0<=grade.top<grade.bottom<=768
             for name in ('score','accuracy','progress','mods','hits','keys'):
@@ -563,7 +572,7 @@ def test_grade_pivot_is_independent_of_accuracy_score_and_rank_art(
             if pivot is None:pivot=hud._legacy_grade_anchor
             assert hud._legacy_grade_anchor==pytest.approx(pivot)
             grade=hud.bounds['grade']
-            assert grade.right==pytest.approx(pivot[0])
+            assert (grade.left+grade.right)/2==pytest.approx(pivot[0])
             assert (grade.top+grade.bottom)/2==pytest.approx(pivot[1])
             assert 0<=grade.left<grade.right<=hud.ui_w_l
             assert 0<=grade.top<grade.bottom<=768
@@ -583,6 +592,99 @@ def test_grade_pivot_is_independent_of_accuracy_score_and_rank_art(
                 assert sprite.w/sprite.h==pytest.approx(w/h)
     render(hud,rec,999)
     assert 'grade' not in hud.bounds
+
+
+@pytest.mark.parametrize('resolution',[(1280,720),(1920,1080)])
+@pytest.mark.parametrize('scale',[.75,1,1.25])
+@pytest.mark.parametrize('hits',[False,True])
+@pytest.mark.parametrize('mods',[(),('DT',),('HR','DT','HD'),
+                                 ('HD','HR','DT','FL','CL','DA','MR','TC')])
+def test_legacy_grade_clears_counter_mods_and_keys_without_moving_them(
+        bank,skins,resolution,scale,hits,mods):
+    hud,rec=make_hud(bank,folder=skins/'complete',renderer=Recorder(*resolution),
+                     hud_scale=scale,show_hit_counter=hits)
+    hud._mod_acrs=build_mod_pills(0,mods)
+    pivot=None
+    for rank,counts in [('SS',(0,0,0,0)),('A',(3,0,0,0)),('D',(0,0,0,3))]:
+        hud.data.grade_at=lambda t,g=rank:g
+        hud.data.counts_at=lambda t,c=counts:c
+        hud.s.show_grade=False
+        off=render(hud,rec,2300)
+        native=dict(hud.bounds)
+        hud.s.show_grade=True
+        on=render(hud,rec,2300)
+        current=hud._legacy_grade_anchor
+        if pivot is None:pivot=current
+        assert current==pytest.approx(pivot)
+        grade=hud.bounds['grade']
+        assert (grade.left+grade.right)/2==pytest.approx(current[0])
+        assert (grade.top+grade.bottom)/2==pytest.approx(current[1])
+        assert {k:v for k,v in hud.bounds.items() if k!='grade'}==native
+        added=[sp for sp in on if sp not in off]
+        assert [sp for sp in on if sp not in added]==off
+        for name in ('score','accuracy','progress','mods','hits','keys'):
+            if name in native:assert not grade.intersects(native[name]),name
+        if scale<=1 and len(mods)<=3:
+            expected_y=247 if mods else 247-48*scale
+            assert current==pytest.approx((hud.ui_w_l-31,expected_y))
+            if hits:assert grade.top>=native['hits'].bottom+8*scale
+            assert grade.bottom+8*scale<=native['keys'].top
+
+
+@pytest.mark.parametrize('resolution',[(1280,720),(1920,1080)])
+@pytest.mark.parametrize('scale',[.75,1])
+@pytest.mark.parametrize('skin',['complete','empty'])
+@pytest.mark.parametrize('override',[False,True])
+def test_legacy_grade_tracks_visible_mod_counter_flow(
+        bank,skins,resolution,scale,skin,override):
+    hud,rec=make_hud(bank,folder=skins/skin,renderer=Recorder(*resolution),
+                     hud_scale=scale,renderer_default_font_and_ranks=override)
+    states={}
+    for name,mods,visible in [('none',(),True),('single',('DT',),True),
+                             ('three',('HR','DT','HD'),True),
+                             ('hidden',('DT',),False)]:
+        hud._mod_acrs=build_mod_pills(0,mods)
+        hud.s.show_mods=visible
+        # Switch configurations on one HUD to exercise cache invalidation;
+        # hiding the counter itself must not move the grade's configured slot.
+        hud.s.show_hit_counter=True
+        render(hud,rec,2300)
+        states[name]=(hud.bounds['grade'],hud.bounds['hits'])
+        hud.s.show_hit_counter=False
+        render(hud,rec,2300)
+        assert hud.bounds['grade']==states[name][0]
+        assert not hud.bounds['grade'].intersects(hud.bounds['keys'])
+    grade0,hits0=states['none']
+    for name in ('single','three'):
+        grade,hits=states[name]
+        # Test the dependency against the existing counter geometry, rather
+        # than just replacing the old fixed-Y expectation with a new number.
+        counter_shift=hits.top-hits0.top
+        assert counter_shift==pytest.approx(48*scale)
+        assert grade.top-grade0.top==pytest.approx(counter_shift)
+        assert grade.bottom-hits.bottom==pytest.approx(grade0.bottom-hits0.bottom)
+        assert (grade.left,grade.right)==(grade0.left,grade0.right)
+    assert states['hidden']==states['none']
+
+
+@pytest.mark.parametrize('resolution',[(1280,720),(1920,1080)])
+def test_owner_default_grade_anchor_is_same_with_counter_on_or_off(bank,resolution):
+    folder=Path(__file__).resolve().parents[1]/'test-render/skin'
+    if not folder.is_dir():pytest.skip('owner skin is a local QA input')
+    hud,rec=make_hud(bank,folder=folder,renderer=Recorder(*resolution))
+    hud._mod_acrs=build_mod_pills(64)
+    hud.data.grade_at=lambda t:'S'
+    before=[]
+    hud._grade_badge(before,2300,100,100)
+    for hits in (False,True):
+        hud.s.show_hit_counter=hits
+        sprites=render(hud,rec,2300)
+        assert hud._legacy_grade_anchor==pytest.approx((hud.ui_w_l-31,247))
+        rank=next(sp for sp in sprites if sp.texture_key=='sk_ranking-S-small')
+        assert dataclasses.replace(rank,x=before[0].x,y=before[0].y)==before[0]
+        if hits:
+            assert hud.bounds['keys'].top-hud.bounds['hits'].bottom==pytest.approx(98.04)
+            assert hud.bounds['grade'].top-hud.bounds['hits'].bottom==pytest.approx(9.04)
 
 
 @pytest.mark.parametrize('skin', ['complete','owner'])

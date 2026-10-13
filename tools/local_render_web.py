@@ -474,7 +474,7 @@ class Dashboard:
                     409, "A render is already running. Cancel it or wait for it to finish.")
             allowed = {"replay", "beatmap", "skin", "resolution", "fps", "encoder",
                        "skin_hitsounds", "legacy_defaults", "renderer_default_font_and_ranks",
-                       "start", "end"}
+                       "hit_counter", "show_progress", "start", "end"}
             if not isinstance(body, dict) or body.keys() - allowed:
                 raise APIError(400, "Only catalog selections and displayed options are allowed")
             replay = self._selection(self.catalog.replays, body.get("replay"), self.roots)
@@ -503,7 +503,9 @@ class Dashboard:
             for name, flag in (("skin_hitsounds", "--use-skin-hitsounds"),
                                ("legacy_defaults", "--legacy-defaults"),
                                ("renderer_default_font_and_ranks",
-                                "--renderer-default-font-and-ranks")):
+                                "--renderer-default-font-and-ranks"),
+                               ("hit_counter", "--hit-counter"),
+                               ("show_progress", "--show-progress")):
                 if type(body.get(name, False)) is not bool:
                     raise APIError(400, f"{name} must be true or false")
                 if body.get(name):
@@ -885,6 +887,8 @@ aria-label="Filter skins" autocomplete="off"></label>
 <label class="check"><input type="checkbox" id="skin_hitsounds">Use skin hitsounds</label>
 <label class="check"><input type="checkbox" id="legacy_defaults">Use legacy defaults</label>
 <label class="check"><input type="checkbox" id="renderer_default_font_and_ranks">Use renderer fonts and ranks</label>
+<label class="check"><input type="checkbox" id="hit_counter">Show hit counter</label>
+<label class="check"><input type="checkbox" id="show_progress">Show song progress (Legacy pie / Argon progress)</label>
 <label>Start at (map seconds)<input type="number" id="start" min="0" max="86400" step="any"
 placeholder="Auto / skip intro"></label>
 <label>Stop at (map seconds)<input type="number" id="end" min="0" max="86400" step="any"
@@ -1039,6 +1043,8 @@ skin:$('skin').value||null,
 resolution:$('resolution').value,fps:Number($('fps').value),encoder:$('encoder').value,
 skin_hitsounds:$('skin_hitsounds').checked,legacy_defaults:$('legacy_defaults').checked,
 renderer_default_font_and_ranks:$('renderer_default_font_and_ranks').checked,
+hit_counter:$('hit_counter').checked,
+show_progress:$('show_progress').checked,
 start:$('start').value===''?null:Number($('start').value),
 end:$('end').value===''?null:Number($('end').value)});active=true;
 }catch(exc){error(exc.message)}finally{launching=false;buttons()}};

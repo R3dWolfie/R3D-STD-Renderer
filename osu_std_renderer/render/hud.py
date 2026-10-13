@@ -53,9 +53,10 @@ THE TWO COMPONENT SETS (element classes unchanged):
                              6 leading digits (standardised), roll 1 s Out
     LegacyAccuracyCounter    …/LegacyAccuracyCounter.cs — under the score,
                              ×0.576, margins 9/17, same font, "0.00%"
-    LegacySongProgress       …/LegacySongProgress.cs — the little pie left
-                             of the accuracy (white 60 %, intro counts down
-                             mirrored in (199,255,47)), ring + centre dot
+    Stable circular progress ScoreDisplay.LeftOfDisplay / ProgressBarCircular:
+                             fixed initial "00.00%" anchor, 16-unit radius,
+                             42-unit overlay, signed 40-division noon sweep;
+                             other Legacy components keep lazer behaviour
     LegacyDefaultComboCounter …/LegacyDefaultComboCounter.cs — bottom-left
                              margin 10 ×1.28, ComboPrefix font, the TWO
                              counter behaviour: displayed count trails the
@@ -140,8 +141,10 @@ from __future__ import annotations
 
 import bisect
 import math
+from copy import copy
 from collections import namedtuple
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -281,6 +284,70 @@ LEGACY_PIE_SIZE = 33.0
 LEGACY_PIE_GAP = 18.0
 LEGACY_PIE_INTRO_COLOR = (199 / 255.0, 1.0, 47 / 255.0)
 LEGACY_PIE_ALPHA = 153 / 255.0
+
+# Isolated stable progress contract. Keep the old constants above for the
+# approved counter fitting and secondary HUD flow; they are not pie sizes.
+STABLE_PIE_RADIUS = 10.0 * (768.0 / 480.0)
+STABLE_PIE_OVERLAY_SIZE = 42.0  # stock circularmetre: 42, or 84 @2x
+STABLE_PIE_OFFSET = 24.0 * (768.0 / 480.0)
+STABLE_PIE_RIGHT_INSET = 6.0 * (768.0 / 480.0)
+
+
+def stable_accuracy_measure(glyphs, fixed_width, overlap):
+    """pSpriteText.MeasureText, not the approved R3D drawable ink hull.
+
+    Constant digits use '5'; punctuation has its own width. Every resolved
+    glyph includes trailing overlap, and height is the first nonzero glyph
+    height. A missing texture contributes nothing; a blank texture keeps
+    its dimensions. Sizes supplied here are already @2x-normalized.
+    """
+    width, height = 0.0, 0.0
+    for glyph in glyphs:
+        if glyph is None:
+            continue
+        _, w, h, digit = glyph
+        width += (fixed_width if digit or w == 0 else w) - overlap
+        if height == 0:
+            height = h
+    return width, height
+
+
+def stable_song_progress(t, first, last, lead_in):
+    """Player.UpdateProgress in the existing renderer's beatmap-ms clock."""
+    if t > first:
+        value = (t-first) / max(last-first, 1.0)
+    else:
+        value = -1 + (t+lead_in) / max(lead_in+first, 1.0)
+    return min(1.0, max(-2.0, value))
+
+
+def stable_progress_lead_in(beatmap, first):
+    """Read pie-only AudioLeadIn without altering parser/audio/scene timing.
+
+    The CLI's existing audio/background lookup populates _path_cache before
+    HUD construction. Direct HUD callers without that cache can supply
+    audio_lead_in; otherwise use stable's minimum preempt lead. Storyboard
+    command lead times are not available in R3D's parsed beatmap.
+    """
+    audio_lead = float(getattr(beatmap, 'audio_lead_in', 0))
+    source = (getattr(beatmap, '_path_cache', None) or {}).get(
+        getattr(beatmap, 'file', '').lower())
+    if source is not None:
+        try:
+            with source.open(encoding='utf-8-sig', errors='replace') as stream:
+                general = False
+                for line in stream:
+                    line = line.strip()
+                    if line.startswith('['):
+                        if general:
+                            break
+                        general = line == '[General]'
+                    elif general and line.startswith('AudioLeadIn:'):
+                        audio_lead = float(line.split(':', 1)[1].strip())
+        except (OSError, ValueError):
+            pass
+    return max(0.0, audio_lead, -float(getattr(beatmap, 'video_offset', 0)),
+               max(1800.0, beatmap.diff.preempt)-first)
 LEGACY_COMBO_SCALE = 1.28
 LEGACY_COMBO_MARGIN = 10.0
 LEGACY_COMBO_ROLL_STEP_MS = 20.0         # rolling_duration per element
@@ -1714,6 +1781,7 @@ class StdHud:
         ends = [o.get_end_time() for o in beatmap.hit_objects]
         self.first_t = min(starts) if starts else 0.0
         self.last_t = max(ends) if ends else 1.0
+        self._stable_progress_beatmap = beatmap
         # m-1: key counters ignore warm-up taps before the first object.
         self.keys = KeySeries(frames, gameplay_start=self.first_t)
         # m-8: grade badge + hit-error strip stay hidden until the first
@@ -2410,7 +2478,7 @@ class StdHud:
     def _legacy_score_block(self, out, t: float) -> None:
         """LegacyScoreCounter (TopRight ×0.96, minimum 6 leading
         digits, 1 s Easing.Out roll) + LegacyAccuracyCounter (×0.576,
-        margins 9/17, '0.00%') + LegacySongProgress (the pie left of the
+        margins 9/17, '0.00%') + stable circular progress (the pie left of the
         accuracy). Both counters share the layout's owner-calibrated right
         edge; stock lazer uses independent score/accuracy margins of 10/17.
         This is not saved-HUD JSON support. The grade is laid out separately.
@@ -2460,39 +2528,68 @@ class StdHud:
             self.bounds.pop("accuracy")
         # The native pie is independent of the project's live grade.
         if getattr(s, "show_progress", True):
+            # Retain the incoming pie's flow reservation for mods/counts.
+            # The isolated stable component must not reposition other HUD.
             pie_d = LEGACY_PIE_SIZE * es
             pie_cx = accuracy.left - LEGACY_PIE_GAP * es - pie_d / 2.0
             pie_cy = (accuracy.top + accuracy.bottom) / 2.0
-            self._component(out, "progress", self._legacy_pie, t, pie_cx, pie_cy, pie_d)
+            # Match the old sprite→HUD round trip too, so downstream draw
+            # commands retain even their floating-point coordinates.
+            self._legacy_progress_flow = HudRect.sprites([
+                Sprite(pie_cx*self.lk, pie_cy*self.lk,
+                       pie_d*self.lk, pie_d*self.lk, None, (1, 1, 1, 1))], self.lk)
+            cx, cy = self._stable_pie_geometry()
+            self._component(out, "progress", self._legacy_pie, t, cx, cy)
 
-    def _legacy_pie(self, out, t: float, cx_l: float, cy_l: float,
-                    d_l: float) -> None:
-        """LegacySongProgress: white 60 % pie (intro: (199,255,47) counting
-        DOWN, mirrored), 33 px circle border + centre dot."""
+    def _stable_pie_geometry(self):
+        """One constructor reference with stable's native horizontal inset.
+
+        Stable's font 0.625 and 480→768 conversion cancel (0.625*1.6=1).
+        Native +24 and TopRight +6 each need 1.6. Use initial 00.00%, never
+        the changing accuracy/score ink. R3D's six-digit score reference
+        still locates the approved accuracy top; the live counters retain
+        their separate, approved right anchor.
+        """
+        if not hasattr(self, '_stable_pie_anchor'):
+            es = self.es
+            right = self.layout.legacy_counter_right(self.ui_w_l, es)
+            sw, sh = self._legacy_text_size('score', '000000', LEGACY_SCORE_SCALE*es)
+            fit = min(1.0, max(right-8*es, 1)/max(sw, 1), 180*es/max(sh, 1))
+            top = sh*fit + (LEGACY_ACC_MARGIN[1]+self.layout.legacy_accuracy_offset[1])*es
+            glyphs, fixed, _, overlap = self._legacy_glyphs('score', '00.00%')
+            width, height = stable_accuracy_measure(glyphs, fixed, overlap)
+            self._stable_pie_anchor = (
+                self.ui_w_l-STABLE_PIE_RIGHT_INSET*es
+                -width*LEGACY_ACC_SCALE*es-STABLE_PIE_OFFSET*es,
+                top+height*LEGACY_ACC_SCALE*es/2)
+            self._stable_pie_lead = stable_progress_lead_in(
+                self._stable_progress_beatmap, self.first_t)
+        return self._stable_pie_anchor
+
+    def _legacy_pie(self, out, t: float, cx_l: float, cy_l: float) -> None:
+        """Stable fan first, then the independent stock-sized ring/dot."""
+        from .textures import bake_stable_circularmetre, bake_stable_sector
         lk = self.lk
-        intro = t < self.first_t
-        if intro:
-            frac = _clamp01(1.0 - (max(t, 0.0) / max(self.first_t, 1.0)))
-            color, flip = LEGACY_PIE_INTRO_COLOR, True
-        else:
-            frac = _clamp01((t - self.first_t)
-                            / max(self.last_t - self.first_t, 1.0))
-            color, flip = (1.0, 1.0, 1.0), False
-        pie_d = d_l * 0.92
-        from .textures import PIE_STEPS
-        idx = min(int(frac * PIE_STEPS), PIE_STEPS - 1)
-        key = "disc" if frac >= 1.0 else (f"pie_{idx:02d}" if idx > 0
-                                          else None)
-        if key is not None:
-            out.append(Sprite(cx_l * lk, cy_l * lk, pie_d * lk, pie_d * lk,
-                              key, (*color, LEGACY_PIE_ALPHA * self.op),
-                              uv_off=(1.0, 0.0) if flip else (0.0, 0.0),
-                              uv_scale=(-1.0, 1.0) if flip else (1.0, 1.0)))
-        out.append(Sprite(cx_l * lk, cy_l * lk, d_l * lk, d_l * lk,
-                          "pie_ring", (1, 1, 1, 0.9 * self.op)))
-        dot = 4.0 * self.es
-        out.append(Sprite(cx_l * lk, cy_l * lk, dot * lk, dot * lk,
-                          "dot", (1, 1, 1, 0.9 * self.op)))
+        if not hasattr(self, '_stable_pie_texture'):
+            # Per-HUD keys avoid mutable texture sharing between HUDs.
+            self._stable_pie_texture = f'stable_pie_{id(self)}'
+            self._stable_pie_overlay = f'stable_circularmetre_{id(self)}'
+            self.spr.upload_texture(self._stable_pie_overlay, bake_stable_circularmetre())
+            self._stable_pie_mask = None
+        p = stable_song_progress(t, self.first_t, self.last_t, self._stable_pie_lead)
+        if p != 0:
+            alpha = int(max(0.0, min(1.0, self.op))*255*0.6)/255
+            if (p, alpha) != self._stable_pie_mask:
+                mask = bake_stable_sector(p, alpha)
+                self.spr.write_texture(self._stable_pie_texture, mask)
+                self._stable_pie_mask = (p, alpha)
+            d = STABLE_PIE_RADIUS*2*self.es*lk
+            color = LEGACY_PIE_INTRO_COLOR if p < 0 else (1, 1, 1)
+            out.append(Sprite(cx_l*lk, cy_l*lk, d, d,
+                              self._stable_pie_texture, (*color, 1.0)))
+        d = STABLE_PIE_OVERLAY_SIZE*self.es*lk
+        out.append(Sprite(cx_l*lk, cy_l*lk, d, d,
+                          self._stable_pie_overlay, (1, 1, 1, self.op)))
 
     def _legacy_combo(self, out, t: float) -> None:
         """LegacyDefaultComboCounter: bottom-left margin 10 ×1.28, the
@@ -2760,7 +2857,9 @@ class StdHud:
         offsets from native drawable bounds, excluding oversized Legacy HP.
         """
         names = ('score', 'accuracy', 'progress') if self.layout.legacy else ('accuracy', 'grade')
-        bottom = max((self.bounds[n].bottom for n in names if n in self.bounds),
+        bottom = max(((getattr(self, '_legacy_progress_flow', self.bounds[n])
+                       if self.layout.legacy and n == 'progress' else self.bounds[n]).bottom
+                      for n in names if n in self.bounds),
                      default=8.0*self.es)
         if self.layout.legacy:
             accuracy = getattr(self, '_legacy_accuracy_bounds', None)
@@ -2777,9 +2876,9 @@ class StdHud:
         if not self.s.show_grade or t < self._first_ev_t:
             return
         if self.layout.legacy:
-            right, cy = self._legacy_grade_pivot()
-            self._legacy_grade_anchor = (right, cy)
-            self._component(out, 'grade', self._grade_badge, t, right, cy)
+            cx, cy = self._legacy_grade_pivot()
+            self._legacy_grade_anchor = (cx, cy)
+            self._component(out, 'grade', self._grade_badge, t, cx, cy, True)
             return
         top = max((self.bounds[n].bottom for n in ('accuracy',) if n in self.bounds),
                   default=8*self.es) + 12*self.es
@@ -2787,45 +2886,74 @@ class StdHud:
                         self._extra_right(top, 32*self.es), top+16*self.es)
 
     def _legacy_grade_pivot(self) -> tuple[float, float]:
-        """Fixed right-centre slot derived only from profile/font/viewport.
+        """Owner-marked centre in 768-high space, below counts/above keys.
 
-        Prefer the owner's two-integer-digit (97.68%) slot. Reserve the
-        widest percentage plus the unchanged native pie with a one-unit gap;
-        large or nonuniform fonts may require a slightly more leftward slot.
-        Neither current accuracy nor score digits nor rank art set the pivot.
+        Reserve the maximum 48x32 badge, worst font heights and full replay
+        count width, never the current rank/score/accuracy/counts. Crowded
+        scales or wrapped mods move only this slot beside the existing stack.
+        The probe emits geometry only: no drawing, texture writes or scoring.
         """
-        key = (self.layout, self.es, self.ui_w_l)
+        key = (self.layout, self.es, self.ui_w_l,
+               self.s.show_key_overlay, getattr(self.s, 'show_hit_counter', False),
+               getattr(self.s, 'show_mods', True), tuple(self._mod_acrs))
         if getattr(self, '_legacy_grade_slot_key', None) == key:
             return self._legacy_grade_slot
         es = self.es
         _, dy = self.layout.legacy_accuracy_offset
-        acc_right = self.layout.legacy_counter_right(self.ui_w_l, es)
         _, score_h = self._legacy_text_size('score', '0123456789', LEGACY_SCORE_SCALE*es)
         score_h = min(score_h, 180*es)
-        # Repeated digits cover each fixed-width slot's largest glyph extent;
-        # 100.00% is the only legal three-integer-digit percentage.
-        samples = ['100.00%'] + [f'{d}{d}.{d}{d}%' for d in range(10)]
-        sizes = [self._legacy_text_size('score', text, LEGACY_ACC_SCALE*es)
-                 for text in samples]
-        max_w = max(w for w, _ in sizes)
-        max_h = max(h for _, h in sizes)
-        available = max(acc_right-(LEGACY_PIE_SIZE+LEGACY_PIE_GAP+8)*es, 1)
-        ref_w, ref_h = self._legacy_text_size('score', '97.68%', LEGACY_ACC_SCALE*es)
-        ref_fit = min(1.0, available/max(ref_w, 1), 108*es/max(ref_h, 1))
-        pie_reserve = (LEGACY_PIE_GAP+LEGACY_PIE_SIZE)*es
-        right = min(acc_right-ref_w*ref_fit-pie_reserve-12*es,
-                    acc_right-min(max_w, available)-pie_reserve-es)
-        acc_h = min(max_h, 108*es)
+        _, acc_h = self._legacy_text_size('score', '0123456789.%', LEGACY_ACC_SCALE*es)
+        acc_h = min(acc_h, 108*es)
         acc_top = score_h+(LEGACY_ACC_MARGIN[1]+dy)*es
-        cy = max(16*es, acc_top+acc_h/2)
-        if right < 56*es or acc_h < 8*es:
-            # A static left-margin fallback clears pathological readout fonts
-            # and the right-hand extras, without moving any native component.
-            right = 56*es
-            cy = max(acc_top+acc_h, cy+LEGACY_PIE_SIZE*es/2)+28*es
-        right = min(right, self._extra_right(cy-16*es, 32*es))
+        bottom = acc_top+(acc_h+max(acc_h, LEGACY_PIE_SIZE*es))/2
+        readout = HudRect(0, 0, self.ui_w_l, bottom)
+        probe = copy(self)
+        probe.bounds = {'accuracy': readout}
+        probe._legacy_accuracy_bounds = readout
+        probe.keys = SimpleNamespace(used=self.keys.used,
+            state_at=lambda t: (0, (0, 0, 0, 0)),
+            last_press_at=lambda ch, t: None, last_release_at=lambda ch, t: None)
+        # Object judgement counts cannot exceed the replay's event count.
+        maximum = 10**len(str(max(len(self.data.ev_times), 1)))-1
+        probe.data = SimpleNamespace(counts_at=lambda t: (maximum,)*4)
+        scratch = []
+        probe._component(scratch, 'keys', probe._legacy_key_overlay, 0)
+        probe._component(scratch, 'mods', probe._mod_pills, 0)
+        probe._component(scratch, 'hits', probe._hit_counter, 0)
+        half_w, half_h, gap = 24*es, 16*es, 8*es
+        grade_dx, grade_y = self.layout.legacy_grade_offset
+        cx = min(self.ui_w_l+grade_dx, self.ui_w_l-half_w)
+        # The marked Y is calibrated with one visible mod row. Follow the
+        # hit counter's actual stack offset, including hidden/wrapped mods,
+        # while retaining a stable centre across ranks and counter toggles.
+        grade_y += probe._mod_stack_offset()-(MOD_PILL_H+8.0)*es
+        cy = max(grade_y, bottom+gap+half_h)
+        keys = probe.bounds.get('keys')
+        ceiling = min(768-half_h-gap,
+                      keys.top-half_h-gap if keys is not None else 768)
+        stack_bottom = max((probe.bounds[n].bottom for n in ('mods', 'hits')
+                            if n in probe.bounds), default=bottom)
+        below_stack = max(cy, stack_bottom+gap+half_h)
+        if below_stack <= ceiling:
+            cy = below_stack
+        else:
+            mods = probe.bounds.get('mods')
+            below_mods = max(cy, mods.bottom+gap+half_h) if mods else cy
+            if below_mods <= ceiling:
+                cy = below_mods
+        obstacles = [rect for name, rect in probe.bounds.items()
+                     if name in ('keys', 'mods', 'hits')]
+        # A fixed maximum-size slot protects every rank, including SS text.
+        for _ in range(len(obstacles)+1):
+            slot = HudRect(cx-half_w-gap, cy-half_h-gap,
+                           cx+half_w+gap, cy+half_h+gap)
+            blocked = [rect for rect in obstacles if slot.intersects(rect)]
+            if not blocked:
+                break
+            cx = min(rect.left-gap-half_w for rect in blocked)
+        cx = max(half_w, cx)
         self._legacy_grade_slot_key = key
-        self._legacy_grade_slot = (right, cy)
+        self._legacy_grade_slot = (cx, cy)
         return self._legacy_grade_slot
 
     def _extra_right(self, top: float, height: float) -> float:
@@ -2889,6 +3017,13 @@ class StdHud:
                 x += pw + gap
         self._mod_rows = len(rows)
 
+    def _mod_stack_offset(self) -> float:
+        """Space below visible mod rows, in scaled logical HUD units."""
+        if not self._mod_acrs or not getattr(self.s, 'show_mods', True):
+            return 0.0
+        rows = max(self._mod_rows, 1)
+        return (rows*MOD_PILL_H+(rows-1)*MOD_PILL_ROW_GAP+8.0)*self.es
+
     def _hit_counter(self, out, t: float) -> None:
         """§4.6 HitCounter: the live 300/100/50/miss column under the mod
         pills, counts mono right-aligned, judgment-band colours."""
@@ -2899,12 +3034,8 @@ class StdHud:
         colors = (BAND_300, BAND_100, BAND_50, (0.95, 0.25, 0.30))
         row_h = HITC_ROW_H * es
         text_h = row_h * 0.78
-        top = self._top_right_stack_y()
-        if self._mod_acrs and getattr(self.s, "show_mods", True):
-            # clear the whole (possibly wrapped) pill stack laid this frame
-            rows = max(self._mod_rows, 1)
-            stack_h = rows * MOD_PILL_H + (rows - 1) * MOD_PILL_ROW_GAP
-            top += (stack_h + 8.0) * es
+        # Clear the whole (possibly wrapped) pill stack laid this frame.
+        top = self._top_right_stack_y()+self._mod_stack_offset()
         right = self._extra_right(top, len(counts)*row_h)
         for i, (label, n, color) in enumerate(
                 zip(HITC_LABELS, counts, colors)):
@@ -3049,7 +3180,7 @@ class StdHud:
                    (1.0, 1.0, 1.0), 0.5 * self.op)
 
     def _grade_badge(self, out, t: float, right_x_l: float,
-                     cy_l: float) -> None:
+                     cy_l: float, centred: bool = False) -> None:
         """In-HUD grade: the skin's ranking-*-small badge when it ships
         one (legacy small grades fitted to the R3D extra slot), the procedural coloured
         text otherwise. renderer_default_font_and_ranks forces the
@@ -3066,14 +3197,15 @@ class StdHud:
             es, lk = self.es, self.lk
             fit = min(1.0, 48/max(w,1), 32/max(h,1))
             w, h = w*fit, h*fit
-            out.append(Sprite((right_x_l - w * es / 2.0) * lk, cy_l * lk,
+            cx = right_x_l if centred else right_x_l-w*es/2.0
+            out.append(Sprite(cx * lk, cy_l * lk,
                               w * es * lk, h * es * lk, f"sk_{el}",
                               (1, 1, 1, 0.95 * self.op)))
             return
         gh = 24.0 * self.es
         color = GRADE_COLORS.get(grade, (0.8, 0.8, 0.85))
         gw = self._lrun_width(grade, gh)
-        self._lrun(out, grade, right_x_l - gw, cy_l - gh / 2.0, gh,
+        self._lrun(out, grade, right_x_l-gw*(0.5 if centred else 1), cy_l - gh / 2.0, gh,
                    color, 0.95 * self.op)
 
     def _hit_error(self, out: list[Sprite], t: float) -> None:

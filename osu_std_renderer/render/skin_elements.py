@@ -252,7 +252,14 @@ class SkinElements:
             if not cycle:
                 found = found[:1]          # frame 0 only
         else:
-            tf = self.skin.find_texture(name)
+            if name == "cursormiddle":
+                # LegacyCursor belongs to the provider that supplied cursor.
+                # A middle from another provider must neither overlay that
+                # cursor nor switch its trail to connected/additive mode.
+                tf = self.skin.find_texture(
+                    name, source=self.skin.get_source("cursor"))
+            else:
+                tf = self.skin.find_texture(name)
             found = [tf] if tf is not None else []
         if not found:
             return

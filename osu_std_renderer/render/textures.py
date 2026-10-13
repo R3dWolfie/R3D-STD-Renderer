@@ -49,7 +49,7 @@ import math
 import os
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageChops, ImageDraw, ImageFont
 
 DISC_SIZE = 256
 RING_SIZE = 256
@@ -387,6 +387,66 @@ def bake_pie(fraction: float, size: int = PIE_SIZE) -> np.ndarray:
     alpha = disc * (phi <= max(fraction, 1e-9))
     rgba = np.full((size, size, 4), 255, dtype=np.uint8)
     rgba[..., 3] = np.round(alpha * 255.0).astype(np.uint8)
+    return rgba
+
+
+def stable_sector_vertices(progress: float) -> list[tuple[float, float]]:
+    """Stable CircularProgress's unit-radius, 40-division triangle fan.
+
+    Negative sweeps start at the fractional endpoint and finish at noon;
+    positive sweeps start at noon. Retain the exact endpoint, including
+    the source's possible second intro revolution (Progress >= -2).
+    """
+    progress = min(1.0, max(-2.0, progress))
+    if progress == 0:
+        return []
+    start = -math.pi / 2
+    end = start + progress * math.tau
+    lo, hi = sorted((start, end))
+    step = math.tau / 40
+    angles = [lo + i * step for i in range(math.ceil((hi-lo)/step))]
+    angles.append(hi)
+    return [(0.0, 0.0)] + [(math.cos(a), math.sin(a)) for a in angles]
+
+
+def bake_stable_sector(progress: float, alpha: float = 0.6,
+                       size: int = 128) -> np.ndarray:
+    """Raster stand-in for the native fan, without progress quantization.
+
+    Supersampling approximates native edge AA. Separate fan revolutions
+    composite independently, retaining stable's overlapping intro fill.
+    Opacity is baked here so a second revolution blends correctly.
+    """
+    vertices = stable_sector_vertices(progress)
+    high = size * 4
+    mask = Image.new('L', (high, high))
+    arc = vertices[1:]
+    for start in range(0, max(len(arc)-1, 0), 40):
+        points = [(0.0, 0.0)] + arc[start:start+41]
+        layer = Image.new('L', (high, high))
+        ImageDraw.Draw(layer).polygon(
+            [((x+1)*high/2, (y+1)*high/2) for x, y in points], fill=round(alpha*255))
+        mask = ImageChops.screen(mask, layer)
+    mask = mask.resize((size, size), Image.Resampling.LANCZOS)
+    rgba = np.full((size, size, 4), 255, dtype=np.uint8)
+    rgba[..., 3] = np.asarray(mask)
+    return rgba
+
+
+def bake_stable_circularmetre(size: int = 336) -> np.ndarray:
+    """Independent procedural equivalent of stock's 42-unit overlay.
+
+    The inspected stock PNG is 42x42 (84x84 @2x), with a ring centred at
+    radius 16 and a small centre dot. Its glow/AA are approximated here;
+    no upstream artwork is bundled. Overlay and sector sizes are separate.
+    """
+    yy, xx = np.mgrid[0:size, 0:size].astype(np.float64)
+    radius = np.hypot((xx+.5)*42/size-21, (yy+.5)*42/size-21)
+    ring = np.exp(-0.5*((radius-16)/0.45)**2)
+    glow = 0.20*np.exp(-0.5*((radius-16)/1.5)**2)
+    dot = np.clip((1.75-radius)*size/42 + .5, 0, 1)
+    rgba = np.full((size, size, 4), 255, dtype=np.uint8)
+    rgba[..., 3] = np.round(np.maximum(dot, np.maximum(ring, glow))*255).astype(np.uint8)
     return rgba
 
 
