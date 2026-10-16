@@ -37,3 +37,7 @@ local-web-renders/
 
 # R3D logo — license-clean own IP; keep it in-repo so clones do not fall back to the placeholder tile
 !osu_std_renderer/assets/logo.png
+
+# Canonical HEM icons ported from the owner's R3D Mania implementation.
+!osu_std_renderer/assets/hud/hit-error-meter/hare.png
+!osu_std_renderer/assets/hud/hit-error-meter/tortoise.png

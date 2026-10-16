@@ -1,0 +1,18 @@
+[
+  {
+    "file": "hare.png",
+    "sha256": "61713e94571614b5adbee4c149f4703bb3003294c6df356ab1465514607f2979",
+    "source_repository": "https://github.com/R3dWolfie/osu-mania-renderer.git",
+    "source_path": "osu_mania_renderer_v2/assets/hud/hit-error-meter/hare.png",
+    "source_commit": "78ff3b8aaa01798a6f72cfdeeea658434dc2512a",
+    "original_owner_path": "/mnt/wd-purple/Projects/modern/public/assets/osu/hud/hit-error-meter/hare.png"
+  },
+  {
+    "file": "tortoise.png",
+    "sha256": "f1b88e43076527be47c141d42d98576257b276c5cfaf8951ea457bb3c8f1c178",
+    "source_repository": "https://github.com/R3dWolfie/osu-mania-renderer.git",
+    "source_path": "osu_mania_renderer_v2/assets/hud/hit-error-meter/tortoise.png",
+    "source_commit": "78ff3b8aaa01798a6f72cfdeeea658434dc2512a",
+    "original_owner_path": "/mnt/wd-purple/Projects/modern/public/assets/osu/hud/hit-error-meter/tortoise.png"
+  }
+]

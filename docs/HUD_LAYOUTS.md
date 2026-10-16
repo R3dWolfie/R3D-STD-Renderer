@@ -50,9 +50,11 @@ imported.
 | Font metrics | `LegacySpriteText.cs`: fixed digit cell from '5', prefix and negative overlap spacing; use actual glyph rectangles to derive score/accuracy bounds |
 | Secondary flow | `Screens/Play/HUDOverlay.cs:259–324`: source derives flow offsets from occupied native bounds, excluding oversized Legacy health artwork |
 
-Existing health damping, breaks, combo animations, key edge counts and
-hit-error/UR behavior remain in their original components. Skinless
-Argon uses side hit-error bars; Legacy uses the existing bottom meter.
+Existing health damping, breaks, combo animations and key edge counts remain
+in their original components. Both profiles now use the current R3D Mania
+horizontal HEM. UR retains its independent data and flag; the owner approved
+placing its text above the meter when HEM is enabled, with its original
+profile anchor retained when HEM is off. See `HIT_ERROR_METER.md`.
 BreakOverlay remains a separate later batch, above HUD opacity.
 
 ### Temporary Legacy placement calibration (12 October 2026)

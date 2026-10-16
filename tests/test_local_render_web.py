@@ -679,6 +679,56 @@ def test_render_api_advanced_toggle_maps_to_existing_cli_flag(app, server, proce
     joined(app, "failed")
 
 
+@pytest.mark.parametrize("options", [{}, {"hit_lighting": True}, {"hit_lighting": False}],
+                         ids=["omitted", "on", "off"])
+def test_render_api_hit_lighting_preserves_cli_default_or_disables_it(app, server, processes, options):
+    status, _, body = request(server, "/api/render", method="POST",
+                              body=json.dumps(selection(app, **options)),
+                              headers={"Content-Type": "application/json"})
+    assert status == 202 and json.loads(body)["state"] == "rendering"
+    assert len(processes) == 1
+    process, command, _ = processes[0]
+    enabled = options.get("hit_lighting", True)
+    assert command.count("--no-hit-lighting") == int(not enabled)
+    assert "--hit-lighting" not in command
+    assert "--hit-counter" not in command and "--show-progress" not in command
+    from osu_std_renderer.cli import build_parser
+
+    parsed = build_parser().parse_args(command[3:])
+    assert parsed.hit_lighting is enabled
+    assert parsed.hit_counter is False and parsed.show_progress is False
+    process.complete(1)
+    joined(app, "failed")
+
+
+@pytest.mark.parametrize("value", [None, 0, 1, 0.0, 1.0, "true", "false", [], [False], {}])
+def test_render_api_rejects_nonboolean_hit_lighting_without_launch(app, server, processes, value):
+    status, _, body = request(server, "/api/render", method="POST",
+                              body=json.dumps(selection(app, hit_lighting=value)),
+                              headers={"Content-Type": "application/json"})
+    assert status == 400 and json.loads(body)["error"] == "hit_lighting must be true or false"
+    assert not processes and app.job is None
+
+
+@pytest.mark.parametrize("first_enabled", [True, False])
+def test_render_api_hit_lighting_can_change_between_successive_jobs(app, server, processes, first_enabled):
+    for enabled in (first_enabled, not first_enabled):
+        status, _, _ = request(server, "/api/render", method="POST",
+                               body=json.dumps(selection(app, hit_lighting=enabled)),
+                               headers={"Content-Type": "application/json"})
+        assert status == 202
+        process, command, _ = processes[-1]
+        assert command.count("--no-hit-lighting") == int(not enabled)
+        assert "--hit-lighting" not in command
+        process.complete(1)
+        joined(app, "failed")
+    assert len(processes) == 2
+    # Only the generated output filename and the negative flag may differ.
+    assert [arg for arg in processes[0][1][7:] if arg != "--no-hit-lighting"] == [
+        arg for arg in processes[1][1][7:] if arg != "--no-hit-lighting"]
+    assert processes[0][1][:6] == processes[1][1][:6]
+
+
 @pytest.mark.parametrize("field", ["hit_counter", "show_progress"])
 def test_render_api_rejects_invalid_advanced_toggle_without_launch(app, server, processes, field):
     status, _, body = request(server, "/api/render", method="POST",
@@ -744,6 +794,16 @@ def test_advanced_toggle_checkbox_is_unchecked_in_advanced_settings(server, fiel
         assert "Show song progress (Legacy pie / Argon progress)" in advanced
 
 
+def test_hit_lighting_checkbox_is_labelled_and_checked_in_advanced_settings(server):
+    status, _, body = request(server, "/")
+    assert status == 200
+    advanced = body.decode().split("<details><summary>Advanced</summary>", 1)[1].split("</details>", 1)[0]
+    label = re.search(r'<label\b[^>]*>(<input\b[^>]*\bid="hit_lighting"[^>]*>)'
+                      r'Enable hit lighting</label>', advanced)
+    assert label and 'type="checkbox"' in label.group(1)
+    assert re.search(r'\bchecked\b', label.group(1))
+
+
 @pytest.fixture
 def run_page_js():
     """Optional Node exercises the actual embedded JS; no DOM package or renderer required."""
@@ -755,6 +815,7 @@ def run_page_js():
     script = script[:script.rindex("(async()=>{try{setCatalog(await api('/api/catalog'))")]
     ids = re.findall(r'id="([^"]+)"', web.PAGE)
     selects = re.findall(r'<select id="([^"]+)"', web.PAGE)
+    checked_ids = re.findall(r'<input\b[^>]*\bid="([^"]+)"[^>]*\bchecked\b[^>]*>', web.PAGE)
     harness = r"""
 const assert=require('node:assert/strict');
 class Element{
@@ -776,6 +837,7 @@ scrollIntoView(){}
 globalThis.Option=class{constructor(label,value){this.label=label;this.value=value;
 this.disabled=false}};
 const elements=Object.fromEntries(ids.map(id=>[id,new Element(selects.includes(id))]));
+for(const id of checkedIds)elements[id].checked=true;
 for(const [id,values] of Object.entries({resolution:['1280x720','1920x1080'],
 fps:['60','30'],encoder:['auto','libx264','h264_vaapi','h264_nvenc']}))
 elements[id].replaceChildren(...values.map(v=>new Option(v,v)));
@@ -800,6 +862,7 @@ diagnostics:[]};
 
     def run(code, saved=None):
         source = (f"const ids={json.dumps(ids)},selects={json.dumps(selects)},"
+                  f"checkedIds={json.dumps(checked_ids)},"
                   f"initial={json.dumps(saved or {})};\n" + harness + script +
                   "\n(async()=>{\n" + code + "\n})().catch(error=>{"
                   "console.error(error);process.exitCode=1});")
@@ -812,32 +875,54 @@ diagnostics:[]};
 
 @pytest.mark.parametrize("enabled", [False, True])
 @pytest.mark.parametrize("progress", [False, True])
-def test_page_submits_advanced_booleans_and_preserves_other_render_options(run_page_js, enabled, progress):
-    run_page_js(f"const enabled={json.dumps(enabled)},progress={json.dumps(progress)};\n" + """
+@pytest.mark.parametrize("lighting", [True, False])
+def test_page_submits_advanced_booleans_and_preserves_other_render_options(
+        run_page_js, enabled, progress, lighting):
+    run_page_js(f"const enabled={json.dumps(enabled)},progress={json.dumps(progress)},"
+                f"lighting={json.dumps(lighting)};\n" + """
 setCatalog(data);
-assert.equal($('hit_counter').checked,false);
-assert.equal($('show_progress').checked,false);
+assert.equal($('hit_lighting').checked,true);
+for(const id of ['skin_hitsounds','legacy_defaults','renderer_default_font_and_ranks',
+'hit_counter','show_progress'])assert.equal($(id).checked,false);
 $('hit_counter').checked=enabled;
 $('show_progress').checked=progress;
-$('skin').value='skin-night';$('resolution').value='1920x1080';
+$('skin').value='skin-night';$('skin').onchange();$('resolution').value='1920x1080';
 $('fps').value='30';$('encoder').value='libx264';
 $('skin_hitsounds').checked=true;$('legacy_defaults').checked=true;
 $('renderer_default_font_and_ranks').checked=true;
 $('start').value='35';$('end').value='40';
-let payload,prevented=false;
+save();const preferences=JSON.parse(localStorage.value);
+assert.equal(Object.hasOwn(preferences,'hit_lighting'),false);
+for(const prefs of Object.values(preferences.perReplay))
+assert.equal(Object.hasOwn(prefs,'hit_lighting'),false);
+const payloads=[];
+globalThis.setTimeout=()=>{};
 globalThis.fetch=async(path,options)=>{
+if(path==='/api/status')return {ok:true,json:async()=>({state:'idle'})};
+if(path==='/api/history')return {ok:true,json:async()=>[]};
 assert.equal(path,'/api/render');assert.equal(options.method,'POST');
 assert.equal(options.headers['Content-Type'],'application/json');
-payload=JSON.parse(options.body);
+payloads.push(JSON.parse(options.body));
 return {ok:true,json:async()=>({state:'rendering'})};
 };
+for(const hitLighting of [lighting,!lighting]){
+$('hit_lighting').checked=hitLighting;
+assert.equal($('render').disabled,false);
+let prevented=false;
 await $('form').onsubmit({preventDefault(){prevented=true}});
 assert(prevented);
-assert.deepEqual(payload,{replay:'replay-a',beatmap:'map-a',skin:'skin-night',
+assert.deepEqual(payloads.at(-1),{replay:'replay-a',beatmap:'map-a',skin:'skin-night',
 resolution:'1920x1080',fps:30,encoder:'libx264',skin_hitsounds:true,
 legacy_defaults:true,renderer_default_font_and_ranks:true,hit_counter:enabled,
-show_progress:progress,start:35,end:40});
-""")
+show_progress:progress,hit_lighting:hitLighting,start:35,end:40});
+assert.equal(active,true);assert.equal(launching,false);assert.equal($('render').disabled,true);
+await poll();
+assert.equal(active,false);assert.equal($('render').disabled,false);
+assert.equal($('hit_lighting').checked,hitLighting);
+assert.deepEqual(JSON.parse(localStorage.value),preferences);
+}
+assert.equal(payloads.length,2);
+""", {"perReplay": {"replay-b": {"skin": "skin-argon", "beatmap": "map-a"}}})
 
 
 @pytest.mark.parametrize("remembered", [None, "invalid", "disappeared"])

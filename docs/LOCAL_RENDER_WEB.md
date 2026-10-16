@@ -41,13 +41,21 @@ so manual difficulty overrides are respected. Select a skin, then click
 
 Resolution, FPS, and encoder choices match the original bench. **Advanced**
 offers skin hitsounds, legacy defaults, renderer fonts/ranks, a hit counter,
-song progress and optional start/stop map times in seconds. **Show hit counter**
-starts unchecked; checking it passes the existing `--hit-counter` renderer flag.
+song progress, hit lighting and optional start/stop map times in seconds.
+**Show hit counter** starts unchecked; checking it passes the existing
+`--hit-counter` renderer flag.
 **Show song progress (Legacy pie / Argon progress)** also starts unchecked.
 Checking it passes `--show-progress`, showing the existing circular progress
 beside accuracy in a Legacy skin, or the corresponding Argon progress component
 when Argon is selected. Unchecked or omitted sends no progress flag, retaining
 the renderer's default OFF. This control does not load saved skin layout JSON.
+**Enable hit lighting** starts checked. Checked (`hit_lighting: true`) or an
+omitted API property adds no hit-lighting flag, preserving the renderer's
+default ON. Unchecked (`hit_lighting: false`) adds exactly one
+`--no-hit-lighting`; the dashboard never adds `--hit-lighting`. Other values,
+including `null`, numbers and strings, return HTTP 400 without launching a
+render. Each submission reads the current checkbox; it is not saved globally
+or per replay and does not change other Advanced controls.
 For a short clip, enter start `35` and stop `40`; leave them blank for the
 normal render. Stop is an absolute map time,
 passed as `--max-seconds`, rather than a duration. The `auto` encoder uses

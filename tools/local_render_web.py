@@ -474,7 +474,7 @@ class Dashboard:
                     409, "A render is already running. Cancel it or wait for it to finish.")
             allowed = {"replay", "beatmap", "skin", "resolution", "fps", "encoder",
                        "skin_hitsounds", "legacy_defaults", "renderer_default_font_and_ranks",
-                       "hit_counter", "show_progress", "start", "end"}
+                       "hit_counter", "show_progress", "hit_lighting", "start", "end"}
             if not isinstance(body, dict) or body.keys() - allowed:
                 raise APIError(400, "Only catalog selections and displayed options are allowed")
             replay = self._selection(self.catalog.replays, body.get("replay"), self.roots)
@@ -510,6 +510,11 @@ class Dashboard:
                     raise APIError(400, f"{name} must be true or false")
                 if body.get(name):
                     options.append(flag)
+            hit_lighting = body.get("hit_lighting", True)
+            if type(hit_lighting) is not bool:
+                raise APIError(400, "hit_lighting must be true or false")
+            if not hit_lighting:
+                options.append("--no-hit-lighting")
             start, end = body.get("start"), body.get("end")
             for name, value in (("start", start), ("end", end)):
                 if value is not None:
@@ -889,6 +894,7 @@ aria-label="Filter skins" autocomplete="off"></label>
 <label class="check"><input type="checkbox" id="renderer_default_font_and_ranks">Use renderer fonts and ranks</label>
 <label class="check"><input type="checkbox" id="hit_counter">Show hit counter</label>
 <label class="check"><input type="checkbox" id="show_progress">Show song progress (Legacy pie / Argon progress)</label>
+<label class="check"><input type="checkbox" id="hit_lighting" checked>Enable hit lighting</label>
 <label>Start at (map seconds)<input type="number" id="start" min="0" max="86400" step="any"
 placeholder="Auto / skip intro"></label>
 <label>Stop at (map seconds)<input type="number" id="end" min="0" max="86400" step="any"
@@ -1045,6 +1051,7 @@ skin_hitsounds:$('skin_hitsounds').checked,legacy_defaults:$('legacy_defaults').
 renderer_default_font_and_ranks:$('renderer_default_font_and_ranks').checked,
 hit_counter:$('hit_counter').checked,
 show_progress:$('show_progress').checked,
+hit_lighting:$('hit_lighting').checked,
 start:$('start').value===''?null:Number($('start').value),
 end:$('end').value===''?null:Number($('end').value)});active=true;
 }catch(exc){error(exc.message)}finally{launching=false;buttons()}};

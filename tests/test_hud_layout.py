@@ -37,6 +37,10 @@ class Recorder:
     def draw(self, sprites):
         self.sprites.extend(sprites)
 
+    def draw_hit_error_meter(self, state, opacity=1.0):
+        self.hit_error_frame = state
+        self.hit_error_opacity = opacity
+
 
 @pytest.fixture(scope='module')
 def bank():

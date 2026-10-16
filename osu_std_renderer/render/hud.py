@@ -77,9 +77,9 @@ THE TWO COMPONENT SETS (element classes unchanged):
                              #ffde00 (K) / #f8009e (M), InputOverlayText
                              colour, counts in the scoreentry font
 
-SHARED (house elements, both paths): the hit-error meter + UR readout
-(owner-directed: parked near the BOTTOM edge, ~16 UI px margin —
-ERR_Y_FROM_BOTTOM), the combo-break edge vignette, the grade badge
+SHARED (house elements, both paths): the current R3D Mania horizontal hit-error
+meter (720-reference geometry), independent UR readout (owner-approved above
+the meter; original profile anchor with HEM off), combo-break edge vignette, grade badge
 (skin ranking-*-small when provided and renderer_default_font_and_ranks
 is off, procedural text otherwise; behind show_grade).
 
@@ -1777,6 +1777,10 @@ class StdHud:
         self.op = float(getattr(settings, "hud_opacity", 1.0))
         self.data = HudData(judgments)
         self.hw = OsuHitWindows(beatmap.diff.od)
+        from .hit_error_timeline import HitErrorTimeline, timing_observations
+        self._hem = HitErrorTimeline(
+            timing_observations(judgments, frames, self.hw, beatmap.diff.get_radius()),
+            (self.hw.great, self.hw.ok, self.hw.meh))
         starts = [o.get_start_time() for o in beatmap.hit_objects]
         ends = [o.get_end_time() for o in beatmap.hit_objects]
         self.first_t = min(starts) if starts else 0.0
@@ -2011,6 +2015,7 @@ class StdHud:
 
     def _draw_timed(self, t: float) -> None:
         self.bounds = {}
+        self._hem_frame = None
         if self.op <= 0.0:
             return
         out: list[Sprite] = []
@@ -2041,7 +2046,9 @@ class StdHud:
             else:
                 self._component(out, "keys", self._argon_key_overlay, t)
         with perf.T("hud_hit_error"):
+            hem_index = len(out)
             self._component(out, "hit_error", self._hit_error, t)
+            self._component(out, "unstable_rate", self._unstable_rate, t)
         # settings-surface house elements (both component paths)
         with perf.T("hud_house"):
             self._grade_extra(out, t)
@@ -2056,7 +2063,20 @@ class StdHud:
                 # "hacky full screen area health bars" comment) — last.
                 self._component(out, "health", self._legacy_health, t)
         perf.count("hud_sprites", len(out))
-        if out:
+        if self._hem_frame is not None:
+            # Preserve the renderer's existing two-pass order for every
+            # non-HEM sprite, including additive combo/graph sprites. The
+            # meter owns its small internal normal/additive/normal sequence
+            # at the former meter slot; foreground Legacy HP remains later.
+            before = [sp for sp in out[:hem_index] if not sp.additive]
+            after = [sp for sp in out[hem_index:] if not sp.additive]
+            additive = [sp for sp in out if sp.additive]
+            if before:
+                self.spr.draw(before)
+            self.spr.draw_hit_error_meter(self._hem_frame, self.op)
+            if after or additive:
+                self.spr.draw(after + additive)
+        elif out:
             self.spr.draw(out)
 
     def _draw_break_overlay(self, t: float) -> None:
@@ -3209,6 +3229,48 @@ class StdHud:
                    color, 0.95 * self.op)
 
     def _hit_error(self, out: list[Sprite], t: float) -> None:
+        """The current Mania horizontal meter, shared by Legacy and Argon."""
+        if not self.s.show_hit_error_meter:
+            return
+        from .hit_error_meter import hit_error_meter_geometry, hit_window_bands
+        state = self._hem.at(t)
+        if not hit_window_bands(state.hit_error_windows):
+            return
+        self._hem_frame = state
+        g = hit_error_meter_geometry(self.spr.width, self.spr.height)
+        # Include capsule end caps / shader AA in the recorded draw bounds.
+        self.bounds['hit_error'] = HudRect(
+            g.component_x/self.lk, (g.component_top-3*g.scale)/self.lk,
+            (g.component_x+g.natural_width)/self.lk,
+            (g.component_top+g.natural_height+2*g.scale)/self.lk)
+
+    def _unstable_rate(self, out: list[Sprite], t: float) -> None:
+        """Independent UR; owner-approved clearance above the modern HEM.
+
+        With HEM off, retain the original profile anchor. Calculation, glyphs,
+        scale, text and opacity remain the existing UR presentation.
+        """
+        if not self.s.show_unstable_rate or t < self._first_ev_t:
+            return
+        ur, _, n = self.data.ur_at(t)
+        if n < 2:
+            return
+        es = self.es
+        uh = UR_H*es
+        text = f'UR {ur:.1f}'
+        w = self._run_width(text, uh, mono=True)
+        cy = UI_HEIGHT-ERR_Y_FROM_BOTTOM
+        top = cy if self.argon_league else cy+ERR_BAND_H*es/2+10*es
+        if self.s.show_hit_error_meter:
+            from .hit_error_meter import hit_error_meter_geometry
+            g = hit_error_meter_geometry(self.spr.width, self.spr.height)
+            # Three reference pixels include round-cap AA; six clear pixels
+            # separate the text from that envelope. Only UR moves.
+            top = (g.component_top-9*g.scale)/self.k-uh
+        self._run(out, text, self.ui_w/2-w/2, top, uh,
+                  (0.86,0.90,1.0), 0.9*self.op, mono=True)
+
+    def _previous_hit_error(self, out: list[Sprite], t: float) -> None:
         """House hit-error meter + UR (kept from the previous phase; not a
         lazer-skin element). Raised above the Argon progress strip."""
         s, d = self.s, self.data
