@@ -79,25 +79,19 @@ one sprite dropped every 16.67 ms, each fading over TRAIL_SPRITE_LIFE_MS.
 The procedural (non-skin)
 cursor keeps its shader-style glow trail.
 
-SPINNER PHASE (render/spinner.py holds the pure math — see its docstring
-for the lazer-legacy reference semantics):
-  * §3.3 style auto-detect: skin has spinner-background → OLD style
-    (background + metre bottom-up bar reveal + rotating spinner-circle);
-    else new-style sprites → NEW (additive blue glow ramping with
-    progress, bottom at rotation/3, top+middle2 at full rotation, middle
-    fading white→red over the duration); no spinner sprites → the
-    procedural Argon-ish spinner (outer ring + hub + orbiting marker +
-    progress glow).
-  * rotation tracks the replay cursor continuously (signed per-frame
-    deltas while a key is held — the ruleset's accumulation, kept
-    signed); --no-replay auto-spins at the §2.5 RPMS constant (477 RPM).
-  * spinner-approachcircle shrinks 1.9→0.1 over the spin (§2.5);
-    spinner-spin fades out ~0.5 s after the start; spinner-clear pops in
-    when accumulated rotation meets the OD requirement; live RPM readout
-    (spinner-rpm box + ScorePrefix skin digits, else HUD glyphs).
-  * skin.ini SpinnerFadePlayfield dims everything under the spinner
-    while it's alive; SpinnerNoBlink stills the metre's blinking bar.
-  * the spinner judgment popup comes from the ruleset like every object.
+SPINNER PHASE (render/spinner.py holds the pure visual math):
+  * Legacy provider precedence chooses old background/disc/metre or new
+    glow/bottom/top/middle2/fixed-middle. Transparent assets remain supplied.
+    Higher-priority new top wins over a lower-priority fallback background.
+  * New top rotates half when middle2 resolves; middle2 full, bottom one-third
+    of top. Container scale is .8→1 OutQuad from completion progress; glow
+    draws additively beneath the normal discs, fixed middle last.
+  * Legacy uses the native window container, late TimeFadeIn ramp,
+    240ms fade-out, 1.86→.1 approach and source cue/RPM/bonus anchors.
+    Old metre crop and tint follow source; weighted blinking is deterministic.
+  * Raw replay rotation/requirements/bonus crossings remain presentation
+    approximations. Spinner judgement popups still come from the ruleset.
+    Argon keeps its existing helper curves, geometry, cap and bonus display.
 
 HIT LIGHTING (§3.3 `lighting`): combo-tinted additive flash under each
 non-miss judgment popup at its popup position, 400 ms lazer-ish
@@ -224,12 +218,16 @@ from .markers import (arrow_alpha_scale, arrow_pulse, arrow_rotation,
 from .skin_elements import (FOLLOW_CIRCLE_SCALE, CURSOR_UI_HEIGHT,
                             circle_pixel_scale, layout_skin_digits)
 from .slider_body import DEFAULT_COMBO_COLORS, BodyStyle, sub_path
-from .textures import ARGON_DIGIT_CAP_SCALE, ARGON_GLYPH_CAP_SCALE
+from .textures import ARGON_DIGIT_CAP_SCALE, ARGON_GLYPH_CAP_SCALE, LEGACY_FONT_HEIGHT
 from .spinner import (CLEAR_OFFSET_OSU, GLOW_BLUE, SPIN_OFFSET_OSU,
                       SPINNER_CENTRE, SPRITE_SCALE, SpinnerTrack,
                       bonus_popup_state, bonus_spin_events, clear_alpha_scale,
                       detect_spinner_style, lighting_alpha_scale,
                       metre_bar_count, required_rotations,
+                      LEGACY_METRE_HEIGHT, legacy_spinner_alpha,
+                      legacy_spinner_scale, legacy_approach_scale,
+                      legacy_spin_prompt_alpha, legacy_clear_alpha_scale,
+                      legacy_bonus_popup_state,
                       spinner_approach_scale, spinner_bonus_thresholds,
                       spin_prompt_alpha, wants_lighting)
 
@@ -1394,12 +1392,17 @@ class StdScene:
         # spinners: rotation tracks (replay-driven, or the §2.5 auto-spin
         # when there are no cursor frames), built at spawn
         self._spinner_tracks: dict[int, SpinnerTrack] = {}
-        # spinner bonus popups (Argon league only): (time, value, is_max) per
+        # presentation-only spinner bonuses: (time, value, is_max) per
         # completed bonus spin, built with the track at spawn.
         self._spinner_bonus: dict[int, list[tuple[float, int, bool]]] = {}
         self.spinner_style = detect_spinner_style(
-            skin_elems.loaded if skin_elems is not None else set())
-        self.spin_k = camera.len_to_screen(SPRITE_SCALE)  # px per logical px
+            skin_elems.loaded if skin_elems is not None else set(),
+            skin_elems.skin.get_source('spinner-background') if skin_elems else None,
+            skin_elems.skin.get_source('spinner-top') if skin_elems else None)
+        # LegacySpinner's 640x480 window container inverts the playfield
+        # adjustment. Texture .625 * window(height/480) = height/768.
+        self.spin_k = (camera.screen_h/768 if skin_elems is not None else
+                       camera.len_to_screen(SPRITE_SCALE))
         # judgment popups: time-sorted events, pointer + active window
         self._popups = (sorted(judgments.events, key=lambda e: e.time_ms)
                         if judgments is not None else [])
@@ -1764,9 +1767,7 @@ class StdScene:
             elif isinstance(obj, Spinner):
                 track = self._build_spinner_track(obj)
                 self._spinner_tracks[id(obj)] = track
-                if self.skin is None:      # Argon league bonus popups only
-                    self._spinner_bonus[id(obj)] = self._build_spinner_bonus(
-                        obj, track)
+                self._spinner_bonus[id(obj)] = self._build_spinner_bonus(obj, track)
         keep = []
         for obj in self._active:
             retire = (self._slider_visual(obj).retire if isinstance(obj, Slider)
@@ -3191,9 +3192,9 @@ class StdScene:
     # --- spinner ------------------------------------------------------------------------
 
     def _skinned(self, name: str) -> bool:
-        """Skin provides `name` and doesn't blank it."""
+        """Resolved spinner texture, including deliberately transparent art."""
         sk = self.skin
-        return sk is not None and sk.has(name) and name not in sk.empty
+        return sk is not None and sk.has(name)
 
     def _sk_sprite(self, name: str, x: float, y: float, alpha: float,
                    scale: float = 1.0, rotation: float = 0.0,
@@ -3223,13 +3224,16 @@ class StdScene:
     def _draw_spinner(self, obj, t: float) -> None:
         start, end = obj.get_start_time(), obj.get_end_time()
         preempt, fade_in = self.diff.preempt, self.diff.time_fade_in
-        alpha = body_alpha(t, start, end, preempt, fade_in)
+        legacy = self.skin is not None
+        alpha = (legacy_spinner_alpha(t, start, end, fade_in) if legacy else
+                 body_alpha(t, start, end, preempt, fade_in))
         if alpha <= 0.0:
             return
         track = self._spinner_tracks[id(obj)]
         rot = track.rotation(t)
         prog = track.progress(t)
-        cx, cy = self.cam.to_screen(*SPINNER_CENTRE)
+        cx, cy = ((self.cam.screen_w/2, self.cam.screen_h/2) if legacy else
+                  self.cam.to_screen(*SPINNER_CENTRE))
         osu = self.cam.len_to_screen  # osu!px → screen px
 
         # §3.2 SpinnerFadePlayfield: dim everything under the spinner
@@ -3249,11 +3253,22 @@ class StdScene:
             # additive glow halo first, in its own pass, so the discs
             # composite OVER it (gl.draw defers additive within a call)
             if self._skinned("spinner-glow") and prog > 0.0:
+                glow_color = GLOW_BLUE
+                last_value = 0
+                for event_t, value, _ in self._spinner_bonus.get(id(obj), ()):
+                    if event_t > t:
+                        break
+                    if value > last_value and t-event_t < 200:
+                        flash = max(0.0, 1-(t-event_t)/200)
+                        glow_color = tuple(c+(1-c)*flash for c in GLOW_BLUE)
+                    last_value = value
+                glow_alpha = min(prog, 1.0)*alpha*max(0.0, 1-max(0.0, t-end)/300)
                 self.spr.draw([self._sk_sprite(
-                    "spinner-glow", cx, cy, min(prog, 1.0) * alpha,
-                    color=GLOW_BLUE, additive=True)])
+                    "spinner-glow", cx, cy, glow_alpha,
+                    scale=legacy_spinner_scale(prog),
+                    color=glow_color, additive=True)])
             self._new_style_sprites(sprites, t, start, end, cx, cy, rot,
-                                    alpha)
+                                    alpha, prog)
         else:
             if prog > 0.0:
                 d = osu(PROC_SPINNER_GLOW_OSU)
@@ -3264,9 +3279,12 @@ class StdScene:
                                       additive=True)])
             self._procedural_spinner_sprites(sprites, cx, cy, rot, alpha)
 
-        self._spinner_overlay_sprites(sprites, t, track, start, end,
-                                      cx, cy, alpha)
-        if self.skin is None:                     # Argon league bonus popup
+        if legacy:
+            self._legacy_spinner_overlays(sprites, t, track, start, end,
+                                          cx, cy, alpha, id(obj))
+        else:
+            self._spinner_overlay_sprites(sprites, t, track, start, end,
+                                          cx, cy, alpha)
             self._spinner_bonus_sprites(sprites, id(obj), t, cx, cy, alpha)
         if sprites:
             self.spr.draw(sprites)
@@ -3308,50 +3326,119 @@ class StdScene:
     def _old_style_sprites(self, out: list[Sprite], t: float, cx: float,
                            cy: float, rot: float, prog: float,
                            alpha: float) -> None:
-        """OLD style: background → metre (bottom-up bar reveal) →
-        rotating spinner-circle."""
+        """LegacyOldStyleSpinner: background → disc → masked metre."""
         k = self.spin_k
-        bg_bottom = cy + 692.0 * k / 2.0        # nominal @1x background foot
         if self._skinned("spinner-background"):
-            out.append(self._sk_sprite("spinner-background", cx, cy, alpha))
-            bg_bottom = cy + self.skin.size["spinner-background"][1] * k / 2.0
+            tint = tuple(c/255 for c in self.skin.info.spinner_background)
+            out.append(self._sk_sprite("spinner-background", cx, cy, alpha, color=tint))
+        if self._skinned("spinner-circle"):
+            out.append(self._sk_sprite("spinner-circle", cx, cy, alpha, rotation=rot))
         if self._skinned("spinner-metre"):
             bars = metre_bar_count(prog, self.spinner_no_blink, t)
-            f = bars / 10.0
-            if f > 0.0:
-                mw, mh = self.skin.size["spinner-metre"]
-                mw_px, mh_px = mw * k, mh * k
-                out.append(Sprite(cx, bg_bottom - mh_px * f / 2.0,
-                                  mw_px, mh_px * f, "sk_spinner-metre",
+            mw, mh = self.skin.size["spinner-metre"]
+            cut = LEGACY_METRE_HEIGHT*(1-bars/10)
+            visible = max(0.0, mh-cut)
+            if visible > 0.0:
+                # Sprite remains at local (0,29); the mask clips below the
+                # fixed 692px height, independently of background dimensions.
+                left = cx-320*self.cam.screen_h/480
+                top = cy+(29-248)*self.cam.screen_h/480
+                out.append(Sprite(left+mw*k/2, top+(cut+visible/2)*k,
+                                  mw*k, visible*k, "sk_spinner-metre",
                                   (1.0, 1.0, 1.0, alpha),
-                                  uv_off=(0.0, 1.0 - f),
-                                  uv_scale=(1.0, f)))
-        if self._skinned("spinner-circle"):
-            out.append(self._sk_sprite("spinner-circle", cx, cy, alpha,
-                                       rotation=rot))
+                                  uv_off=(0.0, cut/mh),
+                                  uv_scale=(1.0, visible/mh)))
 
     def _new_style_sprites(self, out: list[Sprite], t: float, start: float,
                            end: float, cx: float, cy: float, rot: float,
-                           alpha: float) -> None:
+                           alpha: float, prog: float = 1.0) -> None:
         """NEW style (LegacyNewStyleSpinner): bottom at rot/3, top +
         middle2 at full rot, middle fading white→red over the duration.
         (The glow was already drawn additively under this stack.)"""
+        scale = legacy_spinner_scale(prog)
+        top_rotation = rot*(0.5 if self._skinned('spinner-middle2') else 1.0)
         if self._skinned("spinner-bottom"):
             out.append(self._sk_sprite("spinner-bottom", cx, cy, alpha,
-                                       rotation=rot / 3.0))
+                                       rotation=top_rotation / 3.0, scale=scale))
         if self._skinned("spinner-top"):
             out.append(self._sk_sprite("spinner-top", cx, cy, alpha,
-                                       rotation=rot))
+                                       rotation=top_rotation, scale=scale))
+        if self._skinned("spinner-middle2"):
+            out.append(self._sk_sprite("spinner-middle2", cx, cy, alpha,
+                                       rotation=rot, scale=scale))
         if self._skinned("spinner-middle"):
             w = _clamp01((t - start) / max(end - start, 1e-9))
             color = (1.0,
                      1.0 + (MIDDLE_RED[1] - 1.0) * w,
                      1.0 + (MIDDLE_RED[2] - 1.0) * w)
             out.append(self._sk_sprite("spinner-middle", cx, cy, alpha,
-                                       color=color))
-        if self._skinned("spinner-middle2"):
-            out.append(self._sk_sprite("spinner-middle2", cx, cy, alpha,
-                                       rotation=rot))
+                                       color=color, scale=scale))
+
+    def _legacy_spinner_text(self, out, text, x, y, alpha, scale=1.0,
+                             centred=False):
+        """Native ScorePrefix slots; RPM TopRight, bonus centre origin."""
+        sk = self.skin
+        sizes = sk.score_digit_sizes if sk.has('score_digits') else {}
+        height = max((h for w, h in sizes.values()), default=LEGACY_FONT_HEIGHT)
+        fixed = sizes['5'][0] if sizes else self.bank.legacy_aspect['5']*height
+        overlap = sk.info.score_overlap
+        entries = [];offset = 0.0
+        for ch in text:
+            w, h = sizes[ch] if sizes else (self.bank.legacy_aspect[ch]*height, height)
+            key = 'sk_score_'+ch if sizes else 'lg_'+ch
+            entries.append((key, offset+fixed/2, w, h))
+            offset += max(0.0, fixed-overlap)
+        left = min(dx-w/2 for _, dx, w, _ in entries)
+        right = max(dx+w/2 for _, dx, w, _ in entries)
+        k = self.spin_k*scale
+        x0 = x-((left+right)/2 if centred else right)*k
+        top = y-height*k/2 if centred else y
+        for key, dx, w, h in entries:
+            out.append(Sprite(x0+dx*k, top+h*k/2, w*k, h*k, key,
+                              (1, 1, 1, alpha)))
+
+    def _legacy_spinner_overlays(self, out, t, track, start, end, cx, cy, alpha, obj_id):
+        """LegacySpinner window-space children; original Argon path is separate."""
+        window = self.cam.screen_h/480
+        local_y = lambda y: cy+(y-248)*window
+        if self.draw_approach_circles:
+            scale = legacy_approach_scale(t, start, end)
+            if self._skinned('spinner-approachcircle'):
+                out.append(self._sk_sprite('spinner-approachcircle', cx, cy, alpha, scale=scale))
+            else:
+                d = self.cam.len_to_screen(PROC_SPINNER_RING_OSU)*scale
+                out.append(Sprite(cx, cy, d, d, 'approach', (1, 1, 1, alpha)))
+        tick = track.time_at_rotation(2*math.pi)
+        a = alpha*legacy_spin_prompt_alpha(t, start, end, self.diff.time_fade_in, tick)
+        if a > 0:
+            if self._skinned('spinner-spin'):
+                out.append(self._sk_sprite('spinner-spin', cx, local_y(364), a))
+            else:
+                self._glyph_run(out, 'SPIN!', cx, local_y(364), PROMPT_TEXT_UI*self.cam.screen_h/768, (1, 1, 1), a)
+        state = legacy_clear_alpha_scale(t, track.clear_time(), end)
+        if state is not None:
+            a, scale = state;a *= alpha
+            if self._skinned('spinner-clear'):
+                out.append(self._sk_sprite('spinner-clear', cx, local_y(144), a, scale=scale))
+            else:
+                self._glyph_run(out, 'CLEAR!', cx, local_y(144), PROMPT_TEXT_UI*self.cam.screen_h/768*scale, (1, 1, 1), a)
+        move = _clamp01((t-start+self.diff.time_fade_in)/max(self.diff.time_fade_in, 1e-9))
+        hide = 50*(1-move*(2-move))
+        if self._skinned('spinner-rpm'):
+            w, h = self.skin.size['spinner-rpm'];k = self.spin_k
+            out.append(Sprite(cx-87*window+w*k/2, local_y(445+hide)+h*k/2,
+                              w*k, h*k, 'sk_spinner-rpm', (1, 1, 1, alpha)))
+        self._legacy_spinner_text(out, str(int(track.rpm(t, capped=False))),
+                                  cx+80*window, local_y(448+hide), alpha, scale=0.9)
+        events = self._spinner_bonus.get(obj_id, ())
+        index = bisect.bisect_right([event[0] for event in events], t)-1
+        if index >= 0:
+            event_t, value, maximum = events[index]
+            state = legacy_bonus_popup_state(t-event_t, maximum)
+            if state is not None:
+                a, scale = state
+                self._legacy_spinner_text(out, str(value), cx, local_y(328),
+                                          a*alpha, scale=scale, centred=True)
 
     def _procedural_spinner_sprites(self, out: list[Sprite], cx: float,
                                     cy: float, rot: float,
