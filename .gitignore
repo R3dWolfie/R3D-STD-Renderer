@@ -41,3 +41,6 @@ local-web-renders/
 # Canonical HEM icons ported from the owner's R3D Mania implementation.
 !osu_std_renderer/assets/hud/hit-error-meter/hare.png
 !osu_std_renderer/assets/hud/hit-error-meter/tortoise.png
+
+# Original osu!resources mod symbols/backings (attribution beside the assets).
+!osu_std_renderer/assets/hud/mod-icons/*.png

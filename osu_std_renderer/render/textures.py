@@ -1,5 +1,6 @@
 """Procedural "Argon-ish" default textures — the taiko `argon/` playbook
-(PIL/numpy-baked, NO ppy asset files) applied to std.
+(PIL/numpy-baked) applied to std. Original ModIcon PNGs are the exception;
+their provenance and licences are in assets/hud/mod-icons/.
 
 Everything the Phase-1 scene draws is baked here at init:
 
@@ -1281,6 +1282,8 @@ class TextureBank:
     """
 
     def __init__(self, renderer) -> None:
+        from .mod_icons import LazerModIcons
+        self.mod_icons = LazerModIcons(renderer)
         renderer.upload_texture("disc", bake_disc())
         renderer.upload_texture("ring", bake_ring())
         renderer.upload_texture("approach",

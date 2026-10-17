@@ -73,6 +73,36 @@ def render(hud, recorder, t=5000):
     return list(recorder.sprites)
 
 
+def assert_mod_column(hud):
+    stack=hud._legacy_mod_stack()
+    assert stack is not None
+    gap=8*hud.es
+    if not stack.overflow:
+        if stack.visible:
+            if 'accuracy' in hud.bounds:
+                assert min(r.top for r in stack.visible) >= hud.bounds['accuracy'].bottom+gap-1e-6
+            assert max(r.right for r in stack.visible) == pytest.approx(stack.grade.right)
+        if stack.counter:
+            if stack.visible:
+                assert max(r.bottom for r in stack.visible)+gap == pytest.approx(stack.counter.top)
+            assert stack.counter.bottom+gap == pytest.approx(stack.grade.top)
+            assert hud.bounds['hits'].top == pytest.approx(stack.counter.top)
+            assert hud.bounds['hits'].right == pytest.approx(stack.grade.right)
+        if 'keys' in hud.bounds:
+            assert stack.grade.bottom+gap <= hud.bounds['keys'].top+1e-6
+    if 'grade' in hud.bounds:
+        assert hud.bounds['grade'].right == pytest.approx(stack.grade.right)
+        assert stack.grade.top <= hud.bounds['grade'].top+1e-6
+        assert hud.bounds['grade'].bottom <= stack.grade.bottom+1e-6
+    for name in ('hits','grade'):
+        if name not in hud.bounds:continue
+        for other in ('score','accuracy','keys'):
+            if other in hud.bounds:assert not hud.bounds[name].intersects(hud.bounds[other])
+        assert all(not hud.bounds[name].intersects(r) for r in stack.visible)
+    if 'hits' in hud.bounds and 'grade' in hud.bounds:
+        assert not hud.bounds['hits'].intersects(hud.bounds['grade'])
+
+
 @pytest.mark.parametrize('skin', ['complete','digits-only','keys-only','empty','blank'])
 def test_partial_or_empty_legacy_never_changes_layout(bank, skins, skin):
     hud, rec = make_hud(bank, folder=skins/skin)
@@ -501,7 +531,7 @@ def test_grade_progress_four_combinations_and_extras(bank, skins, legacy):
 @pytest.mark.parametrize('scale', [.75,1,1.25])
 @pytest.mark.parametrize('override', [False,True])
 @pytest.mark.parametrize('skin', ['complete','empty'])
-def test_legacy_grade_side_slot_preserves_mods_and_other_sprites(
+def test_legacy_grade_visibility_preserves_vertical_stack_and_other_sprites(
         bank,skins,resolution,scale,override,skin):
     hud,rec=make_hud(bank,folder=skins/skin,renderer=Recorder(*resolution),
                      hud_scale=scale,renderer_default_font_and_ranks=override,
@@ -529,16 +559,17 @@ def test_legacy_grade_side_slot_preserves_mods_and_other_sprites(
             grade=hud.bounds['grade']
             if slot is not None:assert grade==slot
             slot=grade
-            assert (grade.left+grade.right)/2==pytest.approx(hud._legacy_grade_anchor[0])
+            assert grade.right==pytest.approx(hud._legacy_mod_stack().grade.right)
             assert (grade.top+grade.bottom)/2==pytest.approx(hud._legacy_grade_anchor[1])
             if scale<=1:
-                assert hud._legacy_grade_anchor==pytest.approx((hud.ui_w_l-31,247))
+                assert_mod_column(hud)
                 assert grade.top>=hud.bounds['hits'].bottom+8*scale
                 assert grade.bottom+8*scale<=hud.bounds['keys'].top
             assert 0<=grade.left<grade.right<=hud.ui_w_l
             assert 0<=grade.top<grade.bottom<=768
-            for name in ('score','accuracy','progress','mods','hits','keys'):
+            for name in ('score','accuracy','progress','hits','keys'):
                 if name in hud.bounds:assert not grade.intersects(hud.bounds[name]),name
+            assert_mod_column(hud)
 
 
 @pytest.mark.parametrize('resolution', [(1280,720),(1920,1080)])
@@ -576,14 +607,16 @@ def test_grade_pivot_is_independent_of_accuracy_score_and_rank_art(
             if pivot is None:pivot=hud._legacy_grade_anchor
             assert hud._legacy_grade_anchor==pytest.approx(pivot)
             grade=hud.bounds['grade']
-            assert (grade.left+grade.right)/2==pytest.approx(pivot[0])
+            assert grade.right==pytest.approx(hud._legacy_mod_stack().grade.right)
             assert (grade.top+grade.bottom)/2==pytest.approx(pivot[1])
             assert 0<=grade.left<grade.right<=hud.ui_w_l
             assert 0<=grade.top<grade.bottom<=768
             assert {k:v for k,v in hud.bounds.items() if k!='grade'}==native
             for name,rect in native.items():
-                if name in ('score','accuracy','progress','mods','hits','keys'):
+                if name in ('score','accuracy','progress','hits','keys'):
                     assert not grade.intersects(rect),name
+            for rect in hud._mod_layout_rects():
+                assert not grade.intersects(rect),'visible mods'
             # A visibility toggle adds only grade sprites. Existing opacity,
             # textures, dimensions, UVs, native pie and other components persist.
             added=[sp for sp in with_grade if sp not in without]
@@ -621,16 +654,21 @@ def test_legacy_grade_clears_counter_mods_and_keys_without_moving_them(
         if pivot is None:pivot=current
         assert current==pytest.approx(pivot)
         grade=hud.bounds['grade']
-        assert (grade.left+grade.right)/2==pytest.approx(current[0])
+        if mods:
+            assert grade.right==pytest.approx(hud._legacy_mod_stack().grade.right)
+        else:
+            assert (grade.left+grade.right)/2==pytest.approx(current[0])
         assert (grade.top+grade.bottom)/2==pytest.approx(current[1])
         assert {k:v for k,v in hud.bounds.items() if k!='grade'}==native
         added=[sp for sp in on if sp not in off]
         assert [sp for sp in on if sp not in added]==off
-        for name in ('score','accuracy','progress','mods','hits','keys'):
+        for name in ('score','accuracy','progress','hits','keys'):
             if name in native:assert not grade.intersects(native[name]),name
         if scale<=1 and len(mods)<=3:
-            expected_y=247 if mods else 247-48*scale
-            assert current==pytest.approx((hud.ui_w_l-31,expected_y))
+            if mods:
+                assert_mod_column(hud)
+            else:
+                assert current==pytest.approx((hud.ui_w_l-31,247-48*scale))
             if hits:assert grade.top>=native['hits'].bottom+8*scale
             assert grade.bottom+8*scale<=native['keys'].top
 
@@ -650,29 +688,29 @@ def test_legacy_grade_tracks_visible_mod_counter_flow(
         hud._mod_acrs=build_mod_pills(0,mods)
         hud.s.show_mods=visible
         # Switch configurations on one HUD to exercise cache invalidation;
-        # hiding the counter itself must not move the grade's configured slot.
+        # hiding the counter collapses its rows in the visible-mod column.
         hud.s.show_hit_counter=True
         render(hud,rec,2300)
         states[name]=(hud.bounds['grade'],hud.bounds['hits'])
         hud.s.show_hit_counter=False
         render(hud,rec,2300)
-        assert hud.bounds['grade']==states[name][0]
+        if mods and visible:
+            assert hud.bounds['grade'].top < states[name][0].top
+            assert_mod_column(hud)
+        else:
+            assert hud.bounds['grade']==states[name][0]
         assert not hud.bounds['grade'].intersects(hud.bounds['keys'])
     grade0,hits0=states['none']
     for name in ('single','three'):
         grade,hits=states[name]
-        # Test the dependency against the existing counter geometry, rather
-        # than just replacing the old fixed-Y expectation with a new number.
-        counter_shift=hits.top-hits0.top
-        assert counter_shift==pytest.approx(48*scale)
-        assert grade.top-grade0.top==pytest.approx(counter_shift)
-        assert grade.bottom-hits.bottom==pytest.approx(grade0.bottom-hits0.bottom)
-        assert (grade.left,grade.right)==(grade0.left,grade0.right)
+        assert grade.top >= hits.bottom+8*scale
+        assert not grade.intersects(hits)
+        assert grade.right == pytest.approx(hits.right)
     assert states['hidden']==states['none']
 
 
 @pytest.mark.parametrize('resolution',[(1280,720),(1920,1080)])
-def test_owner_default_grade_anchor_is_same_with_counter_on_or_off(bank,resolution):
+def test_owner_grade_follows_counter_without_ghost_rows(bank,resolution):
     folder=Path(__file__).resolve().parents[1]/'test-render/skin'
     if not folder.is_dir():pytest.skip('owner skin is a local QA input')
     hud,rec=make_hud(bank,folder=folder,renderer=Recorder(*resolution))
@@ -683,12 +721,13 @@ def test_owner_default_grade_anchor_is_same_with_counter_on_or_off(bank,resoluti
     for hits in (False,True):
         hud.s.show_hit_counter=hits
         sprites=render(hud,rec,2300)
-        assert hud._legacy_grade_anchor==pytest.approx((hud.ui_w_l-31,247))
+        assert_mod_column(hud)
         rank=next(sp for sp in sprites if sp.texture_key=='sk_ranking-S-small')
         assert dataclasses.replace(rank,x=before[0].x,y=before[0].y)==before[0]
         if hits:
-            assert hud.bounds['keys'].top-hud.bounds['hits'].bottom==pytest.approx(98.04)
-            assert hud.bounds['grade'].top-hud.bounds['hits'].bottom==pytest.approx(9.04)
+            assert hud.bounds['hits'].bottom+8 <= hud._legacy_mod_stack().grade.top+1e-6
+            assert hud.bounds['hits'].right == pytest.approx(hud.bounds['grade'].right)
+
 
 
 @pytest.mark.parametrize('skin', ['complete','owner'])

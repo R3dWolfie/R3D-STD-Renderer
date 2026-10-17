@@ -106,9 +106,11 @@ pop chains, exponential-kernel damping for the health smoothing), so
 
 SETTINGS-SURFACE ADDITIONS (2026-07, this phase — house elements, both
 component paths):
-  mod pills          show_mods — procedural rounded pills with the mod
-                     acronyms (NC swallows DT, PF swallows SD — the
-                     standard derivation), category-coloured, sized to
+  mod display        show_mods — Legacy skin art per supported mod, with
+                     original lazer ModIcons for missing art and readable
+                     acronym pills for unknown mods.
+                     Mod acronyms (NC swallows DT, PF swallows SD) retain
+                     their source order and custom-rate labels, sized to
                      lazer's ModDisplay icon (≈48 lazer px), right-aligned
                      under the accuracy block, wrapping to stacked rows
                      when a long mod set would overflow left
@@ -143,15 +145,17 @@ import bisect
 import math
 from copy import copy
 from collections import namedtuple
-from dataclasses import dataclass
+from dataclasses import astuple, dataclass, replace
 from types import SimpleNamespace
 
 import numpy as np
 
 from ..replay.replay import KEY_K1, KEY_K2, KEY_M1, KEY_M2
 from ..ruleset import JudgmentKind, OsuHitWindows
+from ..skin.mod_icons import LEGACY_MOD_TEXTURES
 from . import perf
 from .gl import Sprite
+from .mod_icons import EXTENDED_ICON_WIDTH, GAMEPLAY_ICON_SIZE, rate_information
 from .textures import ARGON_GLYPH_CAP_SCALE
 from .hud_layout import LEGACY_ACCURACY_MARGIN_X, HudRect, select_layout
 
@@ -403,6 +407,8 @@ MOD_TEXT_FRAC = 0.62           # text height / pill height (was 0.60)
 
 HITC_ROW_H = 19.0              # hit-counter row height (lazer px)
 HITC_LABELS = ("300", "100", "50", "X")
+LEGACY_STACK_GAP = 8.0        # visible mod → counts → grade clearance
+LEGACY_STACK_RIGHT_INSET = 44.0  # keep the shared column comfortably inside the frame
 
 PP_TOP_Y = 92.0                # pp counter: top-left under the hp bar
 PP_LEFT_X = 50.0
@@ -435,6 +441,32 @@ def mods_to_acronyms(mods: int) -> list[str]:
 # category colour); ``text`` is what's drawn on the pill — the acronym plus,
 # for a custom-rate DT/NC/HT/DC, a compact " 1.3×" speed suffix.
 ModPill = namedtuple("ModPill", ("text", "acr"))
+
+
+@dataclass(frozen=True)
+class ModBadge:
+    """Native visual dimensions and a separate row/collision reservation."""
+
+    width: float
+    height: float
+    texture: str | None = None
+    icon_width: float = 0.0
+    icon_height: float = 0.0
+    label: str = ""
+    lazer: bool = False
+
+
+@dataclass(frozen=True)
+class LegacyModStack:
+    """Static visible-mod column, independent of frame values/draw order."""
+
+    quads: tuple[tuple, ...]
+    visible: tuple[HudRect, ...]
+    row_heights: tuple[float, ...]
+    counter: HudRect | None
+    grade: HudRect
+    overflow: str | None = None
+
 
 # the constant-rate mods (ModRateAdjust) that can carry a custom speed_change
 _RATE_ADJUST_ACRS = frozenset({"DT", "NC", "HT", "DC"})
@@ -486,7 +518,7 @@ def build_mod_pills(mods: int, lazer_mods=(),
     return [ModPill(a, a) for a in mods_to_acronyms(mods)]
 
 
-def pack_mod_pill_rows(widths, gap: float, max_row_w: float) -> list[list[int]]:
+def pack_mod_pill_rows(widths, gap: float, max_row_w: float, *, gaps=None) -> list[list[int]]:
     """Pack pill indices (in display order) into right-aligned rows that
     never exceed ``max_row_w`` — the mod-pill wrap/stack. A row always keeps
     at least one pill even if that single pill is wider than the cap (a lone
@@ -496,11 +528,12 @@ def pack_mod_pill_rows(widths, gap: float, max_row_w: float) -> list[list[int]]:
     rows: list[list[int]] = [[]]
     row_w = 0.0
     for i, w in enumerate(widths):
-        if rows[-1] and row_w + gap + w > max_row_w:
+        spacing = gaps[i-1] if gaps is not None and i else gap
+        if rows[-1] and row_w + spacing + w > max_row_w:
             rows.append([i])
             row_w = w
         else:
-            row_w += (gap if rows[-1] else 0.0) + w
+            row_w += (spacing if rows[-1] else 0.0) + w
             rows[-1].append(i)
     return rows
 
@@ -1763,6 +1796,9 @@ class StdHud:
         self._mod_acrs = (list(mod_pills)
                           if getattr(settings, "show_mods", True) else [])
         self._mod_rows = 0        # rows laid last frame (hit-counter offset)
+        self._mod_row_heights: tuple[float, ...] = ()
+        self._mod_occupied_rects: tuple[HudRect, ...] | None = None
+        self._mod_counter_offset: float | None = None
         self.pp_pts = pp_timeline            # [(t, pp)] | None (hidden)
         self._pp_times = ([p[0] for p in pp_timeline]
                           if pp_timeline else [])
@@ -2888,14 +2924,22 @@ class StdHud:
         return bottom + 12.0*self.es
 
     def _grade_extra(self, out, t: float) -> None:
-        """Live grade is an R3D extra in an independent profile slot.
+        """Live grade follows the visible Legacy mod column or profile slot.
 
         Limit oversized rank artwork to a 48x32 slot; procedural rank text
-        uses the same independent slot. Enabling progress cannot move grade.
+        uses the same maximum reservation. Progress cannot move grade.
         """
         if not self.s.show_grade or t < self._first_ev_t:
             return
         if self.layout.legacy:
+            stack = self._legacy_mod_stack()
+            if stack is not None:
+                slot = stack.grade
+                self._legacy_grade_anchor = ((slot.left+slot.right)/2,
+                                             (slot.top+slot.bottom)/2)
+                self._component(out, 'grade', self._grade_badge, t,
+                                slot.right, self._legacy_grade_anchor[1])
+                return
             cx, cy = self._legacy_grade_pivot()
             self._legacy_grade_anchor = (cx, cy)
             self._component(out, 'grade', self._grade_badge, t, cx, cy, True)
@@ -2906,16 +2950,22 @@ class StdHud:
                         self._extra_right(top, 32*self.es), top+16*self.es)
 
     def _legacy_grade_pivot(self) -> tuple[float, float]:
-        """Owner-marked centre in 768-high space, below counts/above keys.
+        """Visible mods use the owner's column; otherwise keep the profile slot.
 
         Reserve the maximum 48x32 badge, worst font heights and full replay
         count width, never the current rank/score/accuracy/counts. Crowded
         scales or wrapped mods move only this slot beside the existing stack.
         The probe emits geometry only: no drawing, texture writes or scoring.
         """
+        stack = self._legacy_mod_stack()
+        if stack is not None:
+            return ((stack.grade.left+stack.grade.right)/2,
+                    (stack.grade.top+stack.grade.bottom)/2)
         key = (self.layout, self.es, self.ui_w_l,
                self.s.show_key_overlay, getattr(self.s, 'show_hit_counter', False),
-               getattr(self.s, 'show_mods', True), tuple(self._mod_acrs))
+               getattr(self.s, 'show_mods', True), tuple(self._mod_acrs),
+               tuple(self._mod_icon(p) for p in self._mod_acrs), id(self.sk),
+               tuple(getattr(self.sk, 'ink_bounds', {}).items()))
         if getattr(self, '_legacy_grade_slot_key', None) == key:
             return self._legacy_grade_slot
         es = self.es
@@ -2939,34 +2989,50 @@ class StdHud:
         scratch = []
         probe._component(scratch, 'keys', probe._legacy_key_overlay, 0)
         probe._component(scratch, 'mods', probe._mod_pills, 0)
-        probe._component(scratch, 'hits', probe._hit_counter, 0)
+        mod_rects = probe._mod_layout_rects()
+        native_rows = any(h > MOD_PILL_H*es for h in probe._mod_row_heights)
+        if not native_rows:
+            probe._component(scratch, 'hits', probe._hit_counter, 0)
         half_w, half_h, gap = 24*es, 16*es, 8*es
         grade_dx, grade_y = self.layout.legacy_grade_offset
         cx = min(self.ui_w_l+grade_dx, self.ui_w_l-half_w)
-        # The marked Y is calibrated with one visible mod row. Follow the
-        # hit counter's actual stack offset, including hidden/wrapped mods,
-        # while retaining a stable centre across ranks and counter toggles.
-        grade_y += probe._mod_stack_offset()-(MOD_PILL_H+8.0)*es
+        # Retain the approved grade calibration for hidden/wrapped rows.
+        # Native art can be taller than a pill; only the actual obstacle
+        # clearance below may move grade for that extra canvas height.
+        rows = probe._mod_rows
+        nominal_offset = ((rows*MOD_PILL_H+(rows-1)*MOD_PILL_ROW_GAP+8.0)*es
+                          if rows else 0.0)
+        grade_y += nominal_offset-(MOD_PILL_H+8.0)*es
         cy = max(grade_y, bottom+gap+half_h)
         keys = probe.bounds.get('keys')
         ceiling = min(768-half_h-gap,
                       keys.top-half_h-gap if keys is not None else 768)
-        stack_bottom = max((probe.bounds[n].bottom for n in ('mods', 'hits')
-                            if n in probe.bounds), default=bottom)
+        stack_bottom = max([rect.bottom for rect in mod_rects]
+                           + [probe.bounds[n].bottom for n in ('hits',)
+                              if n in probe.bounds], default=bottom)
         below_stack = max(cy, stack_bottom+gap+half_h)
+        if native_rows:
+            # A larger canvas alone must not move the approved grade. With
+            # native rows, counts flow beside this slot when necessary;
+            # only a true mod/grade collision needs grade clearance.
+            slot = HudRect(cx-half_w, cy-half_h, cx+half_w, cy+half_h)
+            if not any(slot.intersects(rect) for rect in mod_rects):
+                below_stack = cy
         if below_stack <= ceiling:
             cy = below_stack
         else:
-            mods = probe.bounds.get('mods')
-            below_mods = max(cy, mods.bottom+gap+half_h) if mods else cy
+            below_mods = max([cy]+[rect.bottom+gap+half_h for rect in mod_rects])
             if below_mods <= ceiling:
                 cy = below_mods
         obstacles = [rect for name, rect in probe.bounds.items()
-                     if name in ('keys', 'mods', 'hits')]
+                     if name in ('keys', 'hits')] + list(mod_rects)
         # A fixed maximum-size slot protects every rank, including SS text.
+        # Native content only displaces an approved slot on actual overlap;
+        # a displacement still leaves the normal gap at the new position.
+        margin = 0.0 if native_rows else gap
         for _ in range(len(obstacles)+1):
-            slot = HudRect(cx-half_w-gap, cy-half_h-gap,
-                           cx+half_w+gap, cy+half_h+gap)
+            slot = HudRect(cx-half_w-margin, cy-half_h-margin,
+                           cx+half_w+margin, cy+half_h+margin)
             blocked = [rect for rect in obstacles if slot.intersects(rect)]
             if not blocked:
                 break
@@ -2974,7 +3040,130 @@ class StdHud:
         cx = max(half_w, cx)
         self._legacy_grade_slot_key = key
         self._legacy_grade_slot = (cx, cy)
+        if native_rows:
+            # The hit-counter probe uses the exact final grade reservation,
+            # just like live drawing. Seed its cache to avoid probing again.
+            probe._legacy_grade_slot_key = key
+            probe._legacy_grade_slot = (cx, cy)
+            probe._component(scratch, 'hits', probe._hit_counter, 0)
         return self._legacy_grade_slot
+
+    def _legacy_mod_stack(self) -> LegacyModStack | None:
+        """Pack visible art, full counter reservation and grade on one rail.
+
+        Build from the existing mod painter once per configuration. The
+        shallow probe has static readout/key metrics and never reads current
+        counts/rank/time. Its guard keeps it out of this shared-layout path.
+        """
+        if (getattr(self, '_building_mod_stack', False) or not self.layout.legacy
+                or not getattr(self.s, 'show_mods', True) or not self._mod_acrs):
+            return None
+        key = (self.layout, self.es, self.lk, self.ui_w_l, self.op,
+               self.s.show_key_overlay, getattr(self.s, 'show_hit_counter', False),
+               tuple(sorted(self.keys.used)), tuple(self._mod_acrs),
+               id(self.sk), id(self.bank), self.force_default,
+               tuple(self._mod_icon(p) for p in self._mod_acrs),
+               tuple(getattr(self.sk, 'ink_bounds', {}).items()), len(self.data.ev_times))
+        if getattr(self, '_legacy_mod_stack_key', None) == key:
+            return self._legacy_mod_stack_layout
+        es, lk = self.es, self.lk
+        gap = LEGACY_STACK_GAP*es
+        _, dy = self.layout.legacy_accuracy_offset
+        _, sh = self._legacy_text_size('score', '0123456789', LEGACY_SCORE_SCALE*es)
+        _, ah = self._legacy_text_size('score', '0123456789.%', LEGACY_ACC_SCALE*es)
+        sh, ah = min(sh, 180*es), min(ah, 108*es)
+        readout_bottom = sh+(LEGACY_ACC_MARGIN[1]+dy)*es+(ah+max(ah, LEGACY_PIE_SIZE*es))/2
+        top0 = readout_bottom+gap
+        probe = copy(self)
+        probe._building_mod_stack = True
+        readout = HudRect(0, 0, self.ui_w_l, readout_bottom)
+        probe.bounds = {'accuracy': readout}
+        probe._legacy_accuracy_bounds = readout
+        probe.keys = SimpleNamespace(used=self.keys.used,
+            state_at=lambda t: (0, (0, 0, 0, 0)),
+            last_press_at=lambda ch, t: None, last_release_at=lambda ch, t: None)
+        key_sprites = []
+        probe._component(key_sprites, 'keys', probe._legacy_key_overlay, 0)
+        keys = probe.bounds.pop('keys', None)
+        probe._mod_pills([], 0)
+        rows = []
+        for sprites in probe._mod_row_sprites:
+            rects = probe._mod_ink_rects(sprites)
+            box = (HudRect(min(r.left for r in rects), min(r.top for r in rects),
+                           max(r.right for r in rects), max(r.bottom for r in rects))
+                   if rects else HudRect.sprites(sprites, lk))
+            rows.append((sprites, rects, box))
+        row_h = HITC_ROW_H*es
+        text_h = row_h*.78
+        digits = len(str(max(len(self.data.ev_times), 1)))
+        counter_w = (self._lrun_width('9'*digits, text_h, mono=True)+8*es
+                     + max(self._lrun_width(s, text_h*.85) for s in HITC_LABELS))
+        counter_h = 3*row_h+text_h if getattr(self.s, 'show_hit_counter', False) else 0
+        tail_h = counter_h+(gap if counter_h else 0)+32*es
+        # Empty authored rows keep their full transparent quads, but consume
+        # no visible slot. Every other row keeps native within-row geometry.
+        heights = [box.bottom-box.top for _, rects, box in rows if rects]
+        total_h = sum(heights)+len(heights)*gap+tail_h
+        rail = self.ui_w_l-LEGACY_STACK_RIGHT_INSET*es
+        ceiling = keys.top-gap if keys is not None else 768-gap
+        overflow = None
+        if top0+total_h > ceiling:
+            # Keep the whole column away from immutable keys. If it is also
+            # too tall for the viewport, continue whole rows/tail in another
+            # column to its left, retaining ordering and native dimensions.
+            overflow = 'columns left of keys'
+            if keys is not None:
+                rail = min(rail, keys.left-gap)
+        bottom_limit = 768-gap if overflow else ceiling
+        cursor, column_w = top0, 0.0
+        quads, visible = [], []
+
+        def reserve(width, height):
+            nonlocal rail, cursor, column_w
+            if height > bottom_limit-top0 or width > self.ui_w_l-2*gap:
+                raise ValueError('Legacy mod stack cannot fit native visible artwork in the viewport; '
+                                 'choose a smaller HUD scale or different skin.')
+            if cursor+height > bottom_limit:
+                rail -= column_w+gap
+                cursor, column_w = top0, 0.0
+            if rail-width < gap:
+                raise ValueError('Legacy mod stack has no collision-free column space at this HUD scale.')
+            column_w = max(column_w, width)
+            return rail, cursor
+
+        # Reserve a column using its widest block before placing any rows,
+        # so an earlier wide row cannot collide with the next column.
+        blocks = [(max(0, b.right-b.left) if rs else 0,
+                   b.bottom-b.top if rs else 0) for _, rs, b in rows]
+        blocks.append((max(counter_w if counter_h else 0,48*es),tail_h))
+        column_widths = {}
+        column, used, widest = 0, 0.0, 0.0
+        for width,height in blocks:
+            if height and used and used+height > bottom_limit-top0:
+                column_widths[column] = widest
+                column, used, widest = column+1, 0.0, 0.0
+            widest = max(widest,width)
+            used += height+(gap if height else 0)
+        column_widths[column] = widest
+        column = 0
+        for sprites, rects, box in rows:
+            width, height = ((box.right-box.left, box.bottom-box.top) if rects else (0,0))
+            old_rail = rail
+            right, top = reserve(width,height)
+            if rail != old_rail:column += 1
+            column_w = column_widths[column]
+            dx, ddy = right-box.right, top-box.top
+            quads.extend(astuple(replace(s,x=s.x+dx*lk,y=s.y+ddy*lk)) for s in sprites)
+            visible.extend(HudRect(r.left+dx,r.top+ddy,r.right+dx,r.bottom+ddy) for r in rects)
+            if rects:cursor += height+gap
+        right, top = reserve(max(counter_w if counter_h else 0,48*es),tail_h)
+        counter = HudRect(right-counter_w,top,right,top+counter_h) if counter_h else None
+        grade_top = top+counter_h+(gap if counter_h else 0)
+        grade = HudRect(right-48*es,grade_top,right,grade_top+32*es)
+        result = LegacyModStack(tuple(quads),tuple(visible),probe._mod_row_heights,
+                                counter,grade,overflow)
+        self._legacy_mod_stack_key, self._legacy_mod_stack_layout = key,result
+        return result
 
     def _extra_right(self, top: float, height: float) -> float:
         """Secondary right-edge flow clears the profile's key column/row."""
@@ -2984,18 +3173,78 @@ class StdHud:
             right = min(right, keys.left-12*self.es)
         return right
 
+    def _mod_icon(self, pill: ModPill) -> tuple[str, tuple[float, float]] | None:
+        """Read setup-time skin metadata only; a blank is still present."""
+        sk = self.sk
+        if (not self.layout.legacy or sk is None
+                or getattr(getattr(sk, 'skin', None), 'skin_dir', None) is None):
+            return None
+        name = LEGACY_MOD_TEXTURES.get(pill.acr)
+        if name is not None and sk.has(name):
+            return name, sk.size[name]
+        return None
+
+    def _measure_mod_badges(self) -> list[ModBadge]:
+        """Shared by live drawing and the grade probe through _mod_pills.
+
+        Stable pSprite uses native logical dimensions at H/768, not a
+        common icon height. SkinElements already normalised @2x once;
+        self.lk supplies H/768 at draw time and es is explicit HUD scaling.
+        Preserve the full canvas, even if wider than the wrapping cap. Row
+        reservations also clear adjacent pills/rate text without resizing art.
+        """
+        h = MOD_PILL_H * self.es
+        text_h = h * MOD_TEXT_FRAC
+        gap = MOD_PILL_GAP * self.es
+        badges = []
+        for pill in self._mod_acrs:
+            icon = self._mod_icon(pill)
+            if icon is None:
+                icons = getattr(self.bank, 'mod_icons', None)
+                if icons is not None and icons.has(pill.acr):
+                    label = rate_information(pill)
+                    width = EXTENDED_ICON_WIDTH if label else GAMEPLAY_ICON_SIZE
+                    badges.append(ModBadge(width*self.es, GAMEPLAY_ICON_SIZE*self.es,
+                                           label=label, lazer=True))
+                    continue
+                badges.append(ModBadge(self._lrun_width(pill.text, text_h)
+                                       + 2 * MOD_PILL_PAD_X * self.es, h))
+                continue
+            name, (w, ih) = icon
+            label = pill.text.removeprefix(pill.acr).strip()
+            label_w = self._lrun_width(label, text_h) if label else 0.0
+            extra = gap + label_w if label else 0.0
+            iw, ih = w * self.es, ih * self.es
+            badges.append(ModBadge(iw+extra, max(h, ih),
+                                   self.sk.key(name), iw, ih, label))
+        return badges
+
     def _mod_pills(self, out, t: float) -> None:
-        """§4.6 Gameplay.Mods: procedural rounded pills with the active mod
-        acronyms, right-aligned under the accuracy block, category-coloured
-        (reduction green / increase red / automation blue) — our procedural
-        form of lazer's ModDisplay (Screens/Play/HUD/ModDisplay.cs: a
-        horizontal ModIcon row, MOD_ICON_SIZE 80 × MOD_ICON_SCALE 0.6 = 48
-        lazer px), sized big enough to read at 720p and survive a 360p
-        downscale. A long mod set wraps to further stacked rows so it never
-        runs off the left edge or over the score/combo; ``_mod_rows`` records
-        the row count for the hit-counter's offset below."""
+        """Right-aligned mod rows under accuracy, with per-mod skin art.
+
+        Missing skin art uses the original lazer ModIcon; unknown mods keep
+        the existing readable acronym pill.
+        Mixed rows keep the same wrapping and full native row heights.
+        Separate visible occupancy clears the hit counter and grade.
+        """
+        stack = self._legacy_mod_stack()
+        if stack is not None:
+            out.extend(Sprite(*quad) for quad in stack.quads)
+            self._mod_occupied_rects = stack.visible
+            self._mod_row_heights = stack.row_heights
+            self._mod_rows = len(stack.row_heights)
+            self._mod_counter_offset = ((stack.counter.top if stack.counter is not None
+                                         else stack.grade.top)-self._top_right_stack_y())
+            return
+        # Layout metadata is rebuilt from this draw's geometry. A shallow
+        # grade probe owns its own tuples; it cannot mutate the live cache.
+        start = len(out)
+        self._mod_occupied_rects = None
+        self._mod_counter_offset = None
+        self._mod_row_sprites = ()
         if not getattr(self.s, "show_mods", True) or not self._mod_acrs:
             self._mod_rows = 0
+            self._mod_row_heights = ()
             return
         es, lk = self.es, self.lk
         h = MOD_PILL_H * es
@@ -3007,40 +3256,118 @@ class StdHud:
         right = self.ui_w_l - 20.0 * es
         max_row_w = min(MOD_PILL_ROW_MAX_W * es, right-8*es)
         # measure each pill, then pack (in display order) into right-aligned
-        # rows that never exceed max_row_w — wrap/stack downward, keeping the
-        # mods' reading order left-to-right within each row.
-        widths = [self._lrun_width(p.text, text_h) + 2.0 * pad
-                  for p in self._mod_acrs]
-        rows = pack_mod_pill_rows(widths, gap, max_row_w)
-        stack_h = len(rows)*h + max(len(rows)-1, 0)*row_gap
+        # rows within max_row_w, except a lone oversize native canvas. Wrap
+        # downward without shrinking art or changing the mods' reading order.
+        badges = self._measure_mod_badges()
+        widths = [badge.width for badge in badges]
+        # ModFlowDisplay uses zero horizontal spacing. Keep R3D's existing
+        # clearance beside native canvases and unknown acronym pills.
+        gaps = [0.0 if a.lazer and b.lazer else gap
+                for a, b in zip(badges, badges[1:])]
+        rows = pack_mod_pill_rows(widths, gap, max_row_w, gaps=gaps)
+        row_heights = [max(badges[i].height for i in row) for row in rows]
+        stack_h = sum(row_heights) + max(len(rows)-1, 0)*row_gap
         right = self._extra_right(top0, stack_h)
         max_row_w = min(max_row_w, right-8*es)
-        rows = pack_mod_pill_rows(widths, gap, max_row_w)
-        stack_h = len(rows)*h + max(len(rows)-1, 0)*row_gap
+        rows = pack_mod_pill_rows(widths, gap, max_row_w, gaps=gaps)
+        row_heights = [max(badges[i].height for i in row) for row in rows]
+        stack_h = sum(row_heights) + max(len(rows)-1, 0)*row_gap
         right = self._extra_right(top0, stack_h)
-        for r, idxs in enumerate(rows):
-            top = top0 + r * (h + row_gap)
-            total = sum(widths[i] for i in idxs) + gap * max(len(idxs) - 1, 0)
+        top = top0
+        row_sprites = []
+        for idxs, row_h in zip(rows, row_heights):
+            row_start = len(out)
+            total = sum(widths[i] for i in idxs) + sum(gaps[i] for i in idxs[:-1])
             x = right - total                    # left edge of this row
             for i in idxs:
                 pw = widths[i]
                 pill = self._mod_acrs[i]
+                badge = badges[i]
+                spacing = gaps[i] if i < len(gaps) else gap
+                if badge.lazer:
+                    # The module emits ordinary Sprite quads and calls the
+                    # existing R3D glyph path for text; it never loads fonts.
+                    self.bank.mod_icons.draw(
+                        out, pill.acr, x, top+(row_h-badge.height)/2,
+                        es, self.op, badge.label,
+                        self._lrun, self._lrun_width, unit=lk)
+                    x += pw + spacing
+                    continue
+                if badge.texture is not None:
+                    # White multiplier preserves RGB/alpha. Even a fully
+                    # transparent texture emits its slot geometry, so neither
+                    # fallback pills nor time-dependent layout shifts appear.
+                    out.append(Sprite((x + badge.icon_width / 2.0) * lk,
+                                      (top + row_h / 2.0) * lk,
+                                      badge.icon_width * lk, badge.icon_height * lk,
+                                      badge.texture, (1.0, 1.0, 1.0, self.op)))
+                    if badge.label:
+                        self._lrun(out, badge.label, x + badge.icon_width + gap,
+                                   top + (row_h - text_h) / 2.0, text_h,
+                                   (1.0, 1.0, 1.0), 0.95 * self.op)
+                    x += pw + spacing
+                    continue
                 cx = x + pw / 2.0
                 color = mod_pill_color(pill.acr)
-                out.append(Sprite(cx * lk, (top + h / 2.0) * lk,
+                out.append(Sprite(cx * lk, (top + row_h / 2.0) * lk,
                                   pw * lk, h * lk, "pill",
                                   (*color, 0.88 * self.op)))
                 tw = pw - 2.0 * pad
                 self._lrun(out, pill.text, cx - tw / 2.0,
-                           top + (h - text_h) / 2.0, text_h,
+                           top + (row_h - text_h) / 2.0, text_h,
                            (1.0, 1.0, 1.0), 0.95 * self.op)
-                x += pw + gap
+                x += pw + spacing
+            row_sprites.append(tuple(out[row_start:]))
+            top += row_h + row_gap
+        self._mod_row_sprites = tuple(row_sprites)
         self._mod_rows = len(rows)
+        self._mod_row_heights = tuple(row_heights)
+        if self.layout.legacy and any(b.texture is not None for b in badges):
+            occupied = self._mod_ink_rects(out[start:])
+            self._mod_occupied_rects = occupied
+            self._mod_counter_offset = (max((r.bottom for r in occupied), default=top0)
+                                        - top0 + 8*es)
+
+    def _mod_ink_rects(self, sprites) -> tuple[HudRect, ...]:
+        """Cached source alpha transformed by actual quads; other art is ordinary bounds."""
+        occupied = []
+        lk = self.lk
+        ink_bounds = getattr(self.sk, 'ink_bounds', {})
+        for sprite in sprites:
+            name = (sprite.texture_key or '').removeprefix('sk_')
+            if name in ink_bounds:
+                ink = ink_bounds[name]
+                if ink is None:  # authored blank still emitted above
+                    continue
+                w, ih = self.sk.size[name]
+                left, top = (sprite.x-sprite.w/2)/lk, (sprite.y-sprite.h/2)/lk
+                sx, sy = sprite.w/(w*lk), sprite.h/(ih*lk)
+                occupied.append(HudRect(left+ink[0]*sx, top+ink[1]*sy,
+                                        left+ink[2]*sx, top+ink[3]*sy))
+            else:
+                # Pills, lazer fallbacks and every rate glyph keep their
+                # ordinary drawable bounds. No per-frame alpha scans.
+                occupied.append(HudRect.sprites([sprite], lk))
+        return tuple(occupied)
+
+    def _mod_layout_rects(self) -> tuple[HudRect, ...]:
+        """Mod-only visual occupancy; self.bounds['mods'] stays full canvas."""
+        occupied = getattr(self, '_mod_occupied_rects', None)
+        if occupied is not None:
+            return occupied
+        rect = self.bounds.get('mods')
+        return (rect,) if rect is not None else ()
 
     def _mod_stack_offset(self) -> float:
         """Space below visible mod rows, in scaled logical HUD units."""
         if not self._mod_acrs or not getattr(self.s, 'show_mods', True):
             return 0.0
+        if getattr(self, '_mod_counter_offset', None) is not None:
+            return self._mod_counter_offset
+        if self._mod_row_heights:
+            return (sum(self._mod_row_heights)
+                    + (len(self._mod_row_heights)-1)*MOD_PILL_ROW_GAP*self.es
+                    + 8.0*self.es)
         rows = max(self._mod_rows, 1)
         return (rows*MOD_PILL_H+(rows-1)*MOD_PILL_ROW_GAP+8.0)*self.es
 
@@ -3057,6 +3384,16 @@ class StdHud:
         # Clear the whole (possibly wrapped) pill stack laid this frame.
         top = self._top_right_stack_y()+self._mod_stack_offset()
         right = self._extra_right(top, len(counts)*row_h)
+        stack = self._legacy_mod_stack()
+        if stack is not None:
+            top, right = stack.counter.top, stack.counter.right
+        elif self.layout.legacy and any(h > MOD_PILL_H*es for h in self._mod_row_heights):
+            # Native art may raise the counter into the approved grade slot.
+            # Keep grade/keys fixed and clear that slot horizontally, even
+            # with grade hidden so its visibility never moves other elements.
+            cx, cy = self._legacy_grade_pivot()
+            if top < cy+16*es and top+len(counts)*row_h > cy-16*es:
+                right = min(right, cx-24*es-8*es)
         for i, (label, n, color) in enumerate(
                 zip(HITC_LABELS, counts, colors)):
             y = top + i * row_h

@@ -80,6 +80,9 @@ play-skip, arrow-warning, comboburst.
 """
 from __future__ import annotations
 
+import numpy as np
+
+from ..skin.mod_icons import LEGACY_MOD_TEXTURES
 from ..skin.skin import Skin, Source
 from ..skin.skin_ini import load as load_skin_ini
 
@@ -176,6 +179,9 @@ _CORE_ELEMENTS: dict[str, tuple[bool, bool, bool]] = {
     "ranking-B": (False, False, False),
     "ranking-C": (False, False, False),
     "ranking-D": (False, False, False),
+    # Stable gameplay mod artwork: the same startup resolution/blank/size
+    # contract as other skin sprites, with no beatmap-image lookup.
+    **{name: (False, False, False) for name in LEGACY_MOD_TEXTURES.values()},
 }
 
 # LegacySpriteText's non-digit lookups: char → texture-name suffix
@@ -191,6 +197,8 @@ class SkinElements:
                  "score_digits" cover their whole prefix set)
     empty        loaded but fully transparent → draw NOTHING (hit300 case)
     size         element → (w, h) LOGICAL px (@2x already halved; frame 0)
+    ink_bounds   static mod icon → nonzero-alpha box in logical px, or None
+                 for an authored blank; does not trim the uploaded canvas
     digit_sizes  HitCirclePrefix digit char → (w, h) logical px
     score_digit_sizes  ScorePrefix digit char → (w, h) logical px
     frame_counts element → uploaded frame count (cycling elements only)
@@ -202,6 +210,7 @@ class SkinElements:
         self.loaded: set[str] = set()
         self.empty: set[str] = set()
         self.size: dict[str, tuple[float, float]] = {}
+        self.ink_bounds: dict[str, tuple[float, float, float, float] | None] = {}
         self.frame_counts: dict[str, int] = {}
         self.frame_sizes: dict[str, list[tuple[float, float]]] = {}
         self.animation_frame_times: dict[str, float] = {}
@@ -283,6 +292,16 @@ class SkinElements:
             if i == 0:
                 self.size[name] = (rgba.shape[1] * tf.scale,
                                    rgba.shape[0] * tf.scale)
+                if name.startswith("selection-mod-"):
+                    # Include every nonzero alpha texel, even alpha=1. Box
+                    # ends are exclusive; @2x is normalised exactly once.
+                    alpha = rgba[..., 3]
+                    rows = np.flatnonzero(alpha.any(axis=1))
+                    columns = np.flatnonzero(alpha.any(axis=0))
+                    self.ink_bounds[name] = (
+                        (columns[0]*tf.scale, rows[0]*tf.scale,
+                         (columns[-1]+1)*tf.scale, (rows[-1]+1)*tf.scale)
+                        if rows.size else None)
                 self.loaded.add(name)
                 if int(rgba[..., 3].max()) == 0:
                     self.empty.add(name)   # skin explicitly blanks this
