@@ -44,7 +44,13 @@ LOUDNORM = "loudnorm=I=-18:TP=-1.5:LRA=11"
 _X264_PRESET = os.environ.get("R3D_X264_PRESET", "veryfast")
 _X264_CRF = os.environ.get("R3D_X264_CRF")       # None = use the caller's crf
 _X264_PARAMS = os.environ.get("R3D_X264_PARAMS", "")
-_X264_THREADS = os.environ.get("R3D_X264_THREADS")
+# Default libx264 (the no-HW-encoder fallback) to leave >=2 logical cores free,
+# so a fallback encode on a contributor's own machine cannot spawn threads on
+# every core at normal priority and freeze their desktop (the rel/Stella
+# semi-crash). R3D_X264_THREADS overrides. Matches catch/taiko/mania; harmless
+# on dedicated render boxes, which encode on the GPU anyway.
+_X264_THREADS = os.environ.get(
+    "R3D_X264_THREADS") or str(max(2, (os.cpu_count() or 4) - 2))
 
 
 def _x264_extra() -> list:
