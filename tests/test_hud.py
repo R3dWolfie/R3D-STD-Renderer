@@ -11,7 +11,7 @@ from pathlib import Path
 from osu_std_renderer.render.hud import (
     ARGON_ROLL_MS, ERR_ARROW_N, HudData, KeySeries, acc_display_value,
     argon_combo_scale_at, ease_out_quad, grade_for, layout_run,
-    legacy_combo_display_timeline, rolled, std_accuracy, unstable_rate,
+    legacy_combo_display_timeline, rank_from_accuracy, rolled, std_accuracy, unstable_rate,
 )
 from osu_std_renderer.beatmap import load_full
 from osu_std_renderer.replay.replay import (
@@ -70,6 +70,54 @@ def test_std_accuracy():
                - (300 * 589 + 100 * 8) / (300.0 * 599)) < 1e-12
     assert std_accuracy(0, 0, 0, 5) == 0.0
     assert abs(std_accuracy(0, 3, 0, 0) - 1.0 / 3.0) < 1e-12
+
+
+def test_rank_from_raw_accuracy_boundaries_and_ordinary_miss_cap():
+    cases = [(1.0, 'SS'), (.99999, 'S'), (.9768, 'S'), (.95, 'S'),
+             (math.nextafter(.95, 0), 'A'), (.9, 'A'),
+             (math.nextafter(.9, 0), 'B'), (.8, 'B'),
+             (math.nextafter(.8, 0), 'C'), (.7, 'C'),
+             (math.nextafter(.7, 0), 'D'), (0.0, 'D')]
+    for acc, rank in cases:
+        assert rank_from_accuracy(acc) == rank
+        assert rank_from_accuracy(acc, 1) == ('A' if rank in ('S', 'SS') else rank)
+    assert acc_display_value(.99999) == 100.0  # rounding never establishes perfect rank
+    assert rank_from_accuracy(math.nextafter(1.0, math.inf)) == 'S'
+
+
+def test_lazer_popup_only_fallback_uses_accuracy_and_chronological_misses():
+    import dataclasses
+    sim = _three_circle_run(click_third=True)
+    sim.lazer = True
+    sim.events = [dataclasses.replace(e, acc_after=acc) for e, acc in
+                  zip(sim.events, (1.0, .9768, .99999))]
+    d = HudData(sim)
+    assert d.accuracy_source == 'object-events-fallback'
+    assert d.grade_at(500) == 'SS'
+    assert d.grade_at(1000) == 'SS'
+    assert d.grade_at(2000) == 'S' and d.acc_at(2300) == .9768
+    assert d.grade_at(3000) == 'S'  # rank updates before accuracy finishes rolling
+    sim.events[-1] = dataclasses.replace(sim.events[-1], kind=sim.events[-1].kind.MISS)
+    d = HudData(sim)
+    assert d.grade_at(2999) == 'S'  # a future ordinary Miss cannot cap an earlier S
+    assert d.grade_at(3000) == 'A'
+    for t in (3300, 500, 2000, 1000, 3000, 2300, 2000):
+        assert d.grade_at(t) == ('SS' if t < 2000 else 'S' if t < 3000 else 'A')
+
+
+def test_stable_and_classic_grade_keep_object_count_semantics():
+    import dataclasses
+    sim = _three_circle_run(click_third=False)
+    for classic in (False, True):
+        sim.classic = classic
+        d = HudData(sim)
+        assert d.accuracy_source == 'object-events'
+        for e in sim.events:
+            assert d.grade_at(e.time_ms) == grade_for(*d.counts_at(e.time_ms))
+        # Object counts, rather than a lazer-only canonical accuracy authority,
+        # remain the rank input on stable/Classic compatibility callers.
+        sim.events[-1] = dataclasses.replace(sim.events[-1], acc_after=.9768)
+        assert HudData(sim).grade_at(5000) == 'D'
 
 
 def test_acc_display_matches_replay_meta_derivation():
@@ -332,7 +380,7 @@ def test_final_acc_reads_last_event_not_a_timestamp():
     assert d.acc_at(last_obj_end + 1.0) != d.final_acc()
 
 
-# --- per-element component selection (the HYBRID rule, owner 2026-07-08) -------------
+# --- coherent HUD layout selection (supersedes hybrid geometry, 2026-10) ---
 
 class _FakeSkin:
     """Just enough of SkinElements for StdHud's selection logic."""
@@ -363,74 +411,40 @@ def _hud_with(skin, **setting_overrides):
                   health=None)
 
 
-def test_hud_component_selection_hybrid_per_element():
-    """The HYBRID rule (owner decision 2026-07-08, supersedes the
-    same-day all-legacy correction): PER ELEMENT — the skin's legacy
-    component where the skin SHIPS that element's textures, ARGON for
-    whatever the skin lacks. Skinless renders stay all-Argon."""
-    # skinless → all Argon
+def test_hud_component_selection_coherent_profile():
+    from osu_std_renderer.render.hud_layout import ARGON, LEGACY
     hud = _hud_with(None)
-    assert not hud.legacy_score and not hud.legacy_combo
-    assert not hud.legacy_health and not hud.legacy_keys
-    # a rich skin → all legacy
-    hud = _hud_with(_FakeSkin({"score_digits", "combo_digits",
-                               "scorebar-colour", "inputoverlay-key"}))
-    assert hud.legacy_score and hud.legacy_combo
-    assert hud.legacy_health and hud.legacy_keys
-    # the owner-skin shape (fonts only, e.g. osu_30196342): skin
-    # score/combo fonts render, hp bar + key counter go ARGON
-    hud = _hud_with(_FakeSkin({"score_digits", "combo_digits"}))
-    assert hud.legacy_score and hud.legacy_combo
-    assert not hud.legacy_health and not hud.legacy_keys
-    # scorebar only → legacy hp, Argon everything else; either
-    # inputoverlay texture is enough for legacy keys
-    hud = _hud_with(_FakeSkin({"scorebar-colour"}))
-    assert hud.legacy_health
-    assert not hud.legacy_score and not hud.legacy_combo
-    assert not hud.legacy_keys
-    hud = _hud_with(_FakeSkin({"inputoverlay-background"}))
-    assert hud.legacy_keys and not hud.legacy_health
-    # an EMPTY skin (zero textures) ships nothing → all-Argon HUD by
-    # default (gameplay keeps its legacy fallback — unchanged)
-    hud = _hud_with(_FakeSkin(set()))
-    assert not hud.legacy_score and not hud.legacy_combo
-    assert not hud.legacy_health and not hud.legacy_keys
+    assert hud.layout == ARGON
+    assert not any((hud.legacy_score, hud.legacy_combo, hud.legacy_health, hud.legacy_keys))
+    # Keep all former hybrid cases: completeness affects providers, never
+    # geometry. Includes fonts-only, health-only, keys-only and an empty skin.
+    for assets in ({"score_digits", "combo_digits", "scorebar-colour", "inputoverlay-key"},
+                   {"score_digits", "combo_digits"}, {"scorebar-colour"},
+                   {"inputoverlay-background"}, set()):
+        hud = _hud_with(_FakeSkin(assets))
+        assert hud.layout == LEGACY
+        assert all((hud.legacy_score, hud.legacy_combo, hud.legacy_health, hud.legacy_keys))
 
 
 def test_legacy_defaults_forces_all_legacy():
-    """legacy_defaults=ON (--legacy-defaults) = the ALL-LEGACY look:
-    every HUD element selects its legacy component even skinless / under
-    an empty skin — the lg_* bakes carry whatever the skin doesn't ship.
-    PRECEDENCE: renderer_default_font_and_ranks wins over it when both
-    are set (numbers/ranks go Argon/procedural, the rest stays legacy)."""
-    # empty skin + legacy_defaults → all legacy (legacy_only_v2 shape)
-    hud = _hud_with(_FakeSkin(set()), legacy_defaults=True)
-    assert hud.legacy_score and hud.legacy_combo
-    assert hud.legacy_health and hud.legacy_keys
-    # skinless + legacy_defaults → still all legacy
-    hud = _hud_with(None, legacy_defaults=True)
-    assert hud.legacy_score and hud.legacy_combo
-    assert hud.legacy_health and hud.legacy_keys
-    # precedence: renderer_default_font_and_ranks wins for fonts+ranks
-    hud = _hud_with(_FakeSkin(set()), legacy_defaults=True,
-                    renderer_default_font_and_ranks=True)
-    assert hud.force_default
-    assert not hud.legacy_score and not hud.legacy_combo   # Argon numbers
-    assert hud.legacy_health and hud.legacy_keys            # stay legacy
+    for skin in (None, _FakeSkin(set())):
+        for default_font in (False, True):
+            hud = _hud_with(skin, legacy_defaults=True,
+                            renderer_default_font_and_ranks=default_font)
+            assert hud.layout.legacy
+            assert all((hud.legacy_score, hud.legacy_combo, hud.legacy_health, hud.legacy_keys))
+            assert hud.force_default == default_font
 
 
 def test_renderer_default_font_and_ranks_toggle():
-    """renderer_default_font_and_ranks=ON forces the renderer's default
-    numbers (Argon) + procedural rank text even under a skin with fonts;
-    hp/keys selection is untouched (fonts + ranks only)."""
     sk = _FakeSkin({"score_digits", "combo_digits", "scorebar-colour",
                     "inputoverlay-key", "ranking-S-small"})
-    hud = _hud_with(sk)
-    assert hud.legacy_score and hud.legacy_combo and not hud.force_default
-    hud = _hud_with(sk, renderer_default_font_and_ranks=True)
-    assert hud.force_default
-    assert not hud.legacy_score and not hud.legacy_combo   # Argon numbers
-    assert hud.legacy_health and hud.legacy_keys            # unaffected
+    native = _hud_with(sk)
+    override = _hud_with(sk, renderer_default_font_and_ranks=True)
+    assert override.force_default and not native.force_default
+    assert override.layout == native.layout
+    assert all((override.legacy_score, override.legacy_combo,
+                override.legacy_health, override.legacy_keys))
 
 
 def test_hit_error_block_parks_near_the_bottom():
@@ -495,7 +509,8 @@ def _counter_hud(score, combo):
                          "show_grade": False})()
     h.es = h.lk = h.k = h.op = 1.0
     h.bank = _CounterBank()
-    h.argon_league = True          # these exercise the Argon counters
+    from osu_std_renderer.render.hud_layout import ARGON
+    h.layout = ARGON
     h._pin = 1.0
     h.data = _CounterData(score, combo)
     h.ui_w_l = 1366.0

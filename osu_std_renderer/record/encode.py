@@ -60,21 +60,66 @@ class EncoderError(RuntimeError):
     pass
 
 
-def probe_encoder(encoder: str = "auto") -> str:
-    """Resolve 'auto' → preferred encoder available on this system.
-    Preference: h264_nvenc → h264_vaapi → libx264 (pool A/B are NVENC;
-    pool C is AMD/VAAPI with system ffmpeg)."""
+def _encoder_usable(ffmpeg: str, encoder: str, device: str | None) -> tuple[bool, str]:
+    """Open the driver and encode one RGB frame; a compiled encoder can still fail."""
+    cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin"]
+    if encoder == "h264_vaapi":
+        cmd += ["-vaapi_device", device or "/dev/dri/renderD128"]
+    cmd += ["-f", "rawvideo", "-pix_fmt", "rgb24", "-s", "128x128", "-r", "1",
+            "-i", "pipe:0", "-frames:v", "1", "-an", "-vf",
+            "format=nv12,hwupload" if encoder == "h264_vaapi" else "format=yuv420p",
+            "-c:v", encoder, "-f", "null", "-"]
+    try:
+        result = subprocess.run(cmd, input=bytes(128 * 128 * 3),
+                                capture_output=True, timeout=5, check=False)
+    except subprocess.TimeoutExpired:
+        return False, "encoder startup probe timed out"
+    except OSError as exc:
+        return False, str(exc)
+    if result.returncode == 0:
+        return True, ""
+    reason = result.stderr.decode(errors="replace").strip().splitlines()
+    return False, reason[0][:500] if reason else f"ffmpeg exit code {result.returncode}"
+
+
+def probe_encoder(encoder: str = "auto", device: str | None = None) -> str:
+    """Resolve auto to a working encoder: NVENC, VAAPI, then libx264.
+
+    Explicit choices stay explicit. Hardware must successfully encode a frame
+    on this machine, using the same VAAPI device as the actual render.
+    """
     if encoder != "auto":
         return encoder
     ffmpeg = shutil.which("ffmpeg")
     if ffmpeg is None:
         raise EncoderError("ffmpeg not found on PATH")
-    out = subprocess.run([ffmpeg, "-hide_banner", "-encoders"],
-                         capture_output=True, text=True, check=False).stdout
-    for cand in ("h264_nvenc", "h264_vaapi", "libx264"):
-        if cand in out:
-            return cand
-    return "libx264"
+    try:
+        result = subprocess.run([ffmpeg, "-hide_banner", "-encoders"],
+                                capture_output=True, text=True, timeout=5, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise EncoderError(f"Unable to query ffmpeg encoders: {exc}") from exc
+    if result.returncode != 0:
+        raise EncoderError("Unable to query ffmpeg encoders: " + result.stderr[-1024:])
+    available = {parts[1] for line in result.stdout.splitlines()
+                 if len(parts := line.split()) >= 2}
+    if device is None and Path("/dev/dri/renderD128").exists():
+        device = "/dev/dri/renderD128"
+    candidates = ["h264_nvenc"]
+    if device is not None:
+        candidates.append("h264_vaapi")
+    candidates.append("libx264")
+    failures = []
+    for candidate in candidates:
+        if candidate not in available:
+            continue
+        usable, reason = _encoder_usable(ffmpeg, candidate, device)
+        if usable:
+            print(f"encoder: auto selected {candidate}", file=sys.stderr, flush=True)
+            return candidate
+        failures.append(f"{candidate}: {reason}")
+        print(f"encoder: {candidate} unavailable: {reason}", file=sys.stderr, flush=True)
+    reason = "; ".join(failures) or "ffmpeg reports none of the supported encoders"
+    raise EncoderError("No usable H.264 encoder: " + reason)
 
 
 def nvenc_target_bps(w: int, h: int, fps: float) -> int:
@@ -772,7 +817,10 @@ class FfmpegPipe:
         if exc_type is None and self._werr is not None \
                 and not isinstance(self._werr, BrokenPipeError):
             raise EncoderError(f"ffmpeg writer failed: {self._werr!r}")
-        if exc_type is None and code != 0:
-            raise EncoderError(
-                f"ffmpeg exited {code}: {err.decode(errors='replace')[-2000:]}"
-                + hw_off)
+        if code != 0:
+            message = f"ffmpeg exited {code}: {err.decode(errors='replace')[-2000:]}" + hw_off
+            if exc_type is None or (isinstance(exc, EncoderError)
+                                    and isinstance(self._werr, BrokenPipeError)):
+                raise EncoderError(message) from exc
+            # Preserve unrelated render failures while retaining ffmpeg's own diagnostic.
+            print(message, file=sys.stderr, flush=True)

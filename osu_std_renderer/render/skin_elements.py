@@ -4,7 +4,7 @@ the procedural set. Per ELEMENT: found in the skin (or fallback skin) →
 its texture is used; absent → the caller keeps the procedural texture,
 which IS the §3.1 LOCAL source of this engine.
 
-Elements loaded this phase (osu file names; animations take frame 0):
+Elements loaded this phase (osu file names):
 
   hitcircle            tinted by combo colour (osu semantics)
   hitcircleoverlay     untinted; drawn above the circle, under the combo
@@ -13,11 +13,11 @@ Elements loaded this phase (osu file names; animations take frame 0):
   <HitCirclePrefix>-0..9  combo digits (skin.ini prefix, default
                        "default-"); ALL TEN or the set falls back —
                        mixed procedural/skin digit runs would look broken
-  sliderb (sliderb0..N)   slider ball; frame 0 this phase. Tint: combo
+  sliderb (sliderb0..N)   animated slider ball. Tint: combo
                        colour if AllowSliderBallTint, else the skin.ini
                        SliderBall colour, else white. SliderBallFlip is
                        NOT honored yet (single frame → nothing to flip)
-  sliderfollowcircle   drawn while tracking at 2.4× the circle diameter
+  sliderfollowcircle   legacy animated follow (native size, 0.5 child scale)
   cursor / cursortrail / cursormiddle   CursorCentre honored (0 → the
                        texture hangs from the pointer, stable's anchor)
   hit0 / hit50 / hit100 / hit300   judgment sprites (`-0` animation frame
@@ -46,7 +46,7 @@ Elements loaded this phase (osu file names; animations take frame 0):
                        spinner RPM readout now and is the plumbing the
                        planned HUD skin-font remake will reuse
 
-ANIMATION FRAMES: sliderb and followpoint upload EVERY frame
+ANIMATION FRAMES: sliderb, sliderfollowcircle and followpoint upload EVERY frame
 (sk_<name> = frame 0, sk_<name>_fN beyond) and cycle on the map clock via
 frame_key() (skin.ini GetFrameTime: AnimationFramerate>0 ? 1000/rate :
 1000/frames). Everything else still takes frame 0.
@@ -75,12 +75,16 @@ NOT skinnable yet (honest list, stays procedural/absent):
 hitcircle-full (mandala), sliderb-nd/-spec companions,
 particle50/100/300 judgment particles, hit100k/300k/300g variants,
 cursor rotate/expand animation, animation frames beyond frame 0 for
-everything but sliderb/followpoint/scorebar-colour, section-pass/fail,
+everything but sliderb/sliderfollowcircle/followpoint/scorebar-colour, section-pass/fail,
 play-skip, arrow-warning, comboburst.
 """
 from __future__ import annotations
 
-from ..skin.skin import Skin
+import numpy as np
+
+from ..skin.mod_icons import LEGACY_MOD_TEXTURES
+from ..skin.skin import Skin, Source
+from ..skin.skin_ini import load as load_skin_ini
 
 CIRCLE_TEX_RADIUS = 64.0     # 128px @1x hitcircle ↔ 64 osu!px base radius
 CURSOR_UI_HEIGHT = 768.0     # stable's virtual UI height for cursor sizing
@@ -124,7 +128,7 @@ _CORE_ELEMENTS: dict[str, tuple[bool, bool, bool]] = {
     "sliderscorepoint": (False, False, False),
     "followpoint": (True, True, True),  # followpoint-0.png.. animation
     "sliderb": (True, False, True),     # sliderb0.png.. animation, no dash
-    "sliderfollowcircle": (True, False, False),
+    "sliderfollowcircle": (True, True, True),  # lazer GetAnimation defaults to '-'
     "cursor": (False, False, False),
     "cursortrail": (False, False, False),
     "cursormiddle": (False, False, False),
@@ -175,6 +179,9 @@ _CORE_ELEMENTS: dict[str, tuple[bool, bool, bool]] = {
     "ranking-B": (False, False, False),
     "ranking-C": (False, False, False),
     "ranking-D": (False, False, False),
+    # Stable gameplay mod artwork: the same startup resolution/blank/size
+    # contract as other skin sprites, with no beatmap-image lookup.
+    **{name: (False, False, False) for name in LEGACY_MOD_TEXTURES.values()},
 }
 
 # LegacySpriteText's non-digit lookups: char → texture-name suffix
@@ -190,6 +197,8 @@ class SkinElements:
                  "score_digits" cover their whole prefix set)
     empty        loaded but fully transparent → draw NOTHING (hit300 case)
     size         element → (w, h) LOGICAL px (@2x already halved; frame 0)
+    ink_bounds   static mod icon → nonzero-alpha box in logical px, or None
+                 for an authored blank; does not trim the uploaded canvas
     digit_sizes  HitCirclePrefix digit char → (w, h) logical px
     score_digit_sizes  ScorePrefix digit char → (w, h) logical px
     frame_counts element → uploaded frame count (cycling elements only)
@@ -201,7 +210,10 @@ class SkinElements:
         self.loaded: set[str] = set()
         self.empty: set[str] = set()
         self.size: dict[str, tuple[float, float]] = {}
+        self.ink_bounds: dict[str, tuple[float, float, float, float] | None] = {}
         self.frame_counts: dict[str, int] = {}
+        self.frame_sizes: dict[str, list[tuple[float, float]]] = {}
+        self.animation_frame_times: dict[str, float] = {}
 
         for name, (frames, dash, cycle) in _CORE_ELEMENTS.items():
             self._load_one(renderer, name, frames=frames, dash=dash,
@@ -249,7 +261,14 @@ class SkinElements:
             if not cycle:
                 found = found[:1]          # frame 0 only
         else:
-            tf = self.skin.find_texture(name)
+            if name == "cursormiddle":
+                # LegacyCursor belongs to the provider that supplied cursor.
+                # A middle from another provider must neither overlay that
+                # cursor nor switch its trail to connected/additive mode.
+                tf = self.skin.find_texture(
+                    name, source=self.skin.get_source("cursor"))
+            else:
+                tf = self.skin.find_texture(name)
             found = [tf] if tf is not None else []
         if not found:
             return
@@ -260,17 +279,44 @@ class SkinElements:
                 if i == 0:
                     return
                 break
+            if name == "sliderfollowcircle":
+                # LegacySkinExtensions.WithMaximumSize: per-axis centre crop,
+                # not aspect-fit scaling. MAX_FOLLOW_CIRCLE_AREA_SIZE = 128*3.
+                limit = round(384 / tf.scale)
+                h, w = rgba.shape[:2]
+                cw, ch = min(w, limit), min(h, limit)
+                x, y = (w - cw) // 2, (h - ch) // 2
+                rgba = rgba[y:y + ch, x:x + cw]
             renderer.upload_texture(
                 f"sk_{name}" if i == 0 else f"sk_{name}_f{i}", rgba)
             if i == 0:
                 self.size[name] = (rgba.shape[1] * tf.scale,
                                    rgba.shape[0] * tf.scale)
+                if name.startswith("selection-mod-"):
+                    # Include every nonzero alpha texel, even alpha=1. Box
+                    # ends are exclusive; @2x is normalised exactly once.
+                    alpha = rgba[..., 3]
+                    rows = np.flatnonzero(alpha.any(axis=1))
+                    columns = np.flatnonzero(alpha.any(axis=0))
+                    self.ink_bounds[name] = (
+                        (columns[0]*tf.scale, rows[0]*tf.scale,
+                         (columns[-1]+1)*tf.scale, (rows[-1]+1)*tf.scale)
+                        if rows.size else None)
                 self.loaded.add(name)
                 if int(rgba[..., 3].max()) == 0:
                     self.empty.add(name)   # skin explicitly blanks this
             n += 1
+            self.frame_sizes.setdefault(name, []).append(
+                (rgba.shape[1] * tf.scale, rgba.shape[0] * tf.scale))
         if cycle and n:
             self.frame_counts[name] = n
+            if name == "sliderfollowcircle":
+                # Lazer gets frame rate from the asset provider, including
+                # fallback/local providers, rather than the selected skin.
+                provider = {Source.SKIN: self.skin.skin_dir,
+                            Source.FALLBACK: self.skin.fallback_dir,
+                            Source.LOCAL: self.skin.local_dir}[found[0].source]
+                self.animation_frame_times[name] = load_skin_ini(provider).get_frame_time(n)
 
     def _load_digit_set(self, renderer, prefix: str, key: str,
                         flag: str) -> dict[str, tuple[float, float]]:
@@ -325,11 +371,21 @@ class SkinElements:
         n = self.frame_counts.get(name, 1)
         if n <= 1:
             return f"sk_{name}"
-        ft = self.info.get_frame_time(n)
+        ft = self.animation_frame_times.get(name, self.info.get_frame_time(n))
         if ft <= 0:
             return f"sk_{name}"
         i = int(t / ft) % n
         return f"sk_{name}" if i == 0 else f"sk_{name}_f{i}"
+
+    def frame_size(self, name: str, t: float) -> tuple[float, float]:
+        """Actual logical dimensions of the selected frame, including @2x."""
+        sizes = self.frame_sizes.get(name)
+        if not sizes:
+            return self.size[name]
+        n = self.frame_counts.get(name, 1)
+        ft = self.animation_frame_times.get(name, self.info.get_frame_time(n))
+        i = int(t / ft) % n if n > 1 and ft > 0 else 0
+        return sizes[i]
 
     def _pick(self, name: str) -> str | None:
         return name if name in self.loaded else None

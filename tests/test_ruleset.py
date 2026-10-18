@@ -640,6 +640,74 @@ def test_lazer_slider_parts_reconcile_hits_target_counts_and_max_combo():
     assert sim.final_counts == (8, 0, 0, 0)
     assert any("reconciled to ScoreInfo" in ln for ln in sim.report_lines())
 
+    # HUD rank must share the reconciled, tick/tail-inclusive accuracy, rather
+    # than the all-300 object count ratio. This proves derived presentation,
+    # not the native timing of the reconciled two ticks and three tails.
+    from osu_std_renderer.render.hud import HudData, rank_from_accuracy
+    data = HudData(sim)
+    assert sim.accuracy_source == data.accuracy_source == 'reconciled-lattice'
+    assert isinstance(sim.accuracy_timeline, tuple)
+    assert data.final_acc() == 3570 / 4080 == .875
+    assert data.grade_at(100000) == 'B'
+    assert all(p.ordinary_misses == 0 for p in sim.accuracy_timeline)
+    for p in sim.accuracy_timeline:
+        assert data.raw_acc_at(p.time_ms) == p.accuracy
+        assert data.grade_at(p.time_ms) == rank_from_accuracy(p.accuracy)
+
+
+def test_lazer_accuracy_updates_at_nested_ticks_before_next_popup():
+    import dataclasses
+    from osu_std_renderer.render.hud import HudData
+    bm = _multi_slider(2)
+    # Raw cursor/input fixture: hit the heads, release before the first tick.
+    # No header statistics or count reconcile establish the missed tick.
+    fr = _frames([(1000,256,192,KEY_K1), (1010,256,192,0),
+                  (4000,256,192,KEY_K1), (4010,256,192,0)])
+    sim = StdRuleset(bm, fr, lazer=True, reconcile=False).run()
+    data = HudData(sim)
+    tick = next(p for p in sim.accuracy_timeline if p.kind == 'tick')
+    assert tick.time_ms < sim.events[1].time_ms
+    assert tick.accuracy == 300/330 and tick.ordinary_misses == 0
+    assert data.grade_at(tick.time_ms-1e-6) == 'SS'
+    assert data.grade_at(tick.time_ms) == 'A'
+    assert data.acc_at(tick.time_ms) == 1.0  # raw rank leads the rolled display
+    assert data.acc_at(tick.time_ms+250) == tick.accuracy
+    assert data.accuracy_source == 'derived-lattice'
+    try:
+        tick.accuracy = 1.0
+    except dataclasses.FrozenInstanceError:
+        pass
+    else:
+        raise AssertionError('accuracy samples must be immutable')
+    expected = (data.grade_at(tick.time_ms), data.acc_at(tick.time_ms+250))
+    for t in (100000, 0, 4000, tick.time_ms-1):
+        data.grade_at(t); data.acc_at(t)
+    assert expected == (data.grade_at(tick.time_ms), data.acc_at(tick.time_ms+250))
+
+
+def test_lazer_final_accuracy_pin_remains_authoritative_on_slider_ending():
+    import dataclasses
+    from osu_std_renderer.render.hud import HudData
+    bm = _multi_slider(1)
+    fr = _perfect_slider_frames(bm)
+    meta = _lazer_stats_meta(1, large_tick_hit=2, large_tick_miss=0,
+                           slider_tail_hit=1, max_large_tick=2,
+                           max_slider_tail=1, max_combo=4)
+    meta = dataclasses.replace(meta, lazer_accuracy=.9768)
+    sim = StdRuleset(bm, fr, meta).run()
+    data = HudData(sim)
+    pin = sim.accuracy_timeline[-1]
+    assert pin.kind == 'canonical-final-pin'
+    assert pin.time_ms == sim.events[-1].time_ms < bm.hit_objects[-1].get_end_time()
+    assert data.final_acc() == sim.events[-1].acc_after == .9768
+    for t in (pin.time_ms, pin.time_ms+250, 10000):
+        assert data.raw_acc_at(t) == .9768 and data.grade_at(t) == 'S'
+    # Disabling reconcile keeps the original derived lattice final pin.
+    raw = StdRuleset(bm, fr, meta, reconcile=False).run()
+    assert raw.accuracy_timeline[-1].kind == 'lattice-final-pin'
+    assert raw.events[-1].acc_after == 1.0
+    assert HudData(raw).grade_at(10000) == 'SS'
+
 
 def test_stable_replay_slider_parts_untouched():
     """A stable replay carries no ScoreInfo: the tick/tail reconcile never runs

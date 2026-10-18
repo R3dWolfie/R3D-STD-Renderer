@@ -1,0 +1,357 @@
+{
+  "copyright": "ppy Pty Ltd and osu!resources contributors",
+  "licence": "CC BY-NC 4.0",
+  "source_commit": "d8d01c29ce0f298159aea3644b947d8b4a1882a2",
+  "assets": [
+    {
+      "file": "mod-icon.png",
+      "upstream_path": "osu.Game.Resources/Textures/Icons/BeatmapDetails/mod-icon.png",
+      "url": "https://github.com/ppy/osu-resources/blob/d8d01c29ce0f298159aea3644b947d8b4a1882a2/osu.Game.Resources/Textures/Icons/BeatmapDetails/mod-icon.png",
+      "sha256": "2aac015394221125bb739f156d0e00a5ffcb088ca6267446a0a6fafe026f959a",
+      "modifications": "None; original PNG bytes."
+    },
+    {
+      "file": "mod-icon-extender.png",
+      "upstream_path": "osu.Game.Resources/Textures/Icons/BeatmapDetails/mod-icon-extender.png",
+      "url": "https://github.com/ppy/osu-resources/blob/d8d01c29ce0f298159aea3644b947d8b4a1882a2/osu.Game.Resources/Textures/Icons/BeatmapDetails/mod-icon-extender.png",
+      "sha256": "b4b2e5f6e23070a2b01665114a3cf96f3990c41b3c0ce8b3d67ce24ae71985e4",
+      "modifications": "None; original PNG bytes."
+    },
+    {
+      "file": "mod-accuracy-challenge.png",
+      "upstream_path": "osu.Game.Resources/Textures/Icons/Mods/mod-accuracy-challenge.png",
+      "url": "https://github.com/ppy/osu-resources/blob/d8d01c29ce0f298159aea3644b947d8b4a1882a2/osu.Game.Resources/Textures/Icons/Mods/mod-accuracy-challenge.png",
+      "sha256": "6983692bad8786bd5acd2769d972093d233c2eb42c1eb1cba6e1843b36642e20",
+      "modifications": "None; original PNG bytes."
+    },
+    {
+      "file": "mod-adaptive-speed.png",
+      "upstream_path": "osu.Game.Resources/Textures/Icons/Mods/mod-adaptive-speed.png",
+      "url": "https://github.com/ppy/osu-resources/blob/d8d01c29ce0f298159aea3644b947d8b4a1882a2/osu.Game.Resources/Textures/Icons/Mods/mod-adaptive-speed.png",
+      "sha256": "e3926e0b80781c2edd57ea665634e883992342c00cf66c6402d3d2629cef866d",
+      "modifications": "None; original PNG bytes."
+    },
+    {
+      "file": "mod-alternate.png",
+      "upstream_path": "osu.Game.Resources/Textures/Icons/Mods/mod-alternate.png",
+      "url": "https://github.com/ppy/osu-resources/blob/d8d01c29ce0f298159aea3644b947d8b4a1882a2/osu.Game.Resources/Textures/Icons/Mods/mod-alternate.png",
+      "sha256": "9e31db058a3a7c6a7312765124990ea0ebe303a93cb03c454acc9ae529b6546c",
+      "modifications": "None; original PNG bytes."
+    },
+    {
+      "file": "mod-approach-different.png",
+      "upstream_path": "osu.Game.Resources/Textures/Icons/Mods/mod-approach-different.png",
+      "url": "https://github.com/ppy/osu-resources/blob/d8d01c29ce0f298159aea3644b947d8b4a1882a2/osu.Game.Resources/Textures/Icons/Mods/mod-approach-different.png",
+      "sha256": "5cd0785bcb5b1c71ef4a0c768c9d1dacd37358cbd712aff0e3372a90a2eb5b52",
+      "modifications": "None; original PNG bytes."
+    },
+    {
+      "file": "mod-autopilot.png",
+      "upstream_path": "osu.Game.Resources/Textures/Icons/Mods/mod-autopilot.png",
+      "url": "https://github.com/ppy/osu-resources/blob/d8d01c29ce0f298159aea3644b947d8b4a1882a2/osu.Game.Resources/Textures/Icons/Mods/mod-autopilot.png",
+      "sha256": "ca9c5bab2b88bd4b46ce1f61c886dd74ea3ce33a17da5cbb453ebd7112eaa817",
+      "modifications": "None; original PNG bytes."
+    },
+    {
+      "file": "mod-autoplay.png",
+      "upstream_path": "osu.Game.Resources/Textures/Icons/Mods/mod-autoplay.png",
+      "url": "https://github.com/ppy/osu-resources/blob/d8d01c29ce0f298159aea3644b947d8b4a1882a2/osu.Game.Resources/Textures/Icons/Mods/mod-autoplay.png",
+      "sha256": "0000d472fac6d5ea9d65f304e06ebb13cfdfbb8b2974573f556bd62c7b7bc8d1",
+      "modifications": "None; original PNG bytes."
+    },
+    {
+      "file": "mod-barrel-roll.png",
+      "upstream_path": "osu.Game.Resources/Textures/Icons/Mods/mod-barrel-roll.png",
+      "url": "https://github.com/ppy/osu-resources/blob/d8d01c29ce0f298159aea3644b947d8b4a1882a2/osu.Game.Resources/Textures/Icons/Mods/mod-barrel-roll.png",
+      "sha256": "d98a4398279566be173a57f028bc79752419a35c09c3c60bf163936a80548db6",
+      "modifications": "None; original PNG bytes."
+    },
+    {
+      "file": "mod-blinds.png",
+      "upstream_path": "osu.Game.Resources/Textures/Icons/Mods/mod-blinds.png",
+      "url": "https://github.com/ppy/osu-resources/blob/d8d01c29ce0f298159aea3644b947d8b4a1882a2/osu.Game.Resources/Textures/Icons/Mods/mod-blinds.png",
+      "sha256": "1da1068f2b3a07fb701d764f9a386772ce1cf32108d261832c25b58ea32668bb",
+      "modifications": "None; original PNG bytes."
+    },
+    {
+      "file": "mod-bloom.png",
+      "upstream_path": "osu.Game.Resources/Textures/Icons/Mods/mod-bloom.png",
+      "url": "https://github.com/ppy/osu-resources/blob/d8d01c29ce0f298159aea3644b947d8b4a1882a2/osu.Game.Resources/Textures/Icons/Mods/mod-bloom.png",
+      "sha256": "a9d518a6369d829983f29fd6a39c01dbc1e5b3827879b495c80ac0d30822981d",
+      "modifications": "None; original PNG bytes."
+    },
+    {
+      "file": "mod-bubbles.png",
+      "upstream_path": "osu.Game.Resources/Textures/Icons/Mods/mod-bubbles.png",
+      "url": "https://github.com/ppy/osu-resources/blob/d8d01c29ce0f298159aea3644b947d8b4a1882a2/osu.Game.Resources/Textures/Icons/Mods/mod-bubbles.png",
+      "sha256": "8ea6de591c9d14910e84550653472a983de0d259497e81a1ee6fdf92fff90368",
+      "modifications": "None; original PNG bytes."
+    },
+    {
+      "file": "mod-cinema.png",
+      "upstream_path": "osu.Game.Resources/Textures/Icons/Mods/mod-cinema.png",
+      "url": "https://github.com/ppy/osu-resources/blob/d8d01c29ce0f298159aea3644b947d8b4a1882a2/osu.Game.Resources/Textures/Icons/Mods/mod-cinema.png",
+      "sha256": "2eea60c228fb2ee980cc5825b0e36de632c8bd521dc65f3ded16b793091f4e29",
+      "modifications": "None; original PNG bytes."
+    },
+    {
+      "file": "mod-classic.png",
+      "upstream_path": "osu.Game.Resources/Textures/Icons/Mods/mod-classic.png",
+      "url": "https://github.com/ppy/osu-resources/blob/d8d01c29ce0f298159aea3644b947d8b4a1882a2/osu.Game.Resources/Textures/Icons/Mods/mod-classic.png",
+      "sha256": "38f5519910d7225d0c93e809957819ca82223b5fc1c45721685bcc7f85f4f765",
+      "modifications": "None; original PNG bytes."
+    },
+    {
+      "file": "mod-daycore.png",
+      "upstream_path": "osu.Game.Resources/Textures/Icons/Mods/mod-daycore.png",
+      "url": "https://github.com/ppy/osu-resources/blob/d8d01c29ce0f298159aea3644b947d8b4a1882a2/osu.Game.Resources/Textures/Icons/Mods/mod-daycore.png",
+      "sha256": "2873319e48065fb435da6306b435c5bf78b6b8b849eaf7f8faef1709ae114a7b",
+      "modifications": "None; original PNG bytes."
+    },
+    {
+      "file": "mod-deflate.png",
+      "upstream_path": "osu.Game.Resources/Textures/Icons/Mods/mod-deflate.png",
+      "url": "https://github.com/ppy/osu-resources/blob/d8d01c29ce0f298159aea3644b947d8b4a1882a2/osu.Game.Resources/Textures/Icons/Mods/mod-deflate.png",
+      "sha256": "7c6be61e75017b81e2354b314c7ec98e7e87289d5dfeac19c128b8db9c78507e",
+      "modifications": "None; original PNG bytes."
+    },
+    {
+      "file": "mod-depth.png",
+      "upstream_path": "osu.Game.Resources/Textures/Icons/Mods/mod-depth.png",
+      "url": "https://github.com/ppy/osu-resources/blob/d8d01c29ce0f298159aea3644b947d8b4a1882a2/osu.Game.Resources/Textures/Icons/Mods/mod-depth.png",
+      "sha256": "4005c35d6fb37fec6bdf946218ae7e73d82403aa4495d19897eb5afd8076fd92",
+      "modifications": "None; original PNG bytes."
+    },
+    {
+      "file": "mod-difficulty-adjust.png",
+      "upstream_path": "osu.Game.Resources/Textures/Icons/Mods/mod-difficulty-adjust.png",
+      "url": "https://github.com/ppy/osu-resources/blob/d8d01c29ce0f298159aea3644b947d8b4a1882a2/osu.Game.Resources/Textures/Icons/Mods/mod-difficulty-adjust.png",
+      "sha256": "6361020e24eb8c002e3398171b605cdde9102f2b7c7386f8b7312f622ca45084",
+      "modifications": "None; original PNG bytes."
+    },
+    {
+      "file": "mod-double-time.png",
+      "upstream_path": "osu.Game.Resources/Textures/Icons/Mods/mod-double-time.png",
+      "url": "https://github.com/ppy/osu-resources/blob/d8d01c29ce0f298159aea3644b947d8b4a1882a2/osu.Game.Resources/Textures/Icons/Mods/mod-double-time.png",
+      "sha256": "a07665086283cfd812b89e06a385e68c615d447d17a6513029b8b53b9e32055b",
+      "modifications": "None; original PNG bytes."
+    },
+    {
+      "file": "mod-easy.png",
+      "upstream_path": "osu.Game.Resources/Textures/Icons/Mods/mod-easy.png",
+      "url": "https://github.com/ppy/osu-resources/blob/d8d01c29ce0f298159aea3644b947d8b4a1882a2/osu.Game.Resources/Textures/Icons/Mods/mod-easy.png",
+      "sha256": "0331233b366590b8f6934c578ab44e356d891225ee302fff004df13c4f3f9d78",
+      "modifications": "None; original PNG bytes."
+    },
+    {
+      "file": "mod-flashlight.png",
+      "upstream_path": "osu.Game.Resources/Textures/Icons/Mods/mod-flashlight.png",
+      "url": "https://github.com/ppy/osu-resources/blob/d8d01c29ce0f298159aea3644b947d8b4a1882a2/osu.Game.Resources/Textures/Icons/Mods/mod-flashlight.png",
+      "sha256": "2c87c5d8cc6bb3cd73148957f5000ddd0a634f9d31f594517e96d54eeb56e8a4",
+      "modifications": "None; original PNG bytes."
+    },
+    {
+      "file": "mod-freeze-frame.png",
+      "upstream_path": "osu.Game.Resources/Textures/Icons/Mods/mod-freeze-frame.png",
+      "url": "https://github.com/ppy/osu-resources/blob/d8d01c29ce0f298159aea3644b947d8b4a1882a2/osu.Game.Resources/Textures/Icons/Mods/mod-freeze-frame.png",
+      "sha256": "b72e8d1bc6d24b0fb03382dc3cb527c4d62f94a3d2d90bc83096fb22d0a8e0a9",
+      "modifications": "None; original PNG bytes."
+    },
+    {
+      "file": "mod-grow.png",
+      "upstream_path": "osu.Game.Resources/Textures/Icons/Mods/mod-grow.png",
+      "url": "https://github.com/ppy/osu-resources/blob/d8d01c29ce0f298159aea3644b947d8b4a1882a2/osu.Game.Resources/Textures/Icons/Mods/mod-grow.png",
+      "sha256": "ab3fde87411d12226aa24fcdaa812c21ca74f7b251d4b9dc554a989f2eb73f9a",
+      "modifications": "None; original PNG bytes."
+    },
+    {
+      "file": "mod-half-time.png",
+      "upstream_path": "osu.Game.Resources/Textures/Icons/Mods/mod-half-time.png",
+      "url": "https://github.com/ppy/osu-resources/blob/d8d01c29ce0f298159aea3644b947d8b4a1882a2/osu.Game.Resources/Textures/Icons/Mods/mod-half-time.png",
+      "sha256": "613b5b9bb893b9e5c4b2b628bd0946ce48a0756b0e6d99985e70eb7866fd1c62",
+      "modifications": "None; original PNG bytes."
+    },
+    {
+      "file": "mod-hard-rock.png",
+      "upstream_path": "osu.Game.Resources/Textures/Icons/Mods/mod-hard-rock.png",
+      "url": "https://github.com/ppy/osu-resources/blob/d8d01c29ce0f298159aea3644b947d8b4a1882a2/osu.Game.Resources/Textures/Icons/Mods/mod-hard-rock.png",
+      "sha256": "b35a31854e972a0aa9d06adcf4a1a05de309ef4926a2cf59b9d4397d634290c1",
+      "modifications": "None; original PNG bytes."
+    },
+    {
+      "file": "mod-hidden.png",
+      "upstream_path": "osu.Game.Resources/Textures/Icons/Mods/mod-hidden.png",
+      "url": "https://github.com/ppy/osu-resources/blob/d8d01c29ce0f298159aea3644b947d8b4a1882a2/osu.Game.Resources/Textures/Icons/Mods/mod-hidden.png",
+      "sha256": "f735d7e7d45a9bc3fe7206855b9ce69c992d2edb0d30331605d2a68dfd94680a",
+      "modifications": "None; original PNG bytes."
+    },
+    {
+      "file": "mod-magnetised.png",
+      "upstream_path": "osu.Game.Resources/Textures/Icons/Mods/mod-magnetised.png",
+      "url": "https://github.com/ppy/osu-resources/blob/d8d01c29ce0f298159aea3644b947d8b4a1882a2/osu.Game.Resources/Textures/Icons/Mods/mod-magnetised.png",
+      "sha256": "a4616a7af1cd0cb3775a2b8cf7678bc27d0ef8015e56895de309d496c078b1e5",
+      "modifications": "None; original PNG bytes."
+    },
+    {
+      "file": "mod-mirror.png",
+      "upstream_path": "osu.Game.Resources/Textures/Icons/Mods/mod-mirror.png",
+      "url": "https://github.com/ppy/osu-resources/blob/d8d01c29ce0f298159aea3644b947d8b4a1882a2/osu.Game.Resources/Textures/Icons/Mods/mod-mirror.png",
+      "sha256": "6ffc2121ee8073c287bdd4852b69c1e1fcd0ca22f61f325e64acdf890d27f971",
+      "modifications": "None; original PNG bytes."
+    },
+    {
+      "file": "mod-muted.png",
+      "upstream_path": "osu.Game.Resources/Textures/Icons/Mods/mod-muted.png",
+      "url": "https://github.com/ppy/osu-resources/blob/d8d01c29ce0f298159aea3644b947d8b4a1882a2/osu.Game.Resources/Textures/Icons/Mods/mod-muted.png",
+      "sha256": "7d9382f48c73b79878ca68f01921c62dc1fafb8ff6e5467af062dd0f0cde9622",
+      "modifications": "None; original PNG bytes."
+    },
+    {
+      "file": "mod-nightcore.png",
+      "upstream_path": "osu.Game.Resources/Textures/Icons/Mods/mod-nightcore.png",
+      "url": "https://github.com/ppy/osu-resources/blob/d8d01c29ce0f298159aea3644b947d8b4a1882a2/osu.Game.Resources/Textures/Icons/Mods/mod-nightcore.png",
+      "sha256": "dd8d903569ed959a835912b7ac10961bff50db2d1f97d2f48bff394865f63981",
+      "modifications": "None; original PNG bytes."
+    },
+    {
+      "file": "mod-no-fail.png",
+      "upstream_path": "osu.Game.Resources/Textures/Icons/Mods/mod-no-fail.png",
+      "url": "https://github.com/ppy/osu-resources/blob/d8d01c29ce0f298159aea3644b947d8b4a1882a2/osu.Game.Resources/Textures/Icons/Mods/mod-no-fail.png",
+      "sha256": "ce5096f9a14891c35d7351dc753d001de18faaebe7a1663bcc5102fc6d8b9b48",
+      "modifications": "None; original PNG bytes."
+    },
+    {
+      "file": "mod-no-scope.png",
+      "upstream_path": "osu.Game.Resources/Textures/Icons/Mods/mod-no-scope.png",
+      "url": "https://github.com/ppy/osu-resources/blob/d8d01c29ce0f298159aea3644b947d8b4a1882a2/osu.Game.Resources/Textures/Icons/Mods/mod-no-scope.png",
+      "sha256": "c7b25ad14dcdf571c6a113cfc213857d0ebee477750f21e1d4a2993bf285f330",
+      "modifications": "None; original PNG bytes."
+    },
+    {
+      "file": "mod-perfect.png",
+      "upstream_path": "osu.Game.Resources/Textures/Icons/Mods/mod-perfect.png",
+      "url": "https://github.com/ppy/osu-resources/blob/d8d01c29ce0f298159aea3644b947d8b4a1882a2/osu.Game.Resources/Textures/Icons/Mods/mod-perfect.png",
+      "sha256": "e5576fbe18a59865f08dbc7f2f7afe9bdf795bc59d63eb516502d1f0f2f9e4f6",
+      "modifications": "None; original PNG bytes."
+    },
+    {
+      "file": "mod-random.png",
+      "upstream_path": "osu.Game.Resources/Textures/Icons/Mods/mod-random.png",
+      "url": "https://github.com/ppy/osu-resources/blob/d8d01c29ce0f298159aea3644b947d8b4a1882a2/osu.Game.Resources/Textures/Icons/Mods/mod-random.png",
+      "sha256": "8f77988d4d4e55d8a58642ac6596b6931c88635df4949e5b682fcae8a824978b",
+      "modifications": "None; original PNG bytes."
+    },
+    {
+      "file": "mod-relax.png",
+      "upstream_path": "osu.Game.Resources/Textures/Icons/Mods/mod-relax.png",
+      "url": "https://github.com/ppy/osu-resources/blob/d8d01c29ce0f298159aea3644b947d8b4a1882a2/osu.Game.Resources/Textures/Icons/Mods/mod-relax.png",
+      "sha256": "75f758215df48f9afb8c4226f2e3443461a4bd43f23460812904569b6fb088af",
+      "modifications": "None; original PNG bytes."
+    },
+    {
+      "file": "mod-repel.png",
+      "upstream_path": "osu.Game.Resources/Textures/Icons/Mods/mod-repel.png",
+      "url": "https://github.com/ppy/osu-resources/blob/d8d01c29ce0f298159aea3644b947d8b4a1882a2/osu.Game.Resources/Textures/Icons/Mods/mod-repel.png",
+      "sha256": "4ae3521132f4a109f7d8c1ed60af4b8f1980dd85f3cd0f727f4fa76e823eba8b",
+      "modifications": "None; original PNG bytes."
+    },
+    {
+      "file": "mod-score-v2.png",
+      "upstream_path": "osu.Game.Resources/Textures/Icons/Mods/mod-score-v2.png",
+      "url": "https://github.com/ppy/osu-resources/blob/d8d01c29ce0f298159aea3644b947d8b4a1882a2/osu.Game.Resources/Textures/Icons/Mods/mod-score-v2.png",
+      "sha256": "311095d98f2f97ad5f7eeb7fd17bf9a206eb6b289ac98c1417892ca8d0cfdd9c",
+      "modifications": "None; original PNG bytes."
+    },
+    {
+      "file": "mod-single-tap.png",
+      "upstream_path": "osu.Game.Resources/Textures/Icons/Mods/mod-single-tap.png",
+      "url": "https://github.com/ppy/osu-resources/blob/d8d01c29ce0f298159aea3644b947d8b4a1882a2/osu.Game.Resources/Textures/Icons/Mods/mod-single-tap.png",
+      "sha256": "5b522699d6b0f55fe1c3bf958908f3e78bc06d9847e9eb7f10453feaf04a5fde",
+      "modifications": "None; original PNG bytes."
+    },
+    {
+      "file": "mod-spin-in.png",
+      "upstream_path": "osu.Game.Resources/Textures/Icons/Mods/mod-spin-in.png",
+      "url": "https://github.com/ppy/osu-resources/blob/d8d01c29ce0f298159aea3644b947d8b4a1882a2/osu.Game.Resources/Textures/Icons/Mods/mod-spin-in.png",
+      "sha256": "985c2ed151f0097cbbb49939dd7d8e769f4e0e878504c2453b0e6f70705de347",
+      "modifications": "None; original PNG bytes."
+    },
+    {
+      "file": "mod-spun-out.png",
+      "upstream_path": "osu.Game.Resources/Textures/Icons/Mods/mod-spun-out.png",
+      "url": "https://github.com/ppy/osu-resources/blob/d8d01c29ce0f298159aea3644b947d8b4a1882a2/osu.Game.Resources/Textures/Icons/Mods/mod-spun-out.png",
+      "sha256": "be74a81063bef30417eb1e5734eed8a5e42d4ea600acbe9c2bd0f4263f603054",
+      "modifications": "None; original PNG bytes."
+    },
+    {
+      "file": "mod-strict-tracking.png",
+      "upstream_path": "osu.Game.Resources/Textures/Icons/Mods/mod-strict-tracking.png",
+      "url": "https://github.com/ppy/osu-resources/blob/d8d01c29ce0f298159aea3644b947d8b4a1882a2/osu.Game.Resources/Textures/Icons/Mods/mod-strict-tracking.png",
+      "sha256": "827ce42d4e1b56acf0ed416541f112500694c54b173cbb1d6027f4c0c18b12b3",
+      "modifications": "None; original PNG bytes."
+    },
+    {
+      "file": "mod-sudden-death.png",
+      "upstream_path": "osu.Game.Resources/Textures/Icons/Mods/mod-sudden-death.png",
+      "url": "https://github.com/ppy/osu-resources/blob/d8d01c29ce0f298159aea3644b947d8b4a1882a2/osu.Game.Resources/Textures/Icons/Mods/mod-sudden-death.png",
+      "sha256": "3f8254403a196a04f328bb6c9717773fe43ef863fb4f17c4e5c08ff45625c687",
+      "modifications": "None; original PNG bytes."
+    },
+    {
+      "file": "mod-synesthesia.png",
+      "upstream_path": "osu.Game.Resources/Textures/Icons/Mods/mod-synesthesia.png",
+      "url": "https://github.com/ppy/osu-resources/blob/d8d01c29ce0f298159aea3644b947d8b4a1882a2/osu.Game.Resources/Textures/Icons/Mods/mod-synesthesia.png",
+      "sha256": "87c01ca7835c245a36a3238b258ff1a1f26889cf2b979891276cbabe4a21b910",
+      "modifications": "None; original PNG bytes."
+    },
+    {
+      "file": "mod-target-practice.png",
+      "upstream_path": "osu.Game.Resources/Textures/Icons/Mods/mod-target-practice.png",
+      "url": "https://github.com/ppy/osu-resources/blob/d8d01c29ce0f298159aea3644b947d8b4a1882a2/osu.Game.Resources/Textures/Icons/Mods/mod-target-practice.png",
+      "sha256": "d2ed4d35965b2b94f6c18f0f28e694797c63db07c0b95a9e740cf1e837ac24a0",
+      "modifications": "None; original PNG bytes."
+    },
+    {
+      "file": "mod-touch-device.png",
+      "upstream_path": "osu.Game.Resources/Textures/Icons/Mods/mod-touch-device.png",
+      "url": "https://github.com/ppy/osu-resources/blob/d8d01c29ce0f298159aea3644b947d8b4a1882a2/osu.Game.Resources/Textures/Icons/Mods/mod-touch-device.png",
+      "sha256": "6bc6022da8b3e1148eea653c87b54eaf3b334f0b2d4fb73e74e8c117ffd64dc0",
+      "modifications": "None; original PNG bytes."
+    },
+    {
+      "file": "mod-traceable.png",
+      "upstream_path": "osu.Game.Resources/Textures/Icons/Mods/mod-traceable.png",
+      "url": "https://github.com/ppy/osu-resources/blob/d8d01c29ce0f298159aea3644b947d8b4a1882a2/osu.Game.Resources/Textures/Icons/Mods/mod-traceable.png",
+      "sha256": "05e117cc61a8d0a092f56c1ede9a85ca240259aecdf7be1ff2fbf55b7190e3fb",
+      "modifications": "None; original PNG bytes."
+    },
+    {
+      "file": "mod-transform.png",
+      "upstream_path": "osu.Game.Resources/Textures/Icons/Mods/mod-transform.png",
+      "url": "https://github.com/ppy/osu-resources/blob/d8d01c29ce0f298159aea3644b947d8b4a1882a2/osu.Game.Resources/Textures/Icons/Mods/mod-transform.png",
+      "sha256": "1e9dfcbf0b236eef607750e8a3b26c19704052afdbc98bb55c28e61068bc6d0c",
+      "modifications": "None; original PNG bytes."
+    },
+    {
+      "file": "mod-wiggle.png",
+      "upstream_path": "osu.Game.Resources/Textures/Icons/Mods/mod-wiggle.png",
+      "url": "https://github.com/ppy/osu-resources/blob/d8d01c29ce0f298159aea3644b947d8b4a1882a2/osu.Game.Resources/Textures/Icons/Mods/mod-wiggle.png",
+      "sha256": "67f0ecad21c4c78967d89a7094ccc4dae6a4b818afce9f31422505de06206ec7",
+      "modifications": "None; original PNG bytes."
+    },
+    {
+      "file": "mod-wind-down.png",
+      "upstream_path": "osu.Game.Resources/Textures/Icons/Mods/mod-wind-down.png",
+      "url": "https://github.com/ppy/osu-resources/blob/d8d01c29ce0f298159aea3644b947d8b4a1882a2/osu.Game.Resources/Textures/Icons/Mods/mod-wind-down.png",
+      "sha256": "812fb8d8f482b0cd20d68fef6844c0ed163f7c8043614ed3705a1caa1526ea7d",
+      "modifications": "None; original PNG bytes."
+    },
+    {
+      "file": "mod-wind-up.png",
+      "upstream_path": "osu.Game.Resources/Textures/Icons/Mods/mod-wind-up.png",
+      "url": "https://github.com/ppy/osu-resources/blob/d8d01c29ce0f298159aea3644b947d8b4a1882a2/osu.Game.Resources/Textures/Icons/Mods/mod-wind-up.png",
+      "sha256": "76984131f65622bf55e80ca4646b56f68e036f5cf9955f3143bc7fee55c7dee2",
+      "modifications": "None; original PNG bytes."
+    }
+  ]
+}

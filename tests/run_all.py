@@ -19,6 +19,10 @@ MODULES = [
     "tests.test_leadin_offset",
     "tests.test_skin_ini",
     "tests.test_ruleset",
+    "tests.test_slider_visual_events",
+    "tests.test_slider_chronological",
+    "tests.test_slider_visual_animation",
+    "tests.test_slider_visual_render",
     "tests.test_health",
     "tests.test_slider_body",
     "tests.test_playfield_pipeline",
@@ -35,6 +39,7 @@ MODULES = [
     "tests.test_leaderboard",
     # settings-surface phase (2026-07)
     "tests.test_settings",
+    "tests.test_encode",
     "tests.test_effects",
     "tests.test_nightcore",
     "tests.test_pp",

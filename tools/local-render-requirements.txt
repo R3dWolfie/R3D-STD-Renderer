@@ -1,0 +1,7 @@
+# Renderer versions used to verify this dashboard on Python 3.12.
+glcontext==3.1.0
+moderngl==5.13.0
+numpy==2.5.4
+osrparse==7.0.1
+Pillow==12.3.0
+rosu-pp-py==4.0.2

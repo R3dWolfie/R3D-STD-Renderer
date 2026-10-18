@@ -15,10 +15,11 @@ End-to-end std renders: 3-pass `.osu` parse and combo numbering, difficulty/timi
 On top of gameplay: distance-field slider bodies (with snaking and `SliderMerge` union), spinners, hitsounds mixed offline (no BASS), fail/death handling, and the full R3D website settings surface — background dim/blur/parallax/triangles/video/flash-to-beat, bloom, seizure card, lead-in, nightcore beat overlay, cursor trail/rainbow/ripples, and HUD extras (live rosu-pp counter, hit counter, aim-error scatter, strain graph, warning arrows). Results screens: a ported **lazer** ranking screen (default) or the in-house **r3d** card.
 
 **Fidelity notes:**
-- HUD/skin: per-element hybrid — the skin's **legacy** component where the skin ships it, procedural **Argon** otherwise (`--legacy-defaults` forces the all-legacy look). Argon-style default textures and combo digits are **procedurally baked in-repo**.
-- No osu! game assets are bundled (osu!'s skins/audio/art are CC BY-NC and excluded); only original or procedural art ships. The one bundled font is Nunito (SIL OFL, with `OFL.txt`), used as a free stand-in for lazer's non-commercial Torus.
-- Star rating and pp come from `rosu-pp-py`; `--pp` / `--sr` pin the displayed values to osu!'s official figures while the live pp curve keeps its rosu shape.
-- Scores are displayed as lazer-standardised ScoreV3 (raw ScoreV1 stable headers are re-derived from the sim). Accuracy uses lazer's tick/tail-inclusive value for lazer replays, the header value for stable.
+- **HUD/skin:** Uses consistent **Legacy** or **Argon** HUD layouts rather than mixing component geometries. An explicitly selected skin (including partial or empty skins) or `--legacy-defaults` selects the Legacy layout; otherwise, Argon is used. `--default-skin` alone provides fallback assets without switching layouts. Missing Legacy textures use the appropriate fallback artwork while preserving Legacy component positioning. Argon-style default textures and combo digits are **procedurally baked in-repo**.
+- **Assets and licensing:** Selected original **osu!lazer mod-icon PNGs**, including their backing and extender artwork, are bundled under **CC BY-NC 4.0**. Attribution, source references, asset hashes, and licence notices are included in `osu_std_renderer/assets/hud/mod-icons/`. The horizontal hit-error meter's hare/tortoise graphics are reused from R3D Mania, with provenance documented in `osu_std_renderer/assets/hud/hit-error-meter/`. Complete osu! skins and audio assets are not bundled, and **no osu! fonts are redistributed**. Nunito (SIL OFL, with `OFL.txt`) remains the bundled font, used as a free alternative to lazer's Torus.
+- **Hit error meter:** Both Legacy and Argon use the modern horizontal R3D Mania hit-error meter, adapted for osu!standard hit windows. Markers are derived from supported replay input and simulation evidence rather than reconstructed judgement totals. Unstable Rate (UR) remains independently configurable, and the previous meter implementations are retained for comparison and rollback.
+- **Star rating and PP:** Star rating and PP come from `rosu-pp-py`; `--pp` / `--sr` pin the displayed values to osu!'s official figures while the live PP curve retains its rosu-derived progression.
+- **Score and accuracy:** Scores are displayed using **lazer-standardised ScoreV3** (raw ScoreV1 stable replay headers are re-derived from the simulation). Accuracy uses lazer's tick/tail-inclusive calculation for lazer replays and the replay header value for stable replays.
 
 ## Usage
 
@@ -72,6 +73,29 @@ python -m osu_std_renderer.merge …                                    # showdo
 
 Run the tests: `python -m tests.run_all`.
 
+### Local render dashboard
+
+Use the mobile-friendly dashboard adapted from the mania renderer:
+
+```bash
+./tools/start-local-render-web.sh
+```
+
+The launcher uses `uv` to prepare an ignored `.dashboard-venv/` with Python 3.12
+and the renderer dependencies. It preserves the existing `.venv/`.
+After setup, `python tools/local_render_web.py` also switches to this environment
+when the current Python is missing renderer dependencies.
+
+Open `http://127.0.0.1:7377`, or the printed LAN URL from another device.
+The dashboard runs this checkout's `osu_std_renderer` and scans this repo's
+`test-render/` for replays, beatmaps, and extracted skins. It matches the
+replay to an exact `.osu`, supports manual map selection, and includes
+progress, cancellation, video playback, and render history. Generated videos
+go to the ignored `local-web-renders/` folder.
+
+See [dashboard usage and options](docs/LOCAL_RENDER_WEB.md). Run its HTTP,
+subprocess, and browser-state tests with `python -m pytest -q tests/test_local_render_web.py`.
+
 ## Requirements
 
 - **Python 3.12** (stack is version-locked; verify if targeting another version)
@@ -82,7 +106,9 @@ Run the tests: `python -m tests.run_all`.
 - **rosu-pp-py** — star rating / pp (renders fail-soft, hiding the pp counter, if absent)
 - **ffmpeg** on `PATH` — raw-RGB frames are piped to a single ffmpeg process for encode + audio mux; encoder auto-detects `h264_nvenc → h264_vaapi → libx264`
 
-There is **no `requirements.txt` / `pyproject.toml`** in the repo (verify — deps are installed from the locked stack above; the old README used `pip install numpy pillow osrparse moderngl`). Audio is mixed offline via numpy + ffmpeg — **no BASS**.
+The local dashboard's verified dependency versions are in
+`tools/local-render-requirements.txt`. There is no package `pyproject.toml`.
+Audio is mixed offline via numpy + ffmpeg — **no BASS**.
 
 ## Layout
 

@@ -245,6 +245,12 @@ class MetalSpriteRenderer:
         """A draw inside the scene pass, at this point in the draw order."""
         self._scene.append(("call", op))
 
+    def draw_hit_error_meter(self, state, opacity=1.0) -> None:
+        from ..hit_error_painter import HitErrorMeterPainter
+        if not hasattr(self, '_hit_error_painter'):
+            self._hit_error_painter = HitErrorMeterPainter(self)
+        self._hit_error_painter.draw(state, opacity)
+
     def draw(self, sprites: "list[Sprite]") -> None:
         with perf.T("gl_sprites_draw"):
             perf.count("sprites", len(sprites))

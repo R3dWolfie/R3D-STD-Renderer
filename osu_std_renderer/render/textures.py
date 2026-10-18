@@ -1,5 +1,6 @@
 """Procedural "Argon-ish" default textures — the taiko `argon/` playbook
-(PIL/numpy-baked, NO ppy asset files) applied to std.
+(PIL/numpy-baked) applied to std. Original ModIcon PNGs are the exception;
+their provenance and licences are in assets/hud/mod-icons/.
 
 Everything the Phase-1 scene draws is baked here at init:
 
@@ -49,7 +50,7 @@ import math
 import os
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageChops, ImageDraw, ImageFont
 
 DISC_SIZE = 256
 RING_SIZE = 256
@@ -387,6 +388,66 @@ def bake_pie(fraction: float, size: int = PIE_SIZE) -> np.ndarray:
     alpha = disc * (phi <= max(fraction, 1e-9))
     rgba = np.full((size, size, 4), 255, dtype=np.uint8)
     rgba[..., 3] = np.round(alpha * 255.0).astype(np.uint8)
+    return rgba
+
+
+def stable_sector_vertices(progress: float) -> list[tuple[float, float]]:
+    """Stable CircularProgress's unit-radius, 40-division triangle fan.
+
+    Negative sweeps start at the fractional endpoint and finish at noon;
+    positive sweeps start at noon. Retain the exact endpoint, including
+    the source's possible second intro revolution (Progress >= -2).
+    """
+    progress = min(1.0, max(-2.0, progress))
+    if progress == 0:
+        return []
+    start = -math.pi / 2
+    end = start + progress * math.tau
+    lo, hi = sorted((start, end))
+    step = math.tau / 40
+    angles = [lo + i * step for i in range(math.ceil((hi-lo)/step))]
+    angles.append(hi)
+    return [(0.0, 0.0)] + [(math.cos(a), math.sin(a)) for a in angles]
+
+
+def bake_stable_sector(progress: float, alpha: float = 0.6,
+                       size: int = 128) -> np.ndarray:
+    """Raster stand-in for the native fan, without progress quantization.
+
+    Supersampling approximates native edge AA. Separate fan revolutions
+    composite independently, retaining stable's overlapping intro fill.
+    Opacity is baked here so a second revolution blends correctly.
+    """
+    vertices = stable_sector_vertices(progress)
+    high = size * 4
+    mask = Image.new('L', (high, high))
+    arc = vertices[1:]
+    for start in range(0, max(len(arc)-1, 0), 40):
+        points = [(0.0, 0.0)] + arc[start:start+41]
+        layer = Image.new('L', (high, high))
+        ImageDraw.Draw(layer).polygon(
+            [((x+1)*high/2, (y+1)*high/2) for x, y in points], fill=round(alpha*255))
+        mask = ImageChops.screen(mask, layer)
+    mask = mask.resize((size, size), Image.Resampling.LANCZOS)
+    rgba = np.full((size, size, 4), 255, dtype=np.uint8)
+    rgba[..., 3] = np.asarray(mask)
+    return rgba
+
+
+def bake_stable_circularmetre(size: int = 336) -> np.ndarray:
+    """Independent procedural equivalent of stock's 42-unit overlay.
+
+    The inspected stock PNG is 42x42 (84x84 @2x), with a ring centred at
+    radius 16 and a small centre dot. Its glow/AA are approximated here;
+    no upstream artwork is bundled. Overlay and sector sizes are separate.
+    """
+    yy, xx = np.mgrid[0:size, 0:size].astype(np.float64)
+    radius = np.hypot((xx+.5)*42/size-21, (yy+.5)*42/size-21)
+    ring = np.exp(-0.5*((radius-16)/0.45)**2)
+    glow = 0.20*np.exp(-0.5*((radius-16)/1.5)**2)
+    dot = np.clip((1.75-radius)*size/42 + .5, 0, 1)
+    rgba = np.full((size, size, 4), 255, dtype=np.uint8)
+    rgba[..., 3] = np.round(np.maximum(dot, np.maximum(ring, glow))*255).astype(np.uint8)
     return rgba
 
 
@@ -1099,17 +1160,21 @@ def bake_argon_ball_ring(size: int = ARGON_BALL_SIZE) -> np.ndarray:
     return bake_ring(size, ARGON_BALL_BORDER_FRAC)
 
 
-def bake_argon_follow(size: int = 256, thickness_frac: float = 0.04,
-                      fill: float = 0.30) -> np.ndarray:
+def bake_argon_follow(size: int = 256, thickness_frac: float = 4 / 64,
+                      fill: float = 0.30, gradient: bool = True) -> np.ndarray:
     """ArgonFollowCircle: additive accent ring (border) + faint accent fill
-    (Alpha 0.3). Grayscale (ring=1, interior=fill); tinted accent + drawn
-    additive by the scene."""
+    (Alpha 0.3). BorderThickness 4 in the 128px follow container. Accent
+    gradients vertically to accent.Darken(0.5), independent of ball sizing.
+    Default uses the same bake with border 5, fill .2 and no gradient."""
     d = _dist_grid(size)
     R = size / 2.0 - 2.0
     outer = np.clip((R - d) / _AA_PX, 0.0, 1.0)
     inner_edge = R * (1.0 - thickness_frac)
     ring = outer * np.clip((d - inner_edge) / _AA_PX, 0.0, 1.0)
     val = np.maximum(ring, fill * outer)
+    if gradient:
+        yn = np.arange(size, dtype=float)[:, None] / max(1, size - 1)
+        val *= 1 - yn / 3
     return _grey_rgba(val, outer)
 
 
@@ -1217,6 +1282,8 @@ class TextureBank:
     """
 
     def __init__(self, renderer) -> None:
+        from .mod_icons import LazerModIcons
+        self.mod_icons = LazerModIcons(renderer)
         renderer.upload_texture("disc", bake_disc())
         renderer.upload_texture("ring", bake_ring())
         renderer.upload_texture("approach",
@@ -1317,6 +1384,8 @@ class TextureBank:
         renderer.upload_texture("argon_ball", bake_argon_ball())
         renderer.upload_texture("argon_ball_ring", bake_argon_ball_ring())
         renderer.upload_texture("argon_follow", bake_argon_follow())
+        renderer.upload_texture("default_follow", bake_argon_follow(
+            thickness_frac=5 / 64, fill=0.2, gradient=False))
         renderer.upload_texture("argon_followpoint", bake_argon_followpoint())
         renderer.upload_texture("argon_bubble", bake_argon_bubble())
         renderer.upload_texture("argon_tick", bake_argon_tick())

@@ -10,7 +10,7 @@ Reference quirks ported:
   * `HitCircleOverlayAboveNumber` accepted under both spellings
     (…Number / …Numer).
   * ParseColor ignores alpha.
-  * Combo bursts / slider style / MenuGlow / SpinnerBackground are
+  * Combo bursts / slider style / MenuGlow are
     deliberately NOT parsed (the reference skips them too).
 """
 from __future__ import annotations
@@ -38,6 +38,7 @@ class SkinInfo:
     animation_framerate: float = -1.0
     spinner_fade_playfield: bool = True
     spinner_no_blink: bool = False
+    spinner_background: tuple[int, int, int] = (100, 100, 100)
     spinner_frequency_modulate: bool = True
     layered_hit_sounds: bool = True
     cursor_centre: bool = True
@@ -141,6 +142,8 @@ def parse_skin_ini(text: str) -> SkinInfo:
             info.spinner_fade_playfield = _bool(value, True)
         elif key == "spinnernoblink":
             info.spinner_no_blink = _bool(value, False)
+        elif key == "spinnerbackground":
+            info.spinner_background = parse_color(value) or info.spinner_background
         elif key == "spinnerfrequencymodulate":
             info.spinner_frequency_modulate = _bool(value, True)
         elif key == "layeredhitsounds":

@@ -271,6 +271,30 @@ def test_hud_max_combo_upto_is_peak_not_final():
     assert d.max_combo_upto(150.0) == 1
 
 
+def test_nested_rank_and_accuracy_queries_remain_frozen_at_death():
+    from osu_std_renderer.render.hud import HudData
+    from osu_std_renderer.ruleset.ruleset import AccuracyPoint
+    sim = _fake_sim_for_hud()
+    sim.lazer = True
+    sim.accuracy_source = 'derived-lattice'
+    sim.accuracy_timeline = tuple(
+        AccuracyPoint(e.time_ms, e.acc_after, int(e.time_ms >= 400)
+                      + int(e.time_ms >= 700), 'object') for e in sim.events[:-1]) + (
+        AccuracyPoint(640, .9768, 1, 'tick'),
+        AccuracyPoint(700, .7, 2, 'object'))
+    data = HudData(sim)
+    ft = 650.0
+    frozen = (data.grade_at(ft), data.raw_acc_at(ft), data.counts_at(ft),
+              data.score_upto(ft), data.max_combo_upto(ft))
+    assert frozen == ('A', .9768, (3,1,1,1), 4000, 3)
+    # The caller freezes map time at death. Seeking beyond it and backwards
+    # cannot contaminate that snapshot with a post-death ordinary Miss.
+    assert data.grade_at(1000) == 'C'
+    data.grade_at(0); data.acc_at(1000)
+    assert frozen == (data.grade_at(ft), data.raw_acc_at(ft), data.counts_at(ft),
+                      data.score_upto(ft), data.max_combo_upto(ft))
+
+
 # --- fail sound synth ----------------------------------------------------------------
 
 def test_synth_failsound_shape_and_descends():

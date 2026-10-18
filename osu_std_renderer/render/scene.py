@@ -42,8 +42,8 @@ each core element the skin provides replaces its procedural stand-in —
 hitcircle (combo-tinted) + hitcircleoverlay (untinted, above the circle,
 under the number unless HitCircleOverlayAboveNumber), approachcircle
 (tinted), HitCirclePrefix combo digits (HitCircleOverlap layout), sliderb
-(tint per AllowSliderBallTint/SliderBall), sliderfollowcircle (2.4× while
-tracking), skin.ini SliderBorder/SliderTrackOverride body colours, skin
+(tint per AllowSliderBallTint/SliderBall), sliderfollowcircle (source-model
+legacy animations and native sizing), skin.ini SliderBorder/SliderTrackOverride body colours, skin
 cursor/trail/middle (behind --skin-cursor, CursorCentre honored), hit0/
 50/100/300 judgment sprites (a fully-transparent skin texture = draw
 NOTHING — the classic empty hit300). Elements the skin lacks fall back
@@ -62,8 +62,8 @@ schedule/lifecycle math — see its docstring for the semantics):
   * slider heads/tails use sliderstartcircle/sliderendcircle(+overlays)
     when the skin ships them (§3.3 GetMostSpecific vs hitcircle).
 
-CURSOR TRAIL (§3.3 two-mode rule, skin cursor only): skin HAS
-cursormiddle (or ForceLongTrail) → the LONG CONNECTED trail, STRICTLY
+CURSOR TRAIL (§3.3 two-mode rule, skin cursor only): cursor's provider HAS
+cursormiddle (or ForceLongTrail) → the LONG CONNECTED additive trail, STRICTLY
 DISTANCE-BASED (owner-directed 2026-07): the whole replay path is
 resampled ONCE at init into points every LONG_TRAIL_SPACING_OSU osu!px
 of cursor TRAVEL (build_distance_trail — interpolating between replay
@@ -74,29 +74,24 @@ can never stack up and over-brighten in place). Per frame the points
 inside the last LONG_TRAIL_WINDOW_MS are drawn (newest
 LONG_TRAIL_MAX_POINTS≈stable's 2048 at most), each at a UNIFORM base
 alpha scaled only by its age fade along the ribbon.
-No cursormiddle → the classic sparse trail: one sprite dropped every
-16.67 ms, each fading over TRAIL_SPRITE_LIFE_MS. The procedural (non-skin)
+No same-provider cursormiddle → the classic sparse normal-blend trail:
+one sprite dropped every 16.67 ms, each fading over TRAIL_SPRITE_LIFE_MS.
+The procedural (non-skin)
 cursor keeps its shader-style glow trail.
 
-SPINNER PHASE (render/spinner.py holds the pure math — see its docstring
-for the lazer-legacy reference semantics):
-  * §3.3 style auto-detect: skin has spinner-background → OLD style
-    (background + metre bottom-up bar reveal + rotating spinner-circle);
-    else new-style sprites → NEW (additive blue glow ramping with
-    progress, bottom at rotation/3, top+middle2 at full rotation, middle
-    fading white→red over the duration); no spinner sprites → the
-    procedural Argon-ish spinner (outer ring + hub + orbiting marker +
-    progress glow).
-  * rotation tracks the replay cursor continuously (signed per-frame
-    deltas while a key is held — the ruleset's accumulation, kept
-    signed); --no-replay auto-spins at the §2.5 RPMS constant (477 RPM).
-  * spinner-approachcircle shrinks 1.9→0.1 over the spin (§2.5);
-    spinner-spin fades out ~0.5 s after the start; spinner-clear pops in
-    when accumulated rotation meets the OD requirement; live RPM readout
-    (spinner-rpm box + ScorePrefix skin digits, else HUD glyphs).
-  * skin.ini SpinnerFadePlayfield dims everything under the spinner
-    while it's alive; SpinnerNoBlink stills the metre's blinking bar.
-  * the spinner judgment popup comes from the ruleset like every object.
+SPINNER PHASE (render/spinner.py holds the pure visual math):
+  * Legacy provider precedence chooses old background/disc/metre or new
+    glow/bottom/top/middle2/fixed-middle. Transparent assets remain supplied.
+    Higher-priority new top wins over a lower-priority fallback background.
+  * New top rotates half when middle2 resolves; middle2 full, bottom one-third
+    of top. Container scale is .8→1 OutQuad from completion progress; glow
+    draws additively beneath the normal discs, fixed middle last.
+  * Legacy uses the native window container, late TimeFadeIn ramp,
+    240ms fade-out, 1.86→.1 approach and source cue/RPM/bonus anchors.
+    Old metre crop and tint follow source; weighted blinking is deterministic.
+  * Raw replay rotation/requirements/bonus crossings remain presentation
+    approximations. Spinner judgement popups still come from the ruleset.
+    Argon keeps its existing helper curves, geometry, cap and bonus display.
 
 HIT LIGHTING (§3.3 `lighting`): combo-tinted additive flash under each
 non-miss judgment popup at its popup position, 400 ms lazer-ish
@@ -162,6 +157,8 @@ from .effects import (LOGO_UI_SIZE, SMOKE_DEFAULT_WIDTH_OSU,
                       seizure_alpha, smoke_point_alpha, smoke_segments,
                       triangle_field, triangle_states, warning_arrow_alpha)
 from .gl import _GPU_YUV, Sprite
+from .slider_visuals import (SliderVisualState, ball_variant, draw_slider_layers,
+                             repeat_alpha, repeat_fade_in)
 from .hud import layout_run
 from .mods import (HIDDEN_FADE_IN_MULT, MOD_FLASHLIGHT, MOD_HIDDEN,
                    build_flashlight_timeline, flashlight_size_at,
@@ -221,12 +218,16 @@ from .markers import (arrow_alpha_scale, arrow_pulse, arrow_rotation,
 from .skin_elements import (FOLLOW_CIRCLE_SCALE, CURSOR_UI_HEIGHT,
                             circle_pixel_scale, layout_skin_digits)
 from .slider_body import DEFAULT_COMBO_COLORS, BodyStyle, sub_path
-from .textures import ARGON_DIGIT_CAP_SCALE, ARGON_GLYPH_CAP_SCALE
+from .textures import ARGON_DIGIT_CAP_SCALE, ARGON_GLYPH_CAP_SCALE, LEGACY_FONT_HEIGHT
 from .spinner import (CLEAR_OFFSET_OSU, GLOW_BLUE, SPIN_OFFSET_OSU,
                       SPINNER_CENTRE, SPRITE_SCALE, SpinnerTrack,
                       bonus_popup_state, bonus_spin_events, clear_alpha_scale,
                       detect_spinner_style, lighting_alpha_scale,
                       metre_bar_count, required_rotations,
+                      LEGACY_METRE_HEIGHT, legacy_spinner_alpha,
+                      legacy_spinner_scale, legacy_approach_scale,
+                      legacy_spin_prompt_alpha, legacy_clear_alpha_scale,
+                      legacy_bonus_popup_state,
                       spinner_approach_scale, spinner_bonus_thresholds,
                       spin_prompt_alpha, wants_lighting)
 
@@ -288,25 +289,9 @@ CURSOR_RADIUS_OSU = 14.0       # cursor core sizing base, osu!px
 CURSOR_GLOW_COLOR = (1.0, 0.30, 0.35)   # R3D red
 DIGIT_SPACING = 0.06           # of digit height, between combo digits
 BALL_DETACHED_ALPHA = 0.35     # slider ball while tracking is lost
-BALL_FADE_OUT_MS = 240.0       # DrawableSlider.FadeOut(240).Expire() at EndTime
 FOLLOW_CIRCLE_IN_MS = 300.0    # DefaultFollowCircle tracking-gain: ScaleTo(FOLLOW_AREA,300,OutQuint) + FadeIn
 
 
-def slider_ball_alpha(t: float, start: float, end: float,
-                      active_alpha: float) -> float | None:
-    """Slider-ball alpha over its lifetime, or None outside it.
-
-    From `start` to `end` the ball shows at `active_alpha` (1.0 tracking,
-    BALL_DETACHED_ALPHA when tracking is lost). At EndTime osu's
-    DrawableSlider does FadeOut(240).Expire(); the ball, a child, fades
-    linearly (Easing.None) from its current alpha to 0 over
-    BALL_FADE_OUT_MS instead of hard-cutting. OsuModHidden's body fade
-    never touches the ball. None before `start` or after the fade."""
-    if t < start or t > end + BALL_FADE_OUT_MS:
-        return None
-    if t <= end:
-        return active_alpha
-    return active_alpha * max(0.0, 1.0 - (t - end) / BALL_FADE_OUT_MS)
 POPUP_HEIGHT_FRAC = 0.62       # judgment number height / circle radius
 POPUP_COLORS = {
     JudgmentKind.HIT300: (0.38, 0.72, 1.00),   # Argon-ish blue
@@ -807,7 +792,8 @@ def snake_end_fraction(t: float, start_time: float, preempt: float,
 def snake_range(t: float, start_time: float, part_len: float,
                 repeat_count: int, preempt: float,
                 snaking_in: bool = True,
-                snaking_out: bool = True) -> tuple[float, float]:
+                snaking_out: bool = True,
+                head_hit: bool = True) -> tuple[float, float]:
     """(start, end) fractions of the path visible at t — §4.9 Snaking
     In AND Out (lazer SnakingSliderBody semantics):
 
@@ -823,7 +809,7 @@ def snake_range(t: float, start_time: float, part_len: float,
     out body leaves nothing behind)."""
     b = snake_end_fraction(t, start_time, preempt, snaking_in)
     a = 0.0
-    if snaking_out and part_len > 0 and repeat_count >= 1:
+    if head_hit and snaking_out and part_len > 0 and repeat_count >= 1:
         final_start = start_time + (repeat_count - 1) * part_len
         if t > final_start:
             u = _clamp01((t - final_start) / part_len)
@@ -877,7 +863,7 @@ def trail_times(t: float, window_ms: float = TRAIL_WINDOW_MS,
 
 
 def skin_trail_is_long(has_cursormiddle: bool, force_long: bool) -> bool:
-    """§3.3: long connected trail when `cursormiddle` exists or
+    """§3.3: long connected trail when the cursor provider has a middle or
     ForceLongTrail; else the sparse 16.67 ms sprite trail."""
     return has_cursormiddle or force_long
 
@@ -1075,10 +1061,13 @@ class StdScene:
         self.skin = skin_elems            # skin_elements.SkinElements | None
         self.use_skin_cursor = bool(use_skin_cursor and skin_elems is not None
                                     and skin_elems.has("cursor"))
-        # §3.3 trail mode: cursormiddle present (or forced) → long trail;
+        # SkinElements locks cursormiddle to the resolved cursor provider.
+        # A middle from a fallback/local provider cannot change this mode.
+        # §3.3 same-provider middle (or forced) → long additive trail;
         # the long trail is DISTANCE-resampled once from the full replay
         self.long_trail = skin_trail_is_long(
-            skin_elems is not None and skin_elems.has("cursormiddle"),
+            skin_elems is not None and skin_elems.has("cursor")
+            and skin_elems.has("cursormiddle"),
             force_long_trail)
         self._trail_pts: list[tuple[float, float, float]] = []
         self._trail_times: list[float] = []
@@ -1399,15 +1388,21 @@ class StdScene:
         self._last_t = -math.inf
         self._slider_paths: dict[int, list[tuple[float, float]]] = {}
         self._slider_marks: dict[int, tuple[list, list]] = {}
+        self._slider_visual_states: dict[int, SliderVisualState] = {}
         # spinners: rotation tracks (replay-driven, or the §2.5 auto-spin
         # when there are no cursor frames), built at spawn
         self._spinner_tracks: dict[int, SpinnerTrack] = {}
-        # spinner bonus popups (Argon league only): (time, value, is_max) per
+        # presentation-only spinner bonuses: (time, value, is_max) per
         # completed bonus spin, built with the track at spawn.
         self._spinner_bonus: dict[int, list[tuple[float, int, bool]]] = {}
         self.spinner_style = detect_spinner_style(
-            skin_elems.loaded if skin_elems is not None else set())
-        self.spin_k = camera.len_to_screen(SPRITE_SCALE)  # px per logical px
+            skin_elems.loaded if skin_elems is not None else set(),
+            skin_elems.skin.get_source('spinner-background') if skin_elems else None,
+            skin_elems.skin.get_source('spinner-top') if skin_elems else None)
+        # LegacySpinner's 640x480 window container inverts the playfield
+        # adjustment. Texture .625 * window(height/480) = height/768.
+        self.spin_k = (camera.screen_h/768 if skin_elems is not None else
+                       camera.len_to_screen(SPRITE_SCALE))
         # judgment popups: time-sorted events, pointer + active window
         self._popups = (sorted(judgments.events, key=lambda e: e.time_ms)
                         if judgments is not None else [])
@@ -1772,12 +1767,12 @@ class StdScene:
             elif isinstance(obj, Spinner):
                 track = self._build_spinner_track(obj)
                 self._spinner_tracks[id(obj)] = track
-                if self.skin is None:      # Argon league bonus popups only
-                    self._spinner_bonus[id(obj)] = self._build_spinner_bonus(
-                        obj, track)
+                self._spinner_bonus[id(obj)] = self._build_spinner_bonus(obj, track)
         keep = []
         for obj in self._active:
-            if t <= obj.get_end_time() + HIT_FADE_OUT:
+            retire = (self._slider_visual(obj).retire if isinstance(obj, Slider)
+                      else obj.get_end_time() + HIT_FADE_OUT)
+            if t <= retire:
                 keep.append(obj)
             else:
                 self._slider_paths.pop(id(obj), None)
@@ -1808,26 +1803,23 @@ class StdScene:
         return bonus_spin_events(track, req_for_bonus, max_bonus)
 
     def _build_marks(self, obj) -> tuple[list, list]:
-        """(ticks, arrows) draw records for one spawning slider — screen
-        positions + per-part HIT flags from the ruleset (no judgments →
-        the Phase-1 perfect-play fallback: everything hit).
+        """(ticks, arrows) geometry records for one spawning slider.
+
+        The trailing hit token is retained for helper/debug compatibility;
+        actual scene transitions use the chronological model at draw time.
 
         ticks:  (TickMark, screen_x, screen_y, span_start, hit)
         arrows: (ReverseArrow, screen_x, screen_y, rotation, hit)
         """
-        v = self._verdict(obj)
-        outcomes: dict[tuple[str, float], bool] = {}
-        if v is not None:
-            for p in v.parts:
-                if p.kind in ("tick", "repeat"):
-                    outcomes[(p.kind, round(p.time, 2))] = p.hit
+        # These records cache geometry. Rendering reads chronological model
+        # notifications at time t; reconciled PartOutcome flags are not input.
         pts = self._slider_paths[id(obj)]
         ticks = []
         for tm in tick_schedule(obj):
             sx, sy = self.cam.to_screen(*obj.modify_position(tm.pos, self.diff))
             ticks.append((tm, sx, sy,
                           obj.start_time + tm.span * obj.part_len,
-                          outcomes.get(("tick", round(tm.time, 2)), True)))
+                          True))
         arrows = []
         spawn = obj.get_start_time() - self._preempt_for(obj)
         # Hidden does not alter reverse-arrow lifetime: a pending reverse
@@ -1840,7 +1832,7 @@ class StdScene:
             if marker is not None:
                 sx, sy = self.cam.to_screen(
                     *obj.modify_position(marker.pos, self.diff))
-                hit = outcomes.get(("repeat", round(marker.time, 2)), True)
+                hit = True
             else:   # tick walk suppressed (degenerate) — fall back to path end
                 sx, sy = pts[-1] if arrow.at_tail else pts[0]
                 hit = True
@@ -1964,7 +1956,8 @@ class StdScene:
                 if _sm:
                     self.spr.draw(self._merge_smoke_sprites(_sm, _mc_color, t))
             for _mc_frames, _mc_color, _mc_end in self.merge_cursors:
-                self.spr.draw(self._merge_cursor_sprites(_mc_frames, _mc_color, t, _mc_end))
+                self._draw_cursor_sprites(
+                    self._merge_cursor_sprites(_mc_frames, _mc_color, t, _mc_end))
             for _mm_misses, _mm_color in self.merge_misses:
                 self.spr.draw(self._merge_miss_sprites(_mm_misses, _mm_color, t))
             self._uninstall_barrel()
@@ -1975,7 +1968,7 @@ class StdScene:
                                       "mrgd_board", (1.0, 1.0, 1.0, 1.0))])
         elif self.draw_cursor and self.frames:
             self._install_barrel(t)
-            self.spr.draw(self._cursor_sprites(t))
+            self._draw_cursor_sprites(self._cursor_sprites(t))
             self._uninstall_barrel()
         if self.hud is not None:
             self.hud.draw(t)          # §5.3 draw order: … → cursors → HUD
@@ -2061,7 +2054,7 @@ class StdScene:
 
         # cursor frozen at the death position (no fall — you died there)
         if self.draw_cursor and self.frames:
-            self.spr.draw(self._cursor_sprites(ft))
+            self._draw_cursor_sprites(self._cursor_sprites(ft))
         # HUD frozen at death → the score/combo/acc/hits AS THEY WERE
         if self.hud is not None:
             self.hud.draw(ft)
@@ -2523,13 +2516,17 @@ class StdScene:
             if not pts:
                 continue
             preempt = self._preempt_for(obj)     # FR extends per object
-            b_alpha = body_alpha(t, obj.get_start_time(), obj.get_end_time(),
-                                 preempt, fade_in)
+            b_alpha = self._slider_visual(obj).body_alpha(
+                t, preempt, fade_in, self.snaking_out)
+            if self.hidden:
+                b_alpha *= hidden_slider_fade(t, obj.get_start_time(),
+                                              obj.get_end_time(), preempt, fade_in)
             if b_alpha <= 0.0:
                 continue
             items.append((pts, snake_range(
                 t, obj.get_start_time(), obj.part_len, obj.repeat_count,
-                preempt, self.snaking_in, self.snaking_out)))
+                preempt, self.snaking_in, self.snaking_out,
+                self._slider_visual(obj).head_hit_at(t))))
             alpha = max(alpha, b_alpha)
             if color is None:
                 oc = self._color(obj)
@@ -2744,6 +2741,19 @@ class StdScene:
     def _verdict(self, obj):
         return self.judgments.verdict_for(obj) if self.judgments else None
 
+    def _slider_visual(self, obj) -> SliderVisualState:
+        cache = self._slider_visual_states
+        key = id(obj)
+        if key not in cache:
+            verdict = self._verdict(obj)
+            timeline = getattr(verdict, "slider_visuals", None)
+            variant = ("argon" if self.skin is None else "legacy"
+                       if self.skin.has("sliderfollowcircle") else "default")
+            cache[key] = SliderVisualState(timeline, obj.get_start_time(),
+                                           obj.get_end_time(), variant,
+                                           autoplay=self.judgments is None)
+        return cache[key]
+
     def _head_sprites(self, obj, t: float, pos_osu, approach_out,
                       role: str = "hit") -> list[Sprite]:
         """Hit-circle lifecycle sprites (shared by circles and slider heads).
@@ -2861,16 +2871,19 @@ class StdScene:
         preempt, fade_in = self._preempt_for(obj), self.diff.time_fade_in
         start, end = obj.get_start_time(), obj.get_end_time()
         spawn = start - preempt
-        b_alpha = body_alpha(t, start, end, preempt, fade_in)
+        visual = self._slider_visual(obj)
+        b_alpha = visual.body_alpha(t, preempt, fade_in, self.snaking_out)
         if self.hidden:                    # OsuModHidden: body fades (Easing.Out)
             b_alpha *= hidden_slider_fade(t, start, end, preempt, fade_in)
         pts = self._slider_paths.get(id(obj))
         ticks, arrows = self._slider_marks.get(id(obj), ([], []))
         snake_a, snake = snake_range(t, start, obj.part_len,
                                      obj.repeat_count, preempt,
-                                     self.snaking_in, self.snaking_out)
+                                     self.snaking_in, self.snaking_out,
+                                     visual.head_hit_at(t))
         sprites: list[Sprite] = []
-        tip = None
+        beneath: list[Sprite] = []
+        follow: list[Sprite] = []
         # FAIL: the body pass bypasses spr.post_xform, so rigid-transform the
         # body polyline here (same per-object fall) and fade with the object.
         body_pts = pts
@@ -2914,76 +2927,86 @@ class StdScene:
             # ticks of the ACTIVE span: above the body, under the circles
             sprites.extend(self._tick_sprites(t, ticks, obj, spawn, fade_in,
                                               snake_a, snake))
-            # tail end circle rides the visible body's far end: the snake
-            # tip during snake-in; the RETRACTING tip when a tail→head
-            # final span snakes out (danser: the cap follows the shrink).
-            # OsuModTraceable hides the DrawableSliderTail entirely (no cap).
-            tip = sub_path(pts, snake_a, snake)[-1]
-            if not self.traceable:
-                sprites.extend(self._plain_circle_sprites(tip[0], tip[1],
-                                                          color, b_alpha,
-                                                          role="slider_end"))
-        # slider ball following PositionAt(t) (repeats included — scorePath
-        # handles the back-and-forth). While the ruleset says tracking was
-        # lost the ball dims — the visible sliderbreak cue (there is no
-        # tail explosion to lose in this phase).
-        if start <= t <= end + BALL_FADE_OUT_MS:
-            v = self._verdict(obj)
-            # tracking is sampled at min(t, end): during the post-end fade
-            # the ball keeps whatever alpha it had when the slider expired.
-            tracked = v is None or v.tracked_at(min(t, end))
-            active_ball_alpha = 1.0 if tracked else BALL_DETACHED_ALPHA
-            ball_alpha = slider_ball_alpha(t, start, end, active_ball_alpha)
-            bx, by = self.cam.to_screen(
-                *obj.get_stacked_position_at(min(t, end), self.diff))
-            sk = self.skin
-            # Follow circle EXPAND on tracking-gain (lazer DefaultFollowCircle):
-            # scale 1x -> FOLLOW_AREA and fade 0 -> 1 over FOLLOW_CIRCLE_IN_MS
-            # (OutQuint) instead of popping to full size. Anchored to the slider
-            # start (tracked-from-head, the common case); mid-slider re-acquire
-            # re-expand and release/end scale-down are the V3 transition model.
-            follow_f = _ease_out_quint((t - start) / FOLLOW_CIRCLE_IN_MS)
-            if sk is None:                 # Argon league ball + follow circle
-                sprites.extend(self._argon_ball_sprites(bx, by, color,
-                                                        ball_alpha, tracked,
-                                                        follow_f))
-            else:
-                if tracked and sk.has("sliderfollowcircle"):
-                    # follow circle grows to 2.4x the circle diameter over the
-                    # tracking-gain ramp; it fades with the ball post-end.
-                    fw, fh = sk.size["sliderfollowcircle"]
-                    area = 1.0 + (FOLLOW_CIRCLE_SCALE - 1.0) * follow_f
-                    m = area * 2.0 * self.radius_px / max(fw, fh)
-                    sprites.append(Sprite(bx, by, fw * m, fh * m,
-                                          "sk_sliderfollowcircle",
-                                          (1.0, 1.0, 1.0, ball_alpha * follow_f)))
-                if sk.has("sliderb"):
-                    bw, bh = sk.size["sliderb"]
-                    k = self.circle_k
-                    sprites.append(Sprite(bx, by, bw * k, bh * k,
-                                          sk.frame_key("sliderb", min(t, end)),
-                                          (*self._ball_tint(color), ball_alpha)))
-                else:
-                    d = 2.0 * self.radius_px
-                    sprites.append(Sprite(bx, by, d, d, "disc",
-                                          (*color, ball_alpha)))
+        # DrawableSliderTail is a fixed final endpoint. Its own child entrance
+        # is independent of body opacity/snaking; Argon has no visible circle.
+        if pts and self.skin is not None and not self.traceable:
+            tx, ty = self.cam.to_screen(*obj.get_stacked_position_at(end, self.diff))
+            tail_alpha = repeat_fade_in(t, start, preempt, obj.part_len,
+                                        obj.repeat_count - 1,
+                                        fade_in if obj.repeat_count == 1 else 0,
+                                        self.snaking_in)
+            if visual.tail is not None and t >= visual.tail.time_ms:
+                anchor = visual.tail.transform_time_ms
+                if anchor is not None and not visual.tail.hit:
+                    tail_alpha *= _clamp01(1 - (t - anchor) / 100)
+            if self.hidden:
+                tail_alpha *= hidden_circle_fade(t, start, preempt,
+                                                 preempt * HIDDEN_FADE_IN_MULT)
+            sprites.extend(self._plain_circle_sprites(tx, ty, color, tail_alpha,
+                                                      role="slider_end"))
+            # Repeats have their own legacy circle under the arrow. Keeping
+            # the final tail fixed must not remove the opposite endpoint cap.
+            sprites.extend(self._repeat_circle_sprites(obj, t, arrows, pts, color))
+        # Follow has its own lifecycle, including pre-start anchors and
+        # release/end fades; it is independent of detached ball opacity.
+        bx, by = self.cam.to_screen(*obj.get_stacked_position_at(min(t, end), self.diff))
+        follow = self._follow_sprites(obj, t, bx, by, color, spawn)
+        if follow:
+            beneath, sprites = sprites, []
+        sprites.extend(self._slider_ball_sprites(obj, t, color))
         # head circle (+ its approach ring) on top of body/ball
         sprites.extend(self._head_sprites(
             obj, t, obj.get_stacked_start_position(self.diff), approach_out,
             role="slider_head"))
         if pts:
-            # reverse arrows ON TOP of the head circle. The TAIL arrow must
-            # also draw after the head disc/number: on a SHORT single-repeat
-            # slider its pinned end position overlaps the head circle and
-            # would otherwise be occluded by it (normal-length sliders are
-            # unaffected — the two ends don't overlap). tip/ride_tip is
-            # vestigial (arrows are pinned at marker.pos), so None is correct.
+            # Reverse arrows stay above the head circle. Source entrance
+            # delays prevent first-repeat arrows appearing at a growing tip.
             sprites.extend(self._arrow_sprites(t, arrows, True, spawn,
-                                               fade_in, pts, snake, None))
+                                               fade_in, pts, snake, None, obj))
             sprites.extend(self._arrow_sprites(t, arrows, False, spawn,
-                                               fade_in, pts, snake, None))
-        if sprites:
-            self.spr.draw(sprites)
+                                               fade_in, pts, snake, None, obj))
+        draw_slider_layers(self.spr, beneath, follow, sprites, visual.parent_alpha(t))
+
+    def _slider_ball_sprites(self, obj, t, color):
+        """Ball-only child lifecycle; follow and parent compositing stay separate."""
+        end = obj.get_end_time()
+        v = self._verdict(obj)
+        # Keep the existing detached cue and freeze it at nominal end.
+        tracked = v is None or v.tracked_at(min(t, end))
+        active_alpha = 1.0 if tracked else BALL_DETACHED_ALPHA
+        sk = self.skin
+        alpha = self._slider_visual(obj).ball.at(t, ball_variant(sk), active_alpha)
+        if alpha <= 0:
+            return []
+        bx, by = self.cam.to_screen(*obj.get_stacked_position_at(min(t, end), self.diff))
+        if sk is None:
+            return self._argon_ball_sprites(bx, by, color, alpha, False)
+        if sk.has("sliderb"):
+            bw, bh = sk.size["sliderb"]
+            k = self.circle_k
+            return [Sprite(bx, by, bw * k, bh * k,
+                           sk.frame_key("sliderb", min(t, end)),
+                           (*self._ball_tint(color), alpha))]
+        d = 2.0 * self.radius_px
+        return [Sprite(bx, by, d, d, "disc", (*color, alpha))]
+
+    def _follow_sprites(self, obj, t, bx, by, color, spawn):
+        state = self._slider_visual(obj).follow.at(t)
+        if state.alpha <= 0:
+            return []
+        sk = self.skin
+        if sk is not None and sk.has("sliderfollowcircle"):
+            age = t - spawn
+            fw, fh = sk.frame_size("sliderfollowcircle", age)
+            k = self.circle_k * 0.5 * state.scale
+            return [Sprite(bx, by, fw * k, fh * k,
+                           sk.frame_key("sliderfollowcircle", age),
+                           (1, 1, 1, state.alpha))]
+        diameter = 2 * self.radius_px * state.scale
+        key = "argon_follow" if sk is None else "default_follow"
+        tint = color if sk is None else (1, 165 / 255, 0)
+        return [Sprite(bx, by, diameter, diameter, key,
+                       (*tint, state.alpha), additive=True)]
 
     def _argon_body_style(self, color, b_alpha: float) -> BodyStyle:
         """ArgonSliderBody (skinless): accent border, interior = accent
@@ -3004,9 +3027,9 @@ class StdScene:
         ball_d = ARGON_BALL_DIAM_FRAC * 2.0 * self.radius_px
         if tracked:
             area = 1.0 + (ARGON_FOLLOW_AREA - 1.0) * follow_f
-            fd = area * ball_d
+            fd = area * 2.0 * self.radius_px
             out.append(Sprite(bx, by, fd, fd, "argon_follow",
-                              (*color, 0.9 * follow_f), additive=True))
+                              (*color, follow_f), additive=True))
         out.append(Sprite(bx, by, ball_d, ball_d, "argon_ball",
                           (*color, ball_alpha)))
         out.append(Sprite(bx, by, ball_d, ball_d, "argon_ball_ring",
@@ -3033,11 +3056,16 @@ class StdScene:
         tint = self._color(obj) if argon else (1.0, 1.0, 1.0)
         out: list[Sprite] = []
         k = self.circle_k
+        visual = self._slider_visual(obj)
         for tm, sx, sy, span_start, hit in ticks:
             if tm.span != active_span or not (snake_a <= tm.progress
                                               <= snake):
                 continue
-            asa = tick_alpha_scale(t, tm.time, tm.span, span_start, spawn,
+            event = visual.part_at("tick", tm.time, t)
+            notification = tm.time if visual.autoplay else math.inf
+            if event is not None and event.transform_time_ms is not None:
+                notification, hit = event.transform_time_ms, event.hit
+            asa = tick_alpha_scale(t, notification, tm.span, span_start, spawn,
                                    fade_in, hit)
             if asa is None:
                 continue
@@ -3059,11 +3087,13 @@ class StdScene:
 
     def _arrow_sprites(self, t: float, arrows, at_tail: bool, spawn: float,
                        fade_in: float, pts, snake: float,
-                       tip) -> list[Sprite]:
-        """reversearrow sprites for one end — WHITE (never combo-tinted),
-        beat-pulsed per the §3.2 version gate, pointing along the path
-        tangent INTO the slider. The tail arrow rides the snake tip while
-        the body grows."""
+                       tip, obj=None) -> list[Sprite]:
+        """White reverse arrows, with source-model endpoint/freeze geometry.
+
+        The optional object selects the model path; legacy helper-only callers
+        retain their fixed marker positions. Native rotation smoothing is not
+        inferred from the encoder frame clock.
+        """
         sel = [a for a in arrows if a[0].at_tail == at_tail]
         if not sel:
             return []
@@ -3075,16 +3105,21 @@ class StdScene:
         out: list[Sprite] = []
         k = self.circle_k
         for arrow, sx, sy, rot, hit in sel:
-            asa = arrow_alpha_scale(t, arrow, spawn, fade_in, hit)
+            if obj is None:
+                asa = arrow_alpha_scale(t, arrow, spawn, fade_in, hit)
+            else:
+                visual = self._slider_visual(obj)
+                sx, sy, rot, event = self._repeat_pose(obj, arrow, pts, t)
+                alpha = repeat_alpha(t, obj.get_start_time(), self._preempt_for(obj),
+                                     obj.part_len, arrow.r - 1, self.snaking_in, event)
+                if self.hidden and event is not None and event.transform_time_ms is not None:
+                    alpha = 0  # OsuModHidden hides the judged repeat immediately
+                if visual.autoplay and t >= arrow.time:
+                    alpha *= (1 - _clamp01((t - arrow.time) / min(300, obj.part_len))) ** 2
+                asa = (alpha, 1.0) if alpha > 0 else None
             if asa is None:
                 continue
             alpha, pop_scale = asa
-            # M-4: the reverse arrow is PINNED at the slider end (marker.pos),
-            # matching danser/lazer (DrawableSliderRepeat fades in at its fixed
-            # position during the preempt). Previously the tail arrow rode the
-            # snake-in tip (`tip`/`snake`), which floated the chevron above the
-            # end circle for slow sliders and dropped a stray crescent near the
-            # head early in snake-in — both diffed against the reference.
             p_scale, p_rot = arrow_pulse(beat_phase(t, self.beatmap.timings),
                                          legacy)
             scale = pop_scale * p_scale
@@ -3105,6 +3140,44 @@ class StdScene:
                                   rotation=rot + p_rot))
         return out
 
+    def _repeat_pose(self, obj, arrow, pts, t):
+        visual = self._slider_visual(obj)
+        nominal = (obj.tick_reverse[arrow.r - 1].time
+                   if arrow.r <= len(obj.tick_reverse) else arrow.time)
+        event = visual.part_at("repeat", nominal, t)
+        freeze = visual.freezes.get(event.part_index) if event else None
+        # Left-limit geometry represents the position before the boundary's
+        # body update. Native cadence and elapsed-frame rotation are unknown.
+        pose_time = math.nextafter(freeze, -math.inf) if freeze is not None else t
+        if visual.autoplay and t >= arrow.time:
+            pose_time = math.nextafter(arrow.time, -math.inf)
+        fractions = snake_range(pose_time, obj.get_start_time(), obj.part_len,
+                                obj.repeat_count, self._preempt_for(obj),
+                                self.snaking_in, self.snaking_out,
+                                visual.head_hit_at(pose_time))
+        curve = sub_path(pts, *fractions)
+        x, y = curve[-1] if arrow.at_tail else curve[0]
+        return x, y, arrow_rotation(curve, arrow.at_tail), event
+
+    def _repeat_circle_sprites(self, obj, t, arrows, pts, color):
+        out = []
+        visual = self._slider_visual(obj)
+        for arrow, *_ in arrows:
+            x, y, _, event = self._repeat_pose(obj, arrow, pts, t)
+            alpha = repeat_alpha(t, obj.get_start_time(), self._preempt_for(obj),
+                                 obj.part_len, arrow.r - 1, self.snaking_in,
+                                 event, self.diff.time_fade_in if arrow.r == 1 else 0)
+            if self.hidden:
+                preempt = self._preempt_for(obj)
+                alpha *= hidden_circle_fade(t, obj.get_start_time(), preempt,
+                                            preempt * HIDDEN_FADE_IN_MULT)
+            if visual.autoplay and t >= arrow.time:
+                alpha *= (1 - _clamp01((t - arrow.time) / min(300, obj.part_len))) ** 2
+            if alpha > 0:
+                out.extend(self._plain_circle_sprites(x, y, color, alpha,
+                                                      role="slider_end"))
+        return out
+
     def _ball_tint(self, combo_color) -> tuple[float, float, float]:
         """osu semantics: sliderb is combo-tinted only when the skin allows
         it (AllowSliderBallTint), else the skin.ini SliderBall colour, else
@@ -3119,9 +3192,9 @@ class StdScene:
     # --- spinner ------------------------------------------------------------------------
 
     def _skinned(self, name: str) -> bool:
-        """Skin provides `name` and doesn't blank it."""
+        """Resolved spinner texture, including deliberately transparent art."""
         sk = self.skin
-        return sk is not None and sk.has(name) and name not in sk.empty
+        return sk is not None and sk.has(name)
 
     def _sk_sprite(self, name: str, x: float, y: float, alpha: float,
                    scale: float = 1.0, rotation: float = 0.0,
@@ -3151,13 +3224,16 @@ class StdScene:
     def _draw_spinner(self, obj, t: float) -> None:
         start, end = obj.get_start_time(), obj.get_end_time()
         preempt, fade_in = self.diff.preempt, self.diff.time_fade_in
-        alpha = body_alpha(t, start, end, preempt, fade_in)
+        legacy = self.skin is not None
+        alpha = (legacy_spinner_alpha(t, start, end, fade_in) if legacy else
+                 body_alpha(t, start, end, preempt, fade_in))
         if alpha <= 0.0:
             return
         track = self._spinner_tracks[id(obj)]
         rot = track.rotation(t)
         prog = track.progress(t)
-        cx, cy = self.cam.to_screen(*SPINNER_CENTRE)
+        cx, cy = ((self.cam.screen_w/2, self.cam.screen_h/2) if legacy else
+                  self.cam.to_screen(*SPINNER_CENTRE))
         osu = self.cam.len_to_screen  # osu!px → screen px
 
         # §3.2 SpinnerFadePlayfield: dim everything under the spinner
@@ -3177,11 +3253,22 @@ class StdScene:
             # additive glow halo first, in its own pass, so the discs
             # composite OVER it (gl.draw defers additive within a call)
             if self._skinned("spinner-glow") and prog > 0.0:
+                glow_color = GLOW_BLUE
+                last_value = 0
+                for event_t, value, _ in self._spinner_bonus.get(id(obj), ()):
+                    if event_t > t:
+                        break
+                    if value > last_value and t-event_t < 200:
+                        flash = max(0.0, 1-(t-event_t)/200)
+                        glow_color = tuple(c+(1-c)*flash for c in GLOW_BLUE)
+                    last_value = value
+                glow_alpha = min(prog, 1.0)*alpha*max(0.0, 1-max(0.0, t-end)/300)
                 self.spr.draw([self._sk_sprite(
-                    "spinner-glow", cx, cy, min(prog, 1.0) * alpha,
-                    color=GLOW_BLUE, additive=True)])
+                    "spinner-glow", cx, cy, glow_alpha,
+                    scale=legacy_spinner_scale(prog),
+                    color=glow_color, additive=True)])
             self._new_style_sprites(sprites, t, start, end, cx, cy, rot,
-                                    alpha)
+                                    alpha, prog)
         else:
             if prog > 0.0:
                 d = osu(PROC_SPINNER_GLOW_OSU)
@@ -3192,9 +3279,12 @@ class StdScene:
                                       additive=True)])
             self._procedural_spinner_sprites(sprites, cx, cy, rot, alpha)
 
-        self._spinner_overlay_sprites(sprites, t, track, start, end,
-                                      cx, cy, alpha)
-        if self.skin is None:                     # Argon league bonus popup
+        if legacy:
+            self._legacy_spinner_overlays(sprites, t, track, start, end,
+                                          cx, cy, alpha, id(obj))
+        else:
+            self._spinner_overlay_sprites(sprites, t, track, start, end,
+                                          cx, cy, alpha)
             self._spinner_bonus_sprites(sprites, id(obj), t, cx, cy, alpha)
         if sprites:
             self.spr.draw(sprites)
@@ -3236,50 +3326,119 @@ class StdScene:
     def _old_style_sprites(self, out: list[Sprite], t: float, cx: float,
                            cy: float, rot: float, prog: float,
                            alpha: float) -> None:
-        """OLD style: background → metre (bottom-up bar reveal) →
-        rotating spinner-circle."""
+        """LegacyOldStyleSpinner: background → disc → masked metre."""
         k = self.spin_k
-        bg_bottom = cy + 692.0 * k / 2.0        # nominal @1x background foot
         if self._skinned("spinner-background"):
-            out.append(self._sk_sprite("spinner-background", cx, cy, alpha))
-            bg_bottom = cy + self.skin.size["spinner-background"][1] * k / 2.0
+            tint = tuple(c/255 for c in self.skin.info.spinner_background)
+            out.append(self._sk_sprite("spinner-background", cx, cy, alpha, color=tint))
+        if self._skinned("spinner-circle"):
+            out.append(self._sk_sprite("spinner-circle", cx, cy, alpha, rotation=rot))
         if self._skinned("spinner-metre"):
             bars = metre_bar_count(prog, self.spinner_no_blink, t)
-            f = bars / 10.0
-            if f > 0.0:
-                mw, mh = self.skin.size["spinner-metre"]
-                mw_px, mh_px = mw * k, mh * k
-                out.append(Sprite(cx, bg_bottom - mh_px * f / 2.0,
-                                  mw_px, mh_px * f, "sk_spinner-metre",
+            mw, mh = self.skin.size["spinner-metre"]
+            cut = LEGACY_METRE_HEIGHT*(1-bars/10)
+            visible = max(0.0, mh-cut)
+            if visible > 0.0:
+                # Sprite remains at local (0,29); the mask clips below the
+                # fixed 692px height, independently of background dimensions.
+                left = cx-320*self.cam.screen_h/480
+                top = cy+(29-248)*self.cam.screen_h/480
+                out.append(Sprite(left+mw*k/2, top+(cut+visible/2)*k,
+                                  mw*k, visible*k, "sk_spinner-metre",
                                   (1.0, 1.0, 1.0, alpha),
-                                  uv_off=(0.0, 1.0 - f),
-                                  uv_scale=(1.0, f)))
-        if self._skinned("spinner-circle"):
-            out.append(self._sk_sprite("spinner-circle", cx, cy, alpha,
-                                       rotation=rot))
+                                  uv_off=(0.0, cut/mh),
+                                  uv_scale=(1.0, visible/mh)))
 
     def _new_style_sprites(self, out: list[Sprite], t: float, start: float,
                            end: float, cx: float, cy: float, rot: float,
-                           alpha: float) -> None:
+                           alpha: float, prog: float = 1.0) -> None:
         """NEW style (LegacyNewStyleSpinner): bottom at rot/3, top +
         middle2 at full rot, middle fading white→red over the duration.
         (The glow was already drawn additively under this stack.)"""
+        scale = legacy_spinner_scale(prog)
+        top_rotation = rot*(0.5 if self._skinned('spinner-middle2') else 1.0)
         if self._skinned("spinner-bottom"):
             out.append(self._sk_sprite("spinner-bottom", cx, cy, alpha,
-                                       rotation=rot / 3.0))
+                                       rotation=top_rotation / 3.0, scale=scale))
         if self._skinned("spinner-top"):
             out.append(self._sk_sprite("spinner-top", cx, cy, alpha,
-                                       rotation=rot))
+                                       rotation=top_rotation, scale=scale))
+        if self._skinned("spinner-middle2"):
+            out.append(self._sk_sprite("spinner-middle2", cx, cy, alpha,
+                                       rotation=rot, scale=scale))
         if self._skinned("spinner-middle"):
             w = _clamp01((t - start) / max(end - start, 1e-9))
             color = (1.0,
                      1.0 + (MIDDLE_RED[1] - 1.0) * w,
                      1.0 + (MIDDLE_RED[2] - 1.0) * w)
             out.append(self._sk_sprite("spinner-middle", cx, cy, alpha,
-                                       color=color))
-        if self._skinned("spinner-middle2"):
-            out.append(self._sk_sprite("spinner-middle2", cx, cy, alpha,
-                                       rotation=rot))
+                                       color=color, scale=scale))
+
+    def _legacy_spinner_text(self, out, text, x, y, alpha, scale=1.0,
+                             centred=False):
+        """Native ScorePrefix slots; RPM TopRight, bonus centre origin."""
+        sk = self.skin
+        sizes = sk.score_digit_sizes if sk.has('score_digits') else {}
+        height = max((h for w, h in sizes.values()), default=LEGACY_FONT_HEIGHT)
+        fixed = sizes['5'][0] if sizes else self.bank.legacy_aspect['5']*height
+        overlap = sk.info.score_overlap
+        entries = [];offset = 0.0
+        for ch in text:
+            w, h = sizes[ch] if sizes else (self.bank.legacy_aspect[ch]*height, height)
+            key = 'sk_score_'+ch if sizes else 'lg_'+ch
+            entries.append((key, offset+fixed/2, w, h))
+            offset += max(0.0, fixed-overlap)
+        left = min(dx-w/2 for _, dx, w, _ in entries)
+        right = max(dx+w/2 for _, dx, w, _ in entries)
+        k = self.spin_k*scale
+        x0 = x-((left+right)/2 if centred else right)*k
+        top = y-height*k/2 if centred else y
+        for key, dx, w, h in entries:
+            out.append(Sprite(x0+dx*k, top+h*k/2, w*k, h*k, key,
+                              (1, 1, 1, alpha)))
+
+    def _legacy_spinner_overlays(self, out, t, track, start, end, cx, cy, alpha, obj_id):
+        """LegacySpinner window-space children; original Argon path is separate."""
+        window = self.cam.screen_h/480
+        local_y = lambda y: cy+(y-248)*window
+        if self.draw_approach_circles:
+            scale = legacy_approach_scale(t, start, end)
+            if self._skinned('spinner-approachcircle'):
+                out.append(self._sk_sprite('spinner-approachcircle', cx, cy, alpha, scale=scale))
+            else:
+                d = self.cam.len_to_screen(PROC_SPINNER_RING_OSU)*scale
+                out.append(Sprite(cx, cy, d, d, 'approach', (1, 1, 1, alpha)))
+        tick = track.time_at_rotation(2*math.pi)
+        a = alpha*legacy_spin_prompt_alpha(t, start, end, self.diff.time_fade_in, tick)
+        if a > 0:
+            if self._skinned('spinner-spin'):
+                out.append(self._sk_sprite('spinner-spin', cx, local_y(364), a))
+            else:
+                self._glyph_run(out, 'SPIN!', cx, local_y(364), PROMPT_TEXT_UI*self.cam.screen_h/768, (1, 1, 1), a)
+        state = legacy_clear_alpha_scale(t, track.clear_time(), end)
+        if state is not None:
+            a, scale = state;a *= alpha
+            if self._skinned('spinner-clear'):
+                out.append(self._sk_sprite('spinner-clear', cx, local_y(144), a, scale=scale))
+            else:
+                self._glyph_run(out, 'CLEAR!', cx, local_y(144), PROMPT_TEXT_UI*self.cam.screen_h/768*scale, (1, 1, 1), a)
+        move = _clamp01((t-start+self.diff.time_fade_in)/max(self.diff.time_fade_in, 1e-9))
+        hide = 50*(1-move*(2-move))
+        if self._skinned('spinner-rpm'):
+            w, h = self.skin.size['spinner-rpm'];k = self.spin_k
+            out.append(Sprite(cx-87*window+w*k/2, local_y(445+hide)+h*k/2,
+                              w*k, h*k, 'sk_spinner-rpm', (1, 1, 1, alpha)))
+        self._legacy_spinner_text(out, str(int(track.rpm(t, capped=False))),
+                                  cx+80*window, local_y(448+hide), alpha, scale=0.9)
+        events = self._spinner_bonus.get(obj_id, ())
+        index = bisect.bisect_right([event[0] for event in events], t)-1
+        if index >= 0:
+            event_t, value, maximum = events[index]
+            state = legacy_bonus_popup_state(t-event_t, maximum)
+            if state is not None:
+                a, scale = state
+                self._legacy_spinner_text(out, str(value), cx, local_y(328),
+                                          a*alpha, scale=scale, centred=True)
 
     def _procedural_spinner_sprites(self, out: list[Sprite], cx: float,
                                     cy: float, rot: float,
@@ -3661,6 +3820,25 @@ class StdScene:
                                   additive=True))
         return out
 
+    def _draw_cursor_sprites(self, sprites: list[Sprite]) -> None:
+        """Preserve skin cursor painter order through GL and Metal batching.
+
+        Each backend sorts normal before additive inside a draw call. Submit
+        consecutive homogeneous passes so connected additive trail stays
+        below the normal cursor/middle. Wrappers have already applied BM/NS;
+        backend post transforms still run once on each sprite. Merge and fail
+        use this same boundary. Procedural/Argon retain their existing batch.
+        """
+        if not any(sp.texture_key == "sk_cursor" for sp in sprites):
+            self.spr.draw(sprites)
+            return
+        start = 0
+        for i in range(1, len(sprites)):
+            if sprites[i].additive != sprites[start].additive:
+                self.spr.draw(sprites[start:i])
+                start = i
+        self.spr.draw(sprites[start:])
+
     def _cursor_sprites(self, t: float) -> list[Sprite]:
         sprites = self._base_cursor_sprites(t)
         # BM (bloom): scale the cursor about its screen centre; NS (no scope):
@@ -3756,7 +3934,7 @@ class StdScene:
                 tw, th = sk.size["cursortrail"]
                 tw, th = tw * self.trail_scale, th * self.trail_scale
                 ox, oy = (0.0, 0.0) if centre else (tw * k / 2.0, th * k / 2.0)
-                if self.long_trail:            # cursormiddle present -> connected ribbon
+                if self.long_trail:            # same-provider middle / explicit override
                     _tp = self._merge_trail_cache.get(id(frames))
                     if _tp is None:
                         _pts = build_distance_trail(frames)
@@ -3766,14 +3944,14 @@ class StdScene:
                         sx, sy = self.cam.to_screen(x, y)
                         out.append(Sprite(sx + ox, sy + oy, tw * k, th * k,
                                           "sk_cursortrail", (*accent, 0.85 * strength),
-                                          additive=True))   # glowing trail (adds onto pixels below)
+                                          additive=True))
                 else:
                     for ti, strength in sparse_trail_times(t):
                         x, y, _ = cursor_at(frames, ti)
                         sx, sy = self.cam.to_screen(x, y)
                         out.append(Sprite(sx + ox, sy + oy, tw * k, th * k,
                                           "sk_cursortrail", (*accent, 0.85 * strength),
-                                          additive=True))   # glowing trail (adds onto pixels below)
+                                          additive=False))  # disjoint inherits normal blend
             x, y, keys = cursor_at(frames, t)
             sx, sy = self.cam.to_screen(x, y)
             cs = 0.75 if (keys & 0b1111) else 1.0
@@ -3867,8 +4045,8 @@ class StdScene:
         screen_h/768 × cursor_scale — NOT circle-tied). CursorCentre=0
         hangs the texture from the pointer (stable's top-left anchor).
 
-        Trail per the §3.3 two-mode rule (self.long_trail): cursormiddle
-        present (or ForceLongTrail) → LONG CONNECTED trail — cursortrail
+        Trail per the §3.3 two-mode rule (self.long_trail): same-provider
+        cursormiddle (or ForceLongTrail) → LONG CONNECTED additive trail,
         laid along the cursor path strictly by DISTANCE (the
         build_distance_trail resample: uniform spacing at any speed,
         uniform base alpha, age fade along the ribbon); else the classic
@@ -3900,7 +4078,7 @@ class StdScene:
                     out.append(Sprite(sx + ox, sy + oy, tw * k, th * k,
                                       "sk_cursortrail",
                                       (*tint, 0.85 * strength),
-                                      additive=True))
+                                      additive=False))
         x, y, _ = cursor_at(self.frames, t)
         sx, sy = self.cam.to_screen(x, y)
         cw, ch = sk.size["cursor"]

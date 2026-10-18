@@ -15,41 +15,30 @@ continuously — per-frame signed angle deltas around the spinner centre
 REQUIREMENT comes from required_rotations(), which mirrors the ruleset's
 engine-split judgment models (stable half-spin requirement / lazer
 SpinsRequired); the visual track sums raw |delta| without stable's
-velocity smoothing, so the metre can run a hair ahead of the judged
-scoring — noted cosmetic approximation. Between replay frames the
+velocity smoothing or lazer rate/reversal history. Metre/clear timing
+can therefore differ from judged progress in either direction; see the
+separate visual-progress audit. Between replay frames the
 rotation is lerped. Without a replay (--no-replay perfect play) the
 track auto-spins at the reference constant RPMS = 0.00795 rev/ms (§2.5)
 = 477 RPM, the stable auto-spin/display cap.
 
-Reference behaviors ported from lazer's legacy skins
-(osu.Game.Rulesets.Osu/Skinning/Legacy/):
-  LegacySpinner        SPRITE_SCALE = 0.625 — spinner textures are
-                       authored in the 1024×768 UI space; ×0.625 converts
-                       logical px to osu!px (666px circle → 416 osu!px).
-                       We centre on the playfield centre; lazer's small
-                       constant Y offsets (SPINNER_TOP_OFFSET family) are
-                       SKIPPED — noted approximation.
-  LegacyOldStyleSpinner   spinner-circle rotates with the accumulated
-                       rotation; spinner-metre reveals bottom-up in 10%
-                       BARS — getMetreHeight ports as metre_bar_count():
-                       progress capped at 99 (the metre only ever shows
-                       10/10 through the blink), the next bar BLINKS
-                       (lazer flips a coin per frame; we use a
-                       deterministic 30 ms square wave so renders are
-                       reproducible). skin.ini SpinnerNoBlink=1 → steady.
-                       Deviation: progress ≥ 1 pins a steady full metre
-                       in BOTH modes (a cleared spinner should not sit at
-                       9 bars under SpinnerNoBlink).
-  LegacyNewStyleSpinner   spinner-top and spinner-middle2 rotate with the
-                       full accumulated rotation, spinner-bottom at 1/3
-                       of it; spinner-glow is additive, GLOW_BLUE
-                       (3,151,255), alpha = spin progress; spinner-middle
-                       fades white→red over the spinner's DURATION
-                       (time-based, not progress).
-  approach circle      1.9 → 0.1 linearly over [start, end] (§2.5).
+Legacy-only source transforms (osu!lazer 8a94279090):
+  * Window-space 640x480, root Y=-8; child centre Y=248 cancels that offset.
+    Native .625 texture scale therefore draws logical pixels at height/768.
+  * Old background tint uses SpinnerBackground (default 100/100/100).
+    Disc precedes a TopLeft metre mask at local Y=29, fixed native height692.
+    SpinnerNoBlink leaves full ten bars steady; blinking caps at99%, including
+    after clear. The weighted deterministic duty cycle approximates native RNG.
+  * New top rotates half if middle2 resolves (even when blank); middle2 full,
+    bottom one-third of top. All five container sprites scale .8→1 OutQuad.
+    Fixed middle draws last and fades white→red over elapsed duration.
+  * Approach 1.86→.1, late fade-in start-TimeFadeIn, shared 240ms fade-out;
+    native cue/RPM/bonus anchors and source-relative texture/font scales.
 
-RPM: lazer's SpinnerSpmCalculator semantics — rotation rate over a
-trailing 595 ms window, in rev/min, displayed capped at 477.
+The raw visual track, clear/tick/bonus crossing times and trailing595ms RPM
+interpolation remain existing deterministic approximations. They do not adopt
+lazer's damped RotationTracker, history/rate handling or native result callbacks.
+Legacy RPM is uncapped; the Argon display retains its prior477 cap and helpers.
 
 HIT LIGHTING (§3.3): `lighting` (procedural: the soft radial `glow`
 texture), combo-colour-tinted, additive, spawned at the popup position of
@@ -110,11 +99,16 @@ COMMON_ELEMENTS = ("spinner-approachcircle", "spinner-clear", "spinner-spin",
                    "spinner-rpm")
 
 
-def detect_spinner_style(loaded: set[str]) -> str:
+def detect_spinner_style(loaded: set[str], background_source=None,
+                         top_source=None) -> str:
     """§3.3 auto-detect over the LOADED element set: "old" | "new" | "none"
     (`spinner-background` present wins even when new-style sprites also
-    exist — full skins commonly ship both)."""
-    if "spinner-background" in loaded:
+    exist — full skins commonly ship both). Higher-priority top providers beat a
+    lower-priority fallback background; other partial new assets retain R3D
+    compatibility rather than requiring a native complete body."""
+    if "spinner-background" in loaded and (
+            "spinner-top" not in loaded or background_source is None
+            or top_source is None or background_source >= top_source):
         return "old"
     if any(name in loaded for name in NEW_STYLE_ELEMENTS):
         return "new"
@@ -227,8 +221,9 @@ class SpinnerTrack:
             return 1.0
         return self._lerp(self.abs_rot, t) / self.required_rot
 
-    def rpm(self, t: float, window_ms: float = RPM_WINDOW_MS) -> float:
-        """Displayed RPM: rev/min over the trailing window, capped 477."""
+    def rpm(self, t: float, window_ms: float = RPM_WINDOW_MS, *,
+            capped: bool = True) -> float:
+        """Visual RPM over the trailing window; Argon keeps its477 cap."""
         t = min(max(t, self.start), self.end)
         t0 = max(t - window_ms, self.start)
         dt = t - t0
@@ -236,7 +231,7 @@ class SpinnerTrack:
             return 0.0
         dr = self._lerp(self.abs_rot, t) - self._lerp(self.abs_rot, t0)
         rpm = dr / (2.0 * math.pi) / dt * 60000.0
-        return min(rpm, float(RPM_DISPLAY_CAP))
+        return min(rpm, float(RPM_DISPLAY_CAP)) if capped else rpm
 
     def clear_time(self) -> float | None:
         """Map time the requirement is met (spinner-clear pops), or None."""
@@ -278,16 +273,76 @@ def spinner_approach_scale(t: float, start: float, end: float) -> float | None:
 
 
 def metre_bar_count(progress: float, no_blink: bool, t: float) -> int:
-    """LegacyOldStyleSpinner.getMetreHeight in bars (0..10): progress
-    capped at 99% → floor(p/10) full bars; the next bar blinks on a
-    deterministic 30 ms square wave unless SpinnerNoBlink. progress ≥ 1
-    pins a steady 10 (deviation noted in the module docstring)."""
-    if progress >= 1.0:
-        return 10
-    bars = int(min(max(progress, 0.0) * 100.0, 99.0) // 10)
-    if not no_blink and int(t // METRE_BLINK_PERIOD_MS) % 2 == 0:
-        bars = min(bars + 1, 10)
+    """Native ten bars, including 99%-capped blinking after completion.
+
+    Lazer uses a per-update Bernoulli draw weighted by the remaining percent.
+    A stateless ten-phase duty cycle retains that probability, not its RNG.
+    SpinnerNoBlink skips both blinking and the 99% cap.
+    """
+    percent = int(min(max(progress, 0.0), 1.0)*100)
+    if not no_blink:
+        percent = min(percent, 99)
+    bars = percent//10
+    if not no_blink and int(t//METRE_BLINK_PERIOD_MS) % 10 < percent % 10:
+        bars += 1
     return bars
+
+
+# Legacy-only source transforms. Argon keeps the earlier presentation helpers.
+LEGACY_FADE_OUT_MS = 240.0
+LEGACY_APPROACH_START = 1.86
+LEGACY_METRE_HEIGHT = 692.0          # native texture units, before .625
+
+
+def legacy_spinner_alpha(t, start, end, fade_in):
+    if t < start:
+        return max(0.0, min(1.0, (t-start+fade_in)/max(fade_in, 1e-9)))
+    return max(0.0, min(1.0, 1-(t-end)/LEGACY_FADE_OUT_MS))
+
+
+def legacy_approach_scale(t, start, end):
+    u = max(0.0, min(1.0, (t-start)/max(end-start, 1e-9)))
+    return LEGACY_APPROACH_START+(0.1-LEGACY_APPROACH_START)*u
+
+
+def legacy_spinner_scale(progress):
+    p = max(0.0, min(1.0, progress))
+    return 0.8+0.2*p*(2-p)          # framework Easing.Out = OutQuad
+
+
+def legacy_spin_prompt_alpha(t, start, end, fade_in, first_tick=None):
+    a = max(0.0, min(1.0, (t-start+fade_in/2)/max(fade_in/2, 1e-9)))
+    length = min(400.0, end-start)
+    a = min(a, max(0.0, min(1.0, (end-t)/max(length, 1e-9))))
+    if first_tick is not None and t >= first_tick:
+        a = min(a, max(0.0, 1-(t-first_tick)/300))
+    return a
+
+
+def legacy_clear_alpha_scale(t, clear_t, end):
+    if clear_t is None or t < clear_t:
+        return None
+    age = t-min(clear_t, end-400)
+    p = max(0.0, min(1.0, age/400))
+    alpha = p*(2-p)*max(0.0, min(1.0, (end-t)/50))
+    if age < 240:
+        u = max(0.0, age/240)
+        scale = 2-1.2*u*(2-u)
+    else:
+        scale = 0.8+0.2*min((age-240)/160, 1)
+    return alpha, scale
+
+
+def legacy_bonus_popup_state(age, is_max):
+    life = 500 if is_max else 800
+    if age < 0 or age >= life:
+        return None
+    alpha = (1-age/life)**2
+    duration = 1000 if is_max else 800
+    p = min(age/duration, 1);u = p*(2-p)
+    # Relative to the normal .625 glyph scale; MAX uses absolute 1.4→1.8.
+    scale = (1.4+0.4*u)/SPRITE_SCALE if is_max else 2-0.72*u
+    return alpha, scale
 
 
 def spin_prompt_alpha(t: float, start: float) -> float:

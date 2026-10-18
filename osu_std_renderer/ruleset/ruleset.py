@@ -96,6 +96,8 @@ from enum import Enum
 
 from ..beatmap.objects import Slider, Spinner
 from ..replay.replay import KEY_K1, KEY_K2, KEY_M1, KEY_M2, cursor_at
+from .slider_visual import SliderVisualEvent, SliderVisualGap, SliderVisualTimeline
+from .slider_chronological import SliderReplayInput, chronological_slider
 
 # --- constants (sources cited) -------------------------------------------------
 FOLLOW_CIRCLE_RADIUS_MULT = 2.4     # DrawableSliderBall.FOLLOW_AREA
@@ -362,9 +364,25 @@ class ObjectVerdict:
     slider_record: SliderRecord | None = None           # sliders only
     relabeled: bool = False             # reconcile changed the sim's tier
     quality: float = math.inf           # reconcile rank key (band-mapped)
+    # Raw observations and source-model events, frozen BEFORE reconciliation.
+    # Partial authority: see slider_visual.py; never infer missing callbacks.
+    slider_visuals: SliderVisualTimeline | None = None
 
     def tracked_at(self, t: float) -> bool:
         return any(t0 <= t <= t1 for t0, t1 in self.tracking)
+
+
+@dataclass(frozen=True)
+class AccuracyPoint:
+    """Presentation sample from the existing scoring lattice, not a native callback.
+
+    Tick/repeat/tail times and outcomes inherit the sim's source-model and
+    reconciliation limits. Only object MISS increments ordinary_misses.
+    """
+    time_ms: float
+    accuracy: float
+    ordinary_misses: int
+    kind: str
 
 
 @dataclass
@@ -390,6 +408,11 @@ class SimResult:
     # the HUD combo counter steps mid-slider and breaks at the REAL break
     # moment (not the next object judgment). Built alongside events.
     combo_timeline: list[tuple[float, int]] = field(default_factory=list)
+    # Immutable presentation-only accuracy/rank input. Popup events, scoring
+    # and judged outcomes retain their existing contract. The existing final
+    # accuracy pin wins from the last popup onward, including on slider ends.
+    accuracy_timeline: tuple[AccuracyPoint, ...] = ()
+    accuracy_source: str = "object-events"
 
     def verdict_for(self, obj) -> ObjectVerdict | None:
         return self.verdicts.get(id(obj))
@@ -442,6 +465,8 @@ class _ObjSim:
     # lazer: full spins achieved vs SpinsRequired)
     spin_req: int = 0
     spin_got: float = 0.0
+    visual_head_event: SliderVisualEvent | None = None
+    slider_visuals: SliderVisualTimeline | None = None
 
 
 # --- the ruleset -------------------------------------------------------------------
@@ -501,7 +526,9 @@ class StdRuleset:
     def run(self) -> SimResult:
         sims = self.simulate()
         sim_counts = self._tally(sims)
-        sim_events, sim_max_combo, sim_timeline = self._build_events(sims)
+        accuracy_points: list[AccuracyPoint] = []
+        sim_events, sim_max_combo, sim_timeline = self._build_events(
+            sims, accuracy_timeline=accuracy_points)
         relabeled = 0
         real_counts = None
         real_max_combo = None
@@ -539,10 +566,13 @@ class StdRuleset:
                 and sum(real_counts) == len(sims)):
             combo_reconciled = self._reconcile_max_combo(sims, real_max_combo)
         final_counts = self._tally(sims)
-        events, final_max_combo, timeline = (
-            self._build_events(sims)
-            if (relabeled or parts_reconciled or combo_reconciled)
-            else (sim_events, sim_max_combo, sim_timeline))
+        reconciled = bool(relabeled or parts_reconciled or combo_reconciled)
+        if reconciled:
+            accuracy_points.clear()
+            events, final_max_combo, timeline = self._build_events(
+                sims, accuracy_timeline=accuracy_points)
+        else:
+            events, final_max_combo, timeline = sim_events, sim_max_combo, sim_timeline
         verdicts = {id(s.obj): self._verdict(s) for s in sims}
         return SimResult(
             verdicts=verdicts, events=events,
@@ -555,6 +585,9 @@ class StdRuleset:
             classic=self.classic,
             detail_lines=self._detail_lines(sims),
             combo_timeline=timeline,
+            accuracy_timeline=tuple(accuracy_points),
+            accuracy_source=("reconciled-lattice" if reconciled else "derived-lattice")
+            if self.lazer else "object-events",
         )
 
     def _detail_lines(self, sims: list[_ObjSim]) -> list[str]:
@@ -592,16 +625,21 @@ class StdRuleset:
         sims = self._make_sims()
         clickables = [s for s in sims if s.kind != "spinner"]
         held = HeldState(self.frames)
+        visual_input = SliderReplayInput(self.frames)
 
         first_live = 0
-        for press in press_edges(self.frames):
+        for press_i, press in enumerate(press_edges(self.frames)):
             first_live = self._close_windows(clickables, first_live, press.time_ms)
-            self._route_click(sims, clickables, first_live, press)
+            self._route_click(sims, clickables, first_live, press,
+                              visual_input.press_frame_indices[press_i])
         self._close_windows(clickables, 0, math.inf)
 
         for s in sims:
             if s.kind == "slider":
                 self._evaluate_slider(s, held)
+                s.slider_visuals = chronological_slider(
+                    s.slider_visuals, visual_input, s.obj, self.diff, self.radius,
+                    self.hw.meh, s.visual_head_event)
             elif s.kind == "spinner":
                 self._evaluate_spinner(s)
             else:
@@ -651,7 +689,8 @@ class StdRuleset:
         return first_live
 
     def _route_click(self, sims: list[_ObjSim], clickables: list[_ObjSim],
-                     first_live: int, press: Press) -> None:
+                     first_live: int, press: Press,
+                     input_frame_index: int | None = None) -> None:
         """One click through stable notelock — LegacyHitPolicy.CheckHittable
         + DrawableHitCircle.CheckForResult(userTriggered)."""
         t = press.time_ms
@@ -704,6 +743,11 @@ class StdRuleset:
                     s2.head_judged = True
                     s2.head_hit = False
                     s2.deadline = min(s2.deadline, t)   # miss anchors here
+                    if s2.kind == "slider":
+                        s2.visual_head_event = SliderVisualEvent(
+                            t, 0, "head_judged", "click_routing", hit=False,
+                            part_index=0, part_kind="head", transform_time_ms=t,
+                            input_frame_index=input_frame_index)
         else:
             # LegacyHitPolicy (stable): a previous alive STACKED object that
             # is unjudged swallows the click entirely (ClickAction.Ignore).
@@ -733,6 +777,11 @@ class StdRuleset:
         target.head_result = result
         target.hit_time = t
         target.delta = delta
+        if target.kind == "slider":
+            target.visual_head_event = SliderVisualEvent(
+                t, 0, "head_judged", "click_routing", hit=True,
+                part_index=0, part_kind="head", transform_time_ms=t,
+                channel=press.channel, input_frame_index=input_frame_index)
 
     def _is_judged(self, s: _ObjSim, now: float) -> bool:
         if s.kind == "spinner":
@@ -772,6 +821,11 @@ class StdRuleset:
         tracking = False
         t_open: float | None = None
         outcomes: dict[int, bool] = {}
+        # Instrument the existing producer without changing its decisions or
+        # lattice. These observations are copied scalars, never PartOutcome
+        # references which reconciliation can later relabel.
+        visual_events = ([s.visual_head_event]
+                         if s.visual_head_event is not None else [])
         jp_i = 0
         for t in ts:
             cx, cy, _ = cursor_at(self.frames, t)
@@ -779,6 +833,11 @@ class StdRuleset:
             rr = r_keep if tracking else r_start
             in_area = (cx - bx) ** 2 + (cy - by) ** 2 <= rr * rr
             now_tracking = in_area and held.any_at(t)
+            if now_tracking != tracking and self.frames:
+                visual_events.append(SliderVisualEvent(
+                    t, len(visual_events),
+                    "tracking_on" if now_tracking else "tracking_off",
+                    "tracking_sample"))
             if now_tracking and not tracking:
                 t_open = t
             elif tracking and not now_tracking and t_open is not None:
@@ -787,12 +846,21 @@ class StdRuleset:
             tracking = now_tracking
             while jp_i < len(judge_pts) and judge_pts[jp_i][0] <= t:
                 outcomes[jp_i] = tracking
+                if self.frames:
+                    tp = judge_pts[jp_i][1]
+                    visual_events.append(SliderVisualEvent(
+                        t, len(visual_events), "part_sampled", "part_sample",
+                        hit=tracking, part_index=jp_i + 1,
+                        part_kind={"tick": "tick", "reverse": "repeat",
+                                   "last": "tail"}[tp.kind]))
                 jp_i += 1
         if tracking and t_open is not None:
             s.tracking.append((t_open, end))
         while jp_i < len(judge_pts):                # numeric stragglers
             outcomes[jp_i] = tracking
             jp_i += 1
+
+        s.slider_visuals = self._slider_visual_timeline(s, visual_events)
 
         # part list: head + ticks/repeats + tail (display times, not judge
         # times). The three miss kinds (owner-specified stable model):
@@ -821,6 +889,70 @@ class StdRuleset:
             s.final = (s.head_result if s.head_hit else JudgmentKind.MISS)
         else:
             s.final = _classic_slider_aggregate(s.parts)
+
+    def _slider_visual_timeline(self, s: _ObjSim,
+                               events: list[SliderVisualEvent],
+                               ) -> SliderVisualTimeline:
+        """Freeze raw facts and expose the missing source notification model.
+
+        SliderInputManager.TryJudgeNestedObject waits for HeadCircle.Judged,
+        delays a tail until prior ticks/repeats, and does not miss it early.
+        PostProcessHeadJudgement may judge passed parts BEFORE updating
+        tracking. DrawableSlider.CheckForResult supplies the parent boundary;
+        FollowCircle ignores tracking after that boundary. Our two-phase
+        simulator does not implement those callbacks, so no notification or
+        tail/end animation time is synthesised from the sampled part flags.
+        """
+        if not self.frames:
+            return SliderVisualTimeline(
+                status="unavailable", lazer=self.lazer, classic=self.classic,
+                unavailable=tuple(SliderVisualGap(kind, "no_replay_frames")
+                                  for kind in ("head_judged", "part_judged",
+                                               "slider_judged", "tracking",
+                                               "callback_order")))
+
+        # Phase 1 routes heads; phase 2 samples tracking before parts. Keep
+        # that raw order for time ties, explicitly NOT lazer callback order.
+        ordered = tuple(dataclasses.replace(event, sequence=i)
+                        for i, event in enumerate(sorted(
+                            events, key=lambda event: (event.time_ms,
+                                                       event.sequence))))
+        gaps = [
+            SliderVisualGap("slider_judged", "parent_notification_not_simulated"),
+            SliderVisualGap("tracking", "parent_judged_guard_not_simulated"),
+            SliderVisualGap("tracking", "post_end_tracking_not_simulated"),
+            SliderVisualGap("tracking", "pre_start_tracking_not_simulated"),
+            SliderVisualGap("tracking", "tracking_action_restriction_not_simulated"),
+            SliderVisualGap("tracking", "between_sample_edges_not_observed"),
+            SliderVisualGap("callback_order", "drawable_callback_order_not_simulated"),
+        ]
+        if s.visual_head_event is None:
+            # _close_windows runs only before presses and at infinity. The
+            # scoring deadline is not an observed finite notification time.
+            gaps.append(SliderVisualGap(
+                "head_judged", "head_window_notification_not_simulated", 0))
+        for event in ordered:
+            if event.kind != "part_sampled":
+                continue
+            head_time = (s.visual_head_event.time_ms
+                         if s.visual_head_event is not None else s.deadline)
+            if event.time_ms < head_time or (s.visual_head_event is None
+                                            and event.time_ms == head_time):
+                reason = "head_pending_at_sample"
+            elif event.part_kind == "tail":
+                reason = "tail_notification_and_anchor_not_simulated"
+            else:
+                reason = "nested_notification_not_simulated"
+            gaps.append(SliderVisualGap("part_judged", reason, event.part_index))
+        sampled_indices = {event.part_index for event in ordered
+                           if event.kind == "part_sampled"}
+        gaps.extend(SliderVisualGap("part_judged", "part_sample_time_unavailable", i)
+                    for i in range(1, len(s.obj.score_points) + 1)
+                    if i not in sampled_indices)
+        return SliderVisualTimeline(
+            status="partial", lazer=self.lazer, classic=self.classic,
+            events=ordered, unavailable=tuple(gaps),
+            tracking_sample_end_ms=s.end, sampling_step_ms=1.0)
 
     # ---- phase 3: spinners (stable + lazer ports) --------------------------------------
 
@@ -1655,6 +1787,7 @@ class StdRuleset:
 
     def _build_events(
             self, sims: list[_ObjSim],
+            *, accuracy_timeline: list[AccuracyPoint] | None = None,
     ) -> tuple[list[JudgmentEvent], int, list[tuple[float, int]]]:
         """Combo (stable semantics), accuracy and lazer-standardised score
         over the full event lattice; emits one JudgmentEvent per OBJECT
@@ -1712,6 +1845,7 @@ class StdRuleset:
         # replay's numbers are float-identical to the pre-split code.
         acc_num = 0.0
         acc_den = 0.0
+        ordinary_misses = 0
         for t, kind, is_obj, s, b, bmax, mode, hit, part_kind in lattice:
             cur_base += b
             cur_max_base += bmax
@@ -1722,6 +1856,9 @@ class StdRuleset:
                 if hit:
                     acc_num += w
                 acc_den += w
+                if accuracy_timeline is not None:
+                    accuracy_timeline.append(AccuracyPoint(
+                        t, acc_num / acc_den, ordinary_misses, part_kind))
             if mode != "none":
                 if hit:
                     combo += 1
@@ -1736,6 +1873,7 @@ class StdRuleset:
                 continue
             obj_n += 1
             obj_base += BASE_SCORE[kind.value]
+            ordinary_misses += kind is JudgmentKind.MISS
             if self.lazer:
                 # lazer: the object judgment joins the tick/tail terms
                 # (ScoreProcessor uses THIS accuracy in the score formula
@@ -1743,6 +1881,9 @@ class StdRuleset:
                 acc_num += BASE_SCORE[kind.value]
                 acc_den += 300.0
                 acc = acc_num / acc_den if acc_den > 0 else 1.0
+                if accuracy_timeline is not None:
+                    accuracy_timeline.append(AccuracyPoint(
+                        t, acc, ordinary_misses, "object"))
             else:
                 acc = obj_base / (300.0 * obj_n)
             if max_combo_portion > 0 and max_base_total > 0:
@@ -1780,6 +1921,17 @@ class StdRuleset:
             if final is not None:
                 events[-1] = dataclasses.replace(events[-1],
                                                  acc_after=final)
+                if accuracy_timeline is not None:
+                    # Preserve the established LAST-POPUP presentation pin.
+                    # Do not let later tail samples overwrite it or pretend
+                    # canonical ScoreInfo provides their native timestamps.
+                    last = events[-1].time_ms
+                    accuracy_timeline[:] = [p for p in accuracy_timeline
+                                            if p.time_ms < last]
+                    source = ("canonical-final-pin" if self.do_reconcile
+                              and canonical is not None else "lattice-final-pin")
+                    accuracy_timeline.append(AccuracyPoint(
+                        last, final, ordinary_misses, source))
         return events, max_combo, timeline
 
     def _popup_pos(self, s: _ObjSim) -> tuple[float, float]:
@@ -1800,7 +1952,7 @@ class StdRuleset:
             pos=s.pos, popup_pos=self._popup_pos(s), hit_time=s.hit_time,
             delta=s.delta, deadline=s.deadline, parts=s.parts,
             tracking=s.tracking, breaks=s.breaks, slider_record=record,
-            quality=s.quality)
+            quality=s.quality, slider_visuals=s.slider_visuals)
 
 
 def _classic_slider_aggregate(parts: list[PartOutcome]) -> JudgmentKind:

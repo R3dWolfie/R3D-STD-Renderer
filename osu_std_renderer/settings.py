@@ -285,9 +285,8 @@ class StdRenderSettings:
     # LEGACY sound family instead of the Argon one. Gameplay elements
     # already fall back skin-else-legacy in every mode, so this only
     # moves the HUD component league + the synth hitsound bank.
-    # PRECEDENCE: renderer_default_font_and_ranks WINS over
-    # legacy_defaults when both are set — numbers/ranks go
-    # Argon/procedural, everything else stays legacy.
+    # PRECEDENCE: renderer_default_font_and_ranks overrides glyph/rank
+    # appearance only. The selected layout and skin metrics stay Legacy.
     legacy_defaults: bool = False
     # subtle white playfield-bounds outline: "none" | "edges" | "full"
     playfield_borders: str = "none"

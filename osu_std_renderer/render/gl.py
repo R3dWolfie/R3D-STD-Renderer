@@ -897,6 +897,12 @@ class SpriteRenderer:
         self.fbo.use()
         self.ctx.clear(*clear)
 
+    def draw_hit_error_meter(self, state, opacity=1.0) -> None:
+        from .hit_error_painter import HitErrorMeterPainter
+        if not hasattr(self, '_hit_error_painter'):
+            self._hit_error_painter = HitErrorMeterPainter(self)
+        self._hit_error_painter.draw(state, opacity)
+
     def draw(self, sprites: list[Sprite]) -> None:
         with perf.T("gl_sprites_draw"):
             perf.count("sprites", len(sprites))
@@ -1383,6 +1389,8 @@ class SpriteRenderer:
             return np.flipud(arr)  # moderngl reads bottom-left origin
 
     def release(self) -> None:
+        if hasattr(self, '_hit_error_painter'):
+            self._hit_error_painter.release()
         try:
             self.ctx.release()
         except Exception:  # noqa: BLE001

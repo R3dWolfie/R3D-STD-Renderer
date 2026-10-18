@@ -1,5 +1,6 @@
 # venv / python
 .venv/
+.dashboard-venv/
 venv/
 __pycache__/
 *.pyc
@@ -18,6 +19,8 @@ __pycache__/
 *.mp4
 *-skin/
 test-data/
+test-render/
+local-web-renders/
 
 # Bundled osu! DEFAULT nightcore drums are a SHIPPED asset (final fallback for
 # the NC-mod beat overlay), not test output — keep them tracked despite *.wav.
@@ -34,3 +37,10 @@ test-data/
 
 # R3D logo — license-clean own IP; keep it in-repo so clones do not fall back to the placeholder tile
 !osu_std_renderer/assets/logo.png
+
+# Canonical HEM icons ported from the owner's R3D Mania implementation.
+!osu_std_renderer/assets/hud/hit-error-meter/hare.png
+!osu_std_renderer/assets/hud/hit-error-meter/tortoise.png
+
+# Original osu!resources mod symbols/backings (attribution beside the assets).
+!osu_std_renderer/assets/hud/mod-icons/*.png
