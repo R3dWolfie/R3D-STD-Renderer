@@ -15,6 +15,8 @@ _FFMPEG_DEMUXERS = {
     ".aac": "aac", ".flac": "flac", ".m4a": "mov", ".mkv": "matroska",
     ".mp3": "mp3", ".mp4": "mov", ".ogg": "ogg", ".opus": "ogg",
     ".wav": "wav", ".webm": "matroska",
+    ".avi": "avi",
+    ".flv": "flv",
 }
 
 
@@ -40,6 +42,8 @@ def bounded_lzma_decompress(
             raise ValueError("LZMA payload exceeds replay output limit")
         chunks.append(chunk)
         if decoder.eof:
+            if decoder.unused_data:
+                raise ValueError("trailing compressed data after LZMA stream")
             return b"".join(chunks)
         if decoder.needs_input:
             raise lzma.LZMAError("truncated LZMA payload")
@@ -99,9 +103,17 @@ def validate_replay_payload(path: Path) -> None:
 
 
 def ffmpeg_file_input_args(path: Path) -> list[str]:
-    """Arguments for a local uploaded-media input, never a network protocol."""
-    args = ["-protocol_whitelist", "file"]
-    demuxer = _FFMPEG_DEMUXERS.get(Path(path).suffix.lower())
-    if demuxer:
-        args += ["-f", demuxer]
-    return [*args, "-i", str(path)]
+    """Allow only explicitly supported local media formats."""
+    path = Path(path)
+    demuxer = _FFMPEG_DEMUXERS.get(path.suffix.lower())
+
+    if demuxer is None:
+        raise ValueError(
+            f"Unsupported FFmpeg media extension: {path.suffix or '(none)'}"
+        )
+
+    return [
+        "-protocol_whitelist", "file",
+        "-f", demuxer,
+        "-i", str(path),
+    ]

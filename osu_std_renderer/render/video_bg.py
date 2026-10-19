@@ -66,15 +66,18 @@ class VideoBackground:
         # frame N once the video has started (at 1× rate).
         vf = (f"scale={width}:{height}:force_original_aspect_ratio=increase,"
               f"crop={width}:{height},fps={self.fps},format=rgba")
-        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error",
-               *ffmpeg_file_input_args(path), "-an", "-sn", "-vf", vf,
-               "-f", "rawvideo", "-pix_fmt", "rgba", "-"]
+
         try:
+            cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error",
+                   *ffmpeg_file_input_args(path), "-an", "-sn", "-vf", vf,
+                   "-f", "rawvideo", "-pix_fmt", "rgba", "-"]
+
             self._proc = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL, bufsize=0)
-        except OSError as e:
-            print(f"WARNING: video decode spawn failed ({e}) — static "
+
+        except (OSError, ValueError) as e:
+            print(f"WARNING: background video unavailable ({e}) — static "
                   "background", file=sys.stderr)
             self._proc = None
             self._failed = True
