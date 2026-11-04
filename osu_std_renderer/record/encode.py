@@ -26,6 +26,7 @@ from pathlib import Path
 
 from ..render import perf
 from ..security import ffmpeg_file_input_args
+from .. import av1 as _av1
 
 LOUDNORM = "loudnorm=I=-18:TP=-1.5:LRA=11"
 
@@ -95,6 +96,14 @@ def probe_encoder(encoder: str = "auto", device: str | None = None) -> str:
     Explicit choices stay explicit. Hardware must successfully encode a frame
     on this machine, using the same VAAPI device as the actual render.
     """
+    if _av1.is_request(encoder):
+        # AV1 master (opt-in: --encoder av1 / av1_vaapi / av1_nvenc / av1_amf /
+        # av1_qsv, or R3D_ENCODER=av1). The `av1` auto selector REAL-probes the
+        # hardware AV1 backends (128x128 test-encode confirmed codec_name=av1)
+        # and fails closed if none works; an explicit av1_* backend is confirmed
+        # on the selected device. Never silently falls back to H.264/CPU (av1.py).
+        enc, _dev = _av1.resolve_encoder(encoder, device)
+        return enc
     if encoder != "auto":
         return encoder
     ffmpeg = shutil.which("ffmpeg")
@@ -438,7 +447,11 @@ def build_ffmpeg_cmd(*, encoder: str, resolution: tuple[int, int], fps: int,
     `preview_on_media_engine()`) encodes that preview with VideoToolbox
     instead of libx264; the master's arguments are the same either way."""
     w, h = resolution
-    is_vaapi = encoder == "h264_vaapi"
+    is_av1 = _av1.is_explicit(encoder)
+    # av1_vaapi needs the same DRM device + nv12,hwupload surface path as
+    # h264_vaapi; av1_nvenc/av1_amf/av1_qsv take system frames like the H.264
+    # encoders (their own -pix_fmt comes from av1.master_video_args).
+    is_vaapi = encoder == "h264_vaapi" or _av1.needs_vaapi_upload(encoder)
     cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"]
     if is_vaapi:
         # VAAPI needs the DRM render node initialised before the encoder and the
@@ -467,7 +480,19 @@ def build_ffmpeg_cmd(*, encoder: str, resolution: tuple[int, int], fps: int,
     # video codec args are collected in `vc` (appended below) so the
     # two-output preview command can place them after its own -map.
     vc: list[str] = ["-c:v", encoder]
-    if encoder == "libx264":
+    if is_av1:
+        # per-backend AV1 master recipe (av1.py — the SAME module catch ships,
+        # so the AV1 encode recipe cannot drift between engines). It emits its
+        # own "-vf format=nv12,hwupload" for vaapi; std builds its own vflip vf
+        # (_vf) + _vm_tail, so drop that leading -vf and let _vm_tail carry the
+        # surface upload (vflip,format=nv12,hwupload stays correct on the master
+        # branch, including the inline-preview filtergraph below).
+        _va = _av1.master_video_args(encoder, w=w, h=h, fps=fps,
+                                     video_bitrate=video_bitrate)
+        if _va[:2] == ["-vf", "format=nv12,hwupload"]:
+            _va = _va[2:]
+        vc = _va
+    elif encoder == "libx264":
         if video_bitrate:
             _vb = int(video_bitrate)
             vc += ["-b:v", str(_vb), "-maxrate", str(int(_vb * 1.5)),
@@ -491,9 +516,10 @@ def build_ffmpeg_cmd(*, encoder: str, resolution: tuple[int, int], fps: int,
                 "-bufsize", str(_vb * 2)]
     elif video_bitrate:
         vc += ["-b:v", str(video_bitrate)]
-    if not is_vaapi:
+    if not is_vaapi and not is_av1:
         # VAAPI output pixel format is set by the hwupload filtergraph (nv12 on a
         # GPU surface); forcing -pix_fmt yuv420p here conflicts with the encoder.
+        # AV1 backends carry their own -pix_fmt (nv12/yuv420p) from av1.py.
         vc += ["-pix_fmt", "yuv420p"]
     af: list[str] = []
     acodec: list[str] = []

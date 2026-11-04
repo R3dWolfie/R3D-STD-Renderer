@@ -156,7 +156,8 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--resolution", type=_resolution, default=(1920, 1080))
     ap.add_argument("--fps", type=int, default=60)
     ap.add_argument("--encoder", default="auto",
-                    help="auto | h264_nvenc | h264_vaapi | libx264")
+                    help="auto | h264_nvenc | h264_vaapi | libx264 | "
+                         "av1 | av1_vaapi | av1_nvenc | av1_qsv | av1_amf")
     ap.add_argument("--encoder-device", default=None)
     ap.add_argument("--video-bitrate", type=_bitrate, default=None,
                     help="override the auto resolution-scaled bitrate, e.g. "
