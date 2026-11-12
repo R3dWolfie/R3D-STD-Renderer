@@ -2472,7 +2472,7 @@ class StdScene:
         k_ui = self.cam.screen_h / 1080.0
         d = LOGO_UI_SIZE * k_ui * logo_scale(t, self.logo_start_ms)
         cx = self.cam.screen_w / 2.0
-        cy = self.cam.screen_h * 0.44
+        cy = self.cam.screen_h * 0.5
         self.spr.draw([
             Sprite(cx, cy, d * 1.9, d * 1.9, "glow",
                    (0.95, 0.28, 0.30, 0.45 * la), additive=True),
