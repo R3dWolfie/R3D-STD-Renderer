@@ -7,7 +7,7 @@ import math
 
 from osu_std_renderer.render.slider_body import (
     BASE_BORDER_PORTION, MAX_BORDER_PORTION, SHADOW_PORTION,
-    BodyStyle, border_portion, shade2, sub_path,
+    BodyStyle, border_portion, legacy_body_style, shade2, sub_path,
 )
 
 
@@ -107,3 +107,20 @@ def test_gpu_distance_field_and_union():
     finally:
         r.release()
         ctx.release()
+
+
+def test_legacy_body_gradient_matches_viewer_without_changing_default_style():
+    track = (30 / 255, 30 / 255, 41 / 255)
+    border = (85 / 255, 84 / 255, 102 / 255)
+    style = legacy_body_style(track, border)
+    assert style.body_color == track and style.border_color == border
+    assert style.inner_alpha == style.outer_alpha == 0.7
+    inner = shade2(track, style.inner_offset)
+    outer = shade2(track, style.outer_offset)
+    for value, inside, outside in zip(track, inner, outer):
+        assert abs(inside - min(1, value * 1.125 + 0.25)) < 1e-9
+        assert abs(outside - value / 1.1) < 1e-9
+    # Existing Argon/Traceable paths and callers retain their own defaults.
+    assert BodyStyle().inner_offset == 0.1
+    assert BodyStyle().outer_offset == -0.5
+    assert style.border_width == BodyStyle().border_width
