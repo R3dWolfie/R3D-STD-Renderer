@@ -99,7 +99,7 @@ def probe_encoder(encoder: str = "auto", device: str | None = None) -> str:
     if _av1.is_request(encoder):
         # AV1 master (opt-in: --encoder av1 / av1_vaapi / av1_nvenc / av1_amf /
         # av1_qsv, or R3D_ENCODER=av1). The `av1` auto selector REAL-probes the
-        # hardware AV1 backends (128x128 test-encode confirmed codec_name=av1)
+        # hardware AV1 backends (320x240 test-encode confirmed codec_name=av1)
         # and fails closed if none works; an explicit av1_* backend is confirmed
         # on the selected device. Never silently falls back to H.264/CPU (av1.py).
         enc, _dev = _av1.resolve_encoder(encoder, device)

@@ -627,3 +627,31 @@ def test_sub_path_curves_overlap_tiny_and_ball_endpoint_coordinates():
     # geometry function directly for degenerate/duplicate polylines.
     for points in ([(256, 192)], [(256, 192), (256, 192)], []):
         assert sub_path(points, .2, .8) == points[:1]
+
+
+def test_legacy_gradient_applies_in_both_body_modes_without_touching_argon():
+    class StyleBodies(Bodies):
+        def __init__(self):
+            super().__init__()
+            self.styles = []
+        def build_body(self, points, radius, style, snake):
+            self.styles.append(style)
+            return super().build_body(points, radius, style, snake)
+        def build_merged(self, items, radius, style):
+            self.styles.append(style)
+            return super().build_merged(items, radius, style)
+
+    for merge in (False, True):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'skin.ini').write_text('[General]\nName: Legacy gradient test\nVersion: 2.5\n')
+            spy = StyleBodies()
+            scene, renderer = _scene(skin_dir=root, bodies=spy, merge=merge)
+            try:
+                scene.frame_rgb(1150)
+                assert spy.styles
+                for style in spy.styles:
+                    assert style.inner_offset == 0.5 and style.outer_offset == -0.1
+                    assert style.inner_alpha == style.outer_alpha == 0.7
+            finally:
+                renderer.release()

@@ -41,6 +41,7 @@ MODULES = [
     # settings-surface phase (2026-07)
     "tests.test_settings",
     "tests.test_encode",
+    "tests.test_av1_probe",
     "tests.test_effects",
     "tests.test_nightcore",
     "tests.test_pp",

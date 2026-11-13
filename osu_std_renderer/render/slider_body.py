@@ -150,6 +150,17 @@ class BodyStyle:
     alpha: float = 1.0            # object fade (multiplies everything)
 
 
+def legacy_body_style(body_color, border_color) -> BodyStyle:
+    """LegacySliderBody colour endpoints, as used by theaussie.main's viewer.
+
+    Keep the full-radius linear blend in the GPU shader. These values are
+    legacy-only: do not change Argon, Traceable, geometry or shadow styling.
+    """
+    return BodyStyle(body_color=body_color, border_color=border_color,
+                     inner_offset=0.5, outer_offset=-0.1,
+                     inner_alpha=0.7, outer_alpha=0.7)
+
+
 @dataclass
 class BodyTexture:
     """A built slider body: shaded RGBA texture (screen-sized, straight

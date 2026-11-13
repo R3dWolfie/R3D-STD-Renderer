@@ -217,7 +217,7 @@ from .markers import (arrow_alpha_scale, arrow_pulse, arrow_rotation,
                       tick_alpha_scale, tick_schedule)
 from .skin_elements import (FOLLOW_CIRCLE_SCALE, CURSOR_UI_HEIGHT,
                             circle_pixel_scale, layout_skin_digits)
-from .slider_body import DEFAULT_COMBO_COLORS, BodyStyle, sub_path
+from .slider_body import DEFAULT_COMBO_COLORS, BodyStyle, legacy_body_style, sub_path
 from .textures import ARGON_DIGIT_CAP_SCALE, ARGON_GLYPH_CAP_SCALE, LEGACY_FONT_HEIGHT
 from .spinner import (CLEAR_OFFSET_OSU, GLOW_BLUE, SPIN_OFFSET_OSU,
                       SPINNER_CENTRE, SPRITE_SCALE, SpinnerTrack,
@@ -2539,6 +2539,8 @@ class StdScene:
         if self.traceable:
             style = BodyStyle(body_color=color, border_color=border,
                               inner_alpha=0.0, outer_alpha=0.0)
+        elif self.skin is not None:
+            style = legacy_body_style(color, border)
         else:
             style = BodyStyle(body_color=color, border_color=border)
         body = self.bodies.build_merged(items, self.radius_px, style)
@@ -2919,8 +2921,7 @@ class StdScene:
                                  else color)   # skin.ini SliderTrackOverride
                     body = self.bodies.build_body(
                         body_pts, self.radius_px,
-                        BodyStyle(body_color=body_base,
-                                  border_color=self.border_color),
+                        legacy_body_style(body_base, self.border_color),
                         snake=(snake_a, snake))
                     self.bodies.draw_body(body, self.spr.fbo,
                                           alpha=b_alpha * body_fade)
